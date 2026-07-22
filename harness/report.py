@@ -497,6 +497,9 @@ a { color:var(--accent); text-decoration:none; }
 a:hover { text-decoration:underline; }
 h1 { font-size:21px; font-weight:650; letter-spacing:-.01em; margin:0; }
 .sub { color:var(--muted); font-size:12.5px; margin-top:4px; }
+.reflink { display:inline-block; margin-left:10px; padding:1px 7px; border-radius:10px;
+  border:1px solid var(--border); font-size:11.5px; text-decoration:none; white-space:nowrap; }
+.reflink:hover { border-color:var(--accent); color:var(--accent); }
 .topbar { display:flex; align-items:baseline; justify-content:space-between;
   gap:16px; flex-wrap:wrap; margin-bottom:22px; }
 .nav a { margin-left:16px; font-size:13px; }
@@ -2653,7 +2656,9 @@ MODEL_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="topbar">
   <div><h1>{{ model }}</h1>
   <div class="sub">{{ where }} · {{ dataset_label or "live dataset" }} ·
-  aggregated result per task across {{ n_runs }} run(s)</div></div>
+  aggregated result per task across {{ n_runs }} run(s)
+  {% for l in model_links %}<a class="reflink" href="{{ l.url }}" target="_blank"
+    rel="noopener">{{ l.short }}</a>{% endfor %}</div></div>
   <div class="nav">{{ nav }}</div>
 </div>
 
@@ -2667,11 +2672,6 @@ MODEL_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 {% for d in detail_rows %}
 <tr><td class="small" style="width:230px;color:var(--muted)">{{ d.k }}</td><td>{{ d.v }}</td></tr>
 {% endfor %}
-{% if model_links %}
-<tr><td class="small" style="color:var(--muted)">Reference</td><td>
-{% for l in model_links %}<a href="{{ l.url }}" target="_blank" rel="noopener" style="margin-right:14px">{{ l.label }}</a>{% endfor %}
-</td></tr>
-{% endif %}
 </table></div>
 {% endif %}
 
@@ -2807,6 +2807,15 @@ def _effort_label(e: dict) -> str:
     return f"1 + {retries} retr" + ("y" if retries == 1 else "ies")
 
 
+_LINK_SHORT = {"Hugging Face ↗": "HF ↗"}
+
+
+def _with_short(links: list[dict]) -> list[dict]:
+    for l in links:
+        l["short"] = _LINK_SHORT.get(l["label"], l["label"])
+    return links
+
+
 def _model_links(mo) -> list[dict]:
     """External reference links for a model — Hugging Face for local weights,
     OpenRouter for gateway-served models. Direct when the id is a clean repo
@@ -2823,11 +2832,14 @@ def _model_links(mo) -> list[dict]:
         else:
             out.append({"label": "Hugging Face ↗",
                         "url": f"https://huggingface.co/models?search={quote(name)}"})
+        out.append({"label": "OpenRouter ↗",
+                    "url": f"https://openrouter.ai/models?q={quote(name)}"})
     else:
         base = (mo.base_url or "").lower()
         if "anthropic" in base or mo.provider == "claude-cli":
-            return [{"label": "Anthropic ↗",
-                     "url": "https://docs.anthropic.com/en/docs/about-claude/models"}]
+            return _with_short([{
+                "label": "Anthropic ↗",
+                "url": "https://docs.anthropic.com/en/docs/about-claude/models"}])
         if "openrouter" in base and mid.count("/") >= 1:
             out.append({"label": "OpenRouter ↗", "url": f"https://openrouter.ai/{mid}"})
         else:
@@ -2835,7 +2847,7 @@ def _model_links(mo) -> list[dict]:
                         "url": f"https://openrouter.ai/models?q={quote(name)}"})
         out.append({"label": "Hugging Face ↗",
                     "url": f"https://huggingface.co/models?search={quote(name)}"})
-    return out
+    return _with_short(out)
 
 
 def _model_detail_rows(mo, mi: dict, fp, hosts: list) -> list[dict]:
