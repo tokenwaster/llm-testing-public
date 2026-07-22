@@ -19,7 +19,7 @@ from . import config, report
 
 _CONTROL_PATHS = {"/run", "/run/", "/watch", "/watch/", "/backend", "/backend/",
                   "/manage", "/manage/", "/families-edit", "/families-edit/",
-                  "/organize"}
+                  "/organize", "/review", "/review/"}
 
 _CONTROL_STUB = ("""<!doctype html><meta charset="utf-8">
 <title>operator-only</title>
@@ -72,8 +72,13 @@ class Handler(BaseHTTPRequestHandler):
         workspace (so a generated app.html opens live in a tab)."""
         from urllib.parse import quote, unquote
         rel = unquote(rel).strip("/")
-        root = config.RUNS_DIR.resolve()
-        target = (config.RUNS_DIR / rel).resolve() if rel else root
+        resolved = config.resolve_run_data(rel)
+        if resolved is None:
+            self._send(404, b"not found")
+            return
+        base, rel = resolved
+        root = base.resolve()
+        target = (base / rel).resolve() if rel else root
         if not str(target).startswith(str(root)):
             self._send(404, b"not found")
             return

@@ -75,6 +75,27 @@ RUNS_DIR = ROOT / "runs"
 SCOUTS_DIR = ROOT / "scouts"
 REPORTS_DIR = ROOT / "reports"
 
+
+def resolve_run_data(rel: str):
+    """Map a /data/<run-id>/… browse path to the runs root that actually holds
+    it: live runs/ first, then archive/<ver>/runs/.
+
+    Archived-dataset report pages link to /data for their own runs, but those
+    live under archive/<ver>/runs, not the live runs/. Resolving only against the
+    live tree 404s every one of those links. The run id (first path segment) is a
+    timestamp and unique across versions, so the correct root is unambiguous.
+    Returns (root, cleaned_rel) or None if no tree owns that run id.
+    """
+    rel = (rel or "").strip("/")
+    first = rel.split("/", 1)[0] if rel else ""
+    if not first or (RUNS_DIR / first).exists():
+        return RUNS_DIR, rel
+    for runs_root in sorted(ARCHIVE_DIR.glob("*/runs")):
+        if (runs_root / first).exists():
+            return runs_root, rel
+    return None
+
+
 DEFAULT_REQUEST_TIMEOUT_S = 180
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_TOKENS = 4096

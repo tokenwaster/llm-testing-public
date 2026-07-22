@@ -880,7 +880,7 @@ RUN_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <tr><th>Task</th><th>Category</th>
 {% for m in models %}<th class="num">{{ m }}</th>{% endfor %}</tr>
 {% for row in grid %}
-<tr><td class="model"><a href="../tasks/{{ row.task }}.html">{{ row.task }}</a></td>
+<tr><td class="model">{% if row.linked %}<a href="../tasks/{{ row.task }}.html">{{ row.task }}</a>{% else %}{{ row.task }}{% endif %}</td>
 <td class="small">{{ row.cat }} · tier {{ row.tier }}</td>
 {% for c in row.cells %}<td class="num">{{ c.chip }}<div class="small">{{ c.time }}{% if c.tok %} · {{ c.tok }}{% endif %}</div></td>{% endfor %}
 </tr>
@@ -2608,7 +2608,8 @@ def build_run_report(run: dict, tdefs: dict | None = None) -> str:
             cells.append({"chip": score_chip(r["score"]),
                           "time": fmt_ms(r["wall_ms"]), "tok": tok})
         grid.append({"task": task_id, "cat": info["cat"], "tier": info["tier"],
-                     "cells": cells})
+                     "cells": cells,
+                     "linked": task_id in tdefs})
 
     details = []
     for r in sorted(run["results"], key=lambda x: (x["model"], x["task"])):
@@ -3976,7 +3977,7 @@ did on it, side by side, with their verbatim output.</p>
 <table><thead><tr><th>Task</th><th>Title</th><th>Category</th>
 <th>Tier</th><th>Lane</th></tr></thead><tbody>
 {% for t in tasks %}
-<tr><td><a href="/tasks/{{ t.id }}.html"><code>{{ t.id }}</code></a></td>
+<tr><td><a href="tasks/{{ t.id }}.html"><code>{{ t.id }}</code></a></td>
 <td>{{ t.title }}</td><td class="small">{{ t.category }}</td>
 <td class="small">{{ t.tier }}</td><td class="small"><code>{{ t.lane }}</code></td></tr>
 {% endfor %}
