@@ -4,7 +4,7 @@
     python -m harness add claude [alias]       # register Claude via CLI (no API key)
     python -m harness list                     # show models & tasks
     python -m harness run [--models a,b] [--tasks pat] [--tier N] [--tag note]
-    python -m harness serve [--port 8765]      # results site + run control panel
+    python -m harness serve [--port N]         # results site + run control panel
     python -m harness report                   # regenerate static HTML only
 """
 
@@ -87,14 +87,15 @@ def cmd_run(args) -> int:
             run_dir = run_suite(models, tasks, tag=tag)
     index = report.generate_all()
     print(f"\nRun complete: {run_dir}")
-    print(f"View results: python -m harness serve   ->  http://127.0.0.1:8765")
+    print(f"View results: python -m harness serve   ->  "
+          f"http://127.0.0.1:{config.serve_port()}")
     print(f"(static files: {index})")
     return 0
 
 
 def _resolve_serve_port(args) -> int:
     """CLI --port wins for this run; with --save it becomes the persisted
-    default; with neither, use the saved default (else 8765). Shared by the
+    default; with neither, use the saved default (else this build's). Shared by the
     public viewer and the operator control server."""
     if args.port is not None:
         if getattr(args, "save", False):
@@ -210,7 +211,8 @@ def main() -> int:
             "  harness add lmstudio          register every model LM Studio serves\n"
             "  harness add claude opus       register a Claude model (via the CLI)\n"
             "  harness run                   run all enabled models x all tasks\n"
-            "  harness serve                 open the results site (default port 8765)\n"
+            f"  harness serve                 open the results site "
+            f"(default port {config.default_serve_port()})\n"
             "  harness serve --port N --save set a different port as the default\n"
             "\n"
             "Every subcommand has its own flags - see `harness <command> --help` "
@@ -279,7 +281,8 @@ def main() -> int:
     psv = sub.add_parser("serve",
                          help="results website (read-only viewer); --port / --save")
     psv.add_argument("--port", type=int, default=None,
-                     help="port to serve on (default: saved port, else 8765)")
+                     help="port to serve on (default: saved port, else "
+                          f"{config.default_serve_port()})")
     psv.add_argument("--save", action="store_true",
                      help="persist this --port as the default (settings.local.json)")
 

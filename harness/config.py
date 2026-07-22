@@ -8,7 +8,17 @@ ROOT = Path(__file__).resolve().parent.parent
 ARCHIVE_DIR = ROOT / "archive"
 
 SETTINGS_FILE = ROOT / "settings.local.json"
-DEFAULT_SERVE_PORT = 8765
+
+OPERATOR_SERVE_PORT = 8765
+PUBLIC_SERVE_PORT = 9001
+
+
+def is_operator_build() -> bool:
+    return (ROOT / "harness" / "_control_cli.py").exists()
+
+
+def default_serve_port() -> int:
+    return OPERATOR_SERVE_PORT if is_operator_build() else PUBLIC_SERVE_PORT
 
 
 def load_settings() -> dict:
@@ -26,12 +36,12 @@ def save_setting(key: str, value) -> None:
 
 
 def serve_port() -> int:
-    """The saved default serve port, else the built-in 8765."""
+    """The saved default serve port, else this build's built-in default."""
     p = load_settings().get("serve_port")
     try:
-        return int(p) if p else DEFAULT_SERVE_PORT
+        return int(p) if p else default_serve_port()
     except (TypeError, ValueError):
-        return DEFAULT_SERVE_PORT
+        return default_serve_port()
 
 
 def suite_version() -> str:

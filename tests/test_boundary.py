@@ -30,3 +30,23 @@ def test_public_modules_never_import_private_ones():
             offenders.append(f"{mod} imports studio")
     assert not offenders, "public instrument reaches into the operator layer: " \
         + "; ".join(offenders)
+
+
+def test_public_and_operator_builds_default_to_different_ports():
+    """A public checkout must not come up on the operator's port, or running one
+    beside a live operator instance collides and its docs point at the wrong
+    server. Passes in either tree: which port is correct depends on the build."""
+    from harness import config
+
+    assert config.PUBLIC_SERVE_PORT != config.OPERATOR_SERVE_PORT
+    expect = (config.OPERATOR_SERVE_PORT if config.is_operator_build()
+              else config.PUBLIC_SERVE_PORT)
+    assert config.default_serve_port() == expect
+
+
+def test_operator_build_is_detected_by_the_private_cli_module():
+    """is_operator_build() keys off the same file __main__ uses to decide whether
+    to register the private subcommands, so the two can never disagree."""
+    from harness import config
+
+    assert config.is_operator_build() == (ROOT / "harness" / "_control_cli.py").is_file()

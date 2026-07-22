@@ -153,7 +153,8 @@ class QuietServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def serve(port: int = 8765) -> None:
+def serve(port: int | None = None) -> None:
+    port = config.serve_port() if port is None else port
     report.generate_all(public_nav=True)
     server = QuietServer(("127.0.0.1", port), Handler)
     print(f"LLM Testing Suite  v{config.suite_version()}  (read-only viewer)")
