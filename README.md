@@ -13,8 +13,15 @@ request that produced it.
 
 ## Browsing the results
 
-`reports/` is self-contained static HTML — open `reports/index.html` directly, or
-host the folder anywhere. No server and no Python needed.
+```
+serve
+```
+
+That's the only command you need — it opens the results site at
+http://127.0.0.1:8765 as a read-only viewer.
+
+`reports/` is also self-contained static HTML, so you can open
+`reports/index.html` directly or host the folder anywhere, with no server at all.
 
 - `index.html` — leaderboard, the model × task matrix (filterable to All / Hard /
   Easy), score trends, speed and cost, and per-category task fit
