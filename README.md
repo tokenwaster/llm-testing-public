@@ -13,15 +13,31 @@ request that produced it.
 
 ## Browsing the results
 
-```
-serve
+`serve` is the only command you need. It opens the results site at
+http://127.0.0.1:8765 as a read-only viewer, bound to localhost.
+
+**Windows (PowerShell):**
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\harness.ps1 serve
 ```
 
-That's the only command you need — it opens the results site at
-http://127.0.0.1:8765 as a read-only viewer.
+**Linux / macOS:**
 
-`reports/` is also self-contained static HTML, so you can open
-`reports/index.html` directly or host the folder anywhere, with no server at all.
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m harness serve
+```
+
+`harness.ps1` is a Windows convenience wrapper; elsewhere call the module
+directly. Python 3.11+ is required. Add `--port N` to serve somewhere else.
+
+Or skip Python entirely — `reports/` is self-contained static HTML, so opening
+`reports/index.html` in a browser works with no install and no server, as does
+hosting the folder anywhere.
 
 - `index.html` — leaderboard, the model × task matrix (filterable to All / Hard /
   Easy), score trends, speed and cost, and per-category task fit
