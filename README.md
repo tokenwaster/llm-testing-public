@@ -16,15 +16,15 @@ request that produced it.
 `serve` is the only command you need. It opens the results site at
 http://127.0.0.1:8765 as a read-only viewer, bound to localhost.
 
-**Windows (PowerShell):**
+**Windows** — works as written in both PowerShell and `cmd`:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\harness.ps1 serve
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m harness serve
 ```
 
-**Linux / macOS:**
+**Linux and macOS** — identical on both:
 
 ```bash
 python3 -m venv .venv
@@ -32,8 +32,14 @@ python3 -m venv .venv
 .venv/bin/python -m harness serve
 ```
 
-`harness.ps1` is a Windows convenience wrapper; elsewhere call the module
-directly. Python 3.11+ is required. Add `--port N` to serve somewhere else.
+Calling the venv's interpreter by path means there is nothing to activate, so
+the two blocks above are the whole story — no per-shell activation script and no
+PowerShell execution-policy exemption. `.\harness.ps1 serve` is a shorter
+equivalent on Windows, but it is PowerShell-only, and Windows blocks `.ps1`
+files under the default RemoteSigned policy if you unpacked a downloaded ZIP
+rather than cloning.
+
+Python 3.11+ is required. Add `--port N` to serve somewhere else.
 
 Or skip Python entirely — `reports/` is self-contained static HTML, so opening
 `reports/index.html` in a browser works with no install and no server, as does
