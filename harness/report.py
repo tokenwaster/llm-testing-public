@@ -2816,38 +2816,50 @@ def _with_short(links: list[dict]) -> list[dict]:
     return links
 
 
-def _model_links(mo) -> list[dict]:
-    """External reference links for a model — Hugging Face for local weights,
-    OpenRouter for gateway-served models. Direct when the id is a clean repo
-    path, else a search, so a link is never dead."""
+def _model_links(model: str, mo=None, *, local: bool | None = None,
+                 publisher: str = "") -> list[dict]:
+    """External reference links for a model — Hugging Face for open weights,
+    OpenRouter for gateway-served ones.
+
+    The exact repo/slug lives only in the model yaml, which the public build does
+    NOT ship (the yamls carry private endpoints). So the yaml, when present, gives
+    a DIRECT link; without it we fall back to a search built from the report's own
+    model name and the publisher recorded in the run data — both of which always
+    ship. The links therefore widen from a direct hit to a search in the public
+    build rather than disappearing, which is what happened when this depended on
+    the yaml alone. `short` is the compact header form; `label` the long one.
+    """
     from urllib.parse import quote
-    if not mo or not mo.model:
-        return []
-    mid = mo.model
-    name = mid.split("/")[-1]
-    out = []
-    if mo.local:
-        if mid.count("/") == 1 and " " not in mid:
-            out.append({"label": "Hugging Face ↗", "url": f"https://huggingface.co/{mid}"})
-        else:
-            out.append({"label": "Hugging Face ↗",
-                        "url": f"https://huggingface.co/models?search={quote(name)}"})
-        out.append({"label": "OpenRouter ↗",
-                    "url": f"https://openrouter.ai/models?q={quote(name)}"})
-    else:
+
+    if mo and mo.model:
+        mid = mo.model
+        is_local = bool(mo.local)
         base = (mo.base_url or "").lower()
-        if "anthropic" in base or mo.provider == "claude-cli":
-            return _with_short([{
-                "label": "Anthropic ↗",
-                "url": "https://docs.anthropic.com/en/docs/about-claude/models"}])
-        if "openrouter" in base and mid.count("/") >= 1:
-            out.append({"label": "OpenRouter ↗", "url": f"https://openrouter.ai/{mid}"})
-        else:
-            out.append({"label": "OpenRouter ↗",
-                        "url": f"https://openrouter.ai/models?q={quote(name)}"})
-        out.append({"label": "Hugging Face ↗",
-                    "url": f"https://huggingface.co/models?search={quote(name)}"})
-    return _with_short(out)
+        is_claude = "anthropic" in base or mo.provider == "claude-cli"
+    else:
+        mid, base = "", ""
+        is_local = bool(local)
+        is_claude = "claude" in model.lower() or "anthropic" in model.lower()
+
+    if is_claude:
+        return _with_short([{
+            "label": "Anthropic ↗",
+            "url": "https://docs.anthropic.com/en/docs/about-claude/models"}])
+
+    name = mid.split("/")[-1] if mid else model
+    hf_search = f"https://huggingface.co/models?search={quote(name)}"
+    or_search = f"https://openrouter.ai/models?q={quote(name)}"
+    hf = {"label": "Hugging Face ↗", "url": hf_search}
+    orr = {"label": "OpenRouter ↗", "url": or_search}
+
+    if mid and is_local and mid.count("/") == 1 and " " not in mid:
+        hf["url"] = f"https://huggingface.co/{mid}"
+    elif not mid and publisher and " " not in publisher:
+        hf["url"] = f"https://huggingface.co/{publisher}/{name}"
+    if mid and not is_local and "openrouter" in base and mid.count("/") >= 1:
+        orr["url"] = f"https://openrouter.ai/{mid}"
+
+    return _with_short([hf, orr] if is_local else [orr, hf])
 
 
 def _model_detail_rows(mo, mi: dict, fp, hosts: list) -> list[dict]:
@@ -2998,7 +3010,8 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
                       "k": f"VRAM @{VRAM_REF_CTX // 1024}k · "
                            f"{fp['weights_gb']:.0f}GB wt + KV · {fp['quant']}"})
     detail_rows = _model_detail_rows(mo, meta_info, fp, hosts)
-    model_links = _model_links(mo)
+    model_links = _model_links(model, mo, local=s["local"],
+                               publisher=meta_info.get("publisher", ""))
 
     all_cats = sorted({tdefs[tid].category for tid, _ in mine})
     cats = []
