@@ -13,8 +13,10 @@ request that produced it.
 
 ## Browsing the results
 
-`serve` is the only command you need. It opens the results site at
-http://127.0.0.1:9001 as a read-only viewer, bound to localhost.
+Create a virtualenv, install the requirements, then run `serve` — three lines,
+below. `serve` opens the results site at http://127.0.0.1:9001 as a read-only
+viewer bound to localhost, and is the only command you need for every run after
+setup.
 
 **Windows** — works as written in both PowerShell and `cmd`:
 
