@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maze Discovery — 24 Bots</title>
+<style>
+  :root{ --bg:#11151c; --panel:#1b2230; --ink:#e7edf5; --muted:#8ea0b6; --accent:#4fd1c5; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  .wrap{ max-width:900px; margin:0 auto; padding:18px; }
+  h1{ font-size:18px; font-weight:600; margin:0 0 12px; letter-spacing:.3px; }
+  .hud{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; background:var(--panel); border:1px solid #2a3547; border-radius:12px; padding:12px 16px; margin-bottom:14px; }
+  .stat{ display:flex; flex-direction:column; line-height:1.15; }
+  .stat .label{ font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+  .stat .value{ font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
+  #timer.frozen{ color:var(--accent); }
+  button{ margin-left:auto; background:var(--accent); color:#08221f; border:0; border-radius:9px; padding:10px 18px; font-size:14px; font-weight:700; cursor:pointer; }
+  button:active{ transform:translateY(1px); }
+  #maze{ display:inline-block; background:#0b0e13; border:1px solid #2a3547; border-radius:12px; padding:10px; line-height:0; }
+  canvas{ border-radius:6px; display:block; }
+  .note{ color:var(--muted); font-size:12px; margin-top:10px; max-width:640px; line-height:1.5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Maze Discovery — 24 bots explore (Tremaux / DFS) to find an unknown exit</h1>
+  <div class="hud">
+    <div class="stat"><span class="label">Completed</span><span class="value" id="completed">0 / 24</span></div>
+    <div class="stat"><span class="label">Timer (ticks)</span><span class="value" id="timer">0</span></div>
+    <div class="stat"><span class="label">Seed</span><span class="value" id="seedout" style="font-size:16px">—</span></div>
+    <button id="reset">New Maze</button>
+  </div>
+  <div id="maze"><canvas id="cv" width="450" height="450"></canvas></div>
+  <p class="note">Each bot knows only walls of cells it has entered. It walks like a depth-first explorer:
+    step into unvisited passages in its own preferred direction order; on a dead end or fully-explored branch it
+    backtracks (marking that cell dead) and never re-enters it. No global pathfinding. The timer freezes the instant
+    the last bot reaches the exit.</p>
+</div>
+<script>
+(function(){
+  "use strict";
+
+  // ---------- config ----------
+  const ROWS = 15, COLS = 15;
+  const N_BOTS = 24;
+  const TICK_MS = 120;
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const CELL = Math.floor(cv.width / COLS); // 30
+  const OX = Math.floor((cv.width  - CELL*COLS)/2);
+  const OY = Math.floor((cv.height - CELL*ROWS)/2);
+
+  const SPAWN = { r:0, c:0 };
+  const EXIT  = { r:ROWS-1, c:COLS-1 };
+
+  // ---------- rng ----------
+  function mulberry32(a){
+    return function(){
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---------- directions ----------
+  const DIRS = {
+    n:{dr:-1,dc:0,opp:'s'},
+    e:{dr:0, dc:1,opp:'w'},
+    s:{dr:1, dc:0,opp:'n'},
+    w:{dr:0,dc:-1,opp:'e'}
+  };
+  const DKEYS = ['n','e','s','w'];
+  function neighbor(cell,d){ const D=DIRS[d]; return { r:cell.r+D.dr, c:cell.c+D.dc }; }
+  function inBounds(r,c){ return r>=0 && r<ROWS && c>=0 && c<COLS; }
+
+  // all 24 permutations of the four directions (one per bot)
+  function permutations(arr){
+    if(arr.length<=1) return [arr.slice()];
+    const out=[];
+    for(let i=0;i<arr.length;i++){
+      const rest=arr.slice(0,i).concat(arr.slice(i+1));
+      for(const p of permutations(rest)) out.push([arr[i]].concat(p));
+    }
+    return out;
+  }
+  const PERMS = permutations(DKEYS); // length 24
+
+  // ---------- maze ----------
+  let maze;   // maze[r][c] = {n,e,s,w} true = wall
+  function genMaze(seed){
+    const rng = mulberry32(seed >>> 0);
+    const w = [];
+    for(let r=0;r<ROWS;r++){ w[r]=[]; for(let c=0;c<COLS;c++) w[r][c]={n:true,e:true,s:true,w:true}; }
+    const seen = [];
+    for(let r=0;r<ROWS;r++){ seen[r]=[]; for(let c=0;c<COLS;c++) seen[r][c]=false; }
+    const stack=[{r:SPAWN.r,c:SPAWN.c}];
+    seen[SPAWN.r][SPAWN.c]=true;
+    while(stack.length){
+      const cur=stack[stack.length-1];
+      const opts=[];
+      for(const d of DKEYS){
+        const nb=neighbor(cur,d);
+        if(inBounds(nb.r,nb.c) && !seen[nb.r][nb.c]) opts.push(d);
+      }
+      if(opts.length===0){ stack.pop(); continue; }
+      const d = opts[Math.floor(rng()*opts.length)];
+      const nb = neighbor(cur,d);
+      w[cur.r][cur.c][d] = false;
+      w[nb.r][nb.c][DIRS[d].opp] = false;
+      seen[nb.r][nb.c]=true;
+      stack.push(nb);
+    }
+    return w;
+  }
+
+  // ---------- bots ----------
+  const HUES = [];
+  for(let i=0;i<N_BOTS;i++) HUES.push(Math.round(i*360/N_BOTS));
+
+  let bots=[];
+  function makeBots(){
+    bots=[];
+    for(let i=0;i<N_BOTS;i++){
+      const start={r:SPAWN.r,c:SPAWN.c};
+      const b={
+        id:i,
+        dirOrder: PERMS[i % PERMS.length].slice(),
+        pos:{r:start.r,c:start.c},
+        stack:[{r:start.r,c:start.c}],
+        visited:new Set([start.r+','+start.c]),
+        deadSet:new Set(),
+        // public API fields:
+        path:[{r:start.r,c:start.c}],
+        deadEnds:[],
+        finishTick:null,
+        // render:
+        renderFrom:{r:start.r,c:start.c},
+        renderTo:{r:start.r,c:start.c}
+      };
+      bots.push(b);
+    }
+  }
+
+  function stepBot(b, tick){
+    if(b.finishTick!==null) return;
+    const cur=b.pos;
+    const w=maze[cur.r][cur.c];
+    let moved=false;
+    for(const d of b.dirOrder){
+      if(w[d]) continue;                 // wall — no passage
+      const nb=neighbor(cur,d);
+      const key=nb.r+','+nb.c;
+      if(b.visited.has(key)) continue;   // already explored by this bot
+      // step forward into an unexplored passage
+      b.pos={r:nb.r,c:nb.c};
+      b.visited.add(key);
+      b.stack.push(b.pos);
+      b.path.push({r:nb.r,c:nb.c});
+      moved=true;
+      if(nb.r===EXIT.r && nb.c===EXIT.c) b.finishTick=tick;
+      break;
+    }
+    if(!moved){
+      // dead end / fully explored branch: record & backtrack
+      const key=cur.r+','+cur.c;
+      if(!b.deadSet.has(key)){ b.deadSet.add(key); b.deadEnds.push({r:cur.r,c:cur.c}); }
+      b.stack.pop();
+      if(b.stack.length>0){
+        const back=b.stack[b.stack.length-1];
+        b.pos={r:back.r,c:back.c};
+        b.path.push({r:back.r,c:back.c});
+      } else {
+        // no reachable exit (should not occur in a perfect maze) — halt safely
+        b.finishTick=tick;
+      }
+    }
+  }
+
+  // ---------- simulation ----------
+  let elapsed=0;
+  let currentSeed=0;
+
+  function allDone(){ for(const b of bots) if(b.finishTick===null) return false; return true; }
+
+  function advanceTick(){
+    if(allDone()) return;              // frozen after last arrival
+    elapsed++;
+    for(const b of bots){ b.renderFrom={r:b.pos.r,c:b.pos.c}; }
+    for(const b of bots){ stepBot(b, elapsed); }
+    for(const b of bots){ b.renderTo={r:b.pos.r,c:b.pos.c}; }
+  }
+
+  function doReset(seed){
+    if(typeof seed==='number' && isFinite(seed)) currentSeed = seed>>>0;
+    else currentSeed = Math.floor(Math.random()*0xffffffff)>>>0;
+    maze = genMaze(currentSeed);
+    makeBots();
+    elapsed=0;
+    document.getElementById('seedout').textContent=String(currentSeed);
+    lastTickTime = now();
+    playing = true;
+  }
+
+  // ---------- rendering ----------
+  function now(){ return (typeof performance!=='undefined' && performance.now)?performance.now():Date.now(); }
+  function cellCenter(r,c){ return { x:OX + (c+0.5)*CELL, y:OY + (r+0.5)*CELL }; }
+  function lerp(a,b,t){ return a+(b-a)*t; }
+
+  function draw(p){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    // floor
+    ctx.fillStyle='#0f141c';
+    ctx.fillRect(OX,OY,CELL*COLS,CELL*ROWS);
+
+    // exit + spawn cells
+    const ex=cellCenter(EXIT.r,EXIT.c), sp=cellCenter(SPAWN.r,SPAWN.c);
+    ctx.fillStyle='rgba(79,209,197,0.22)';
+    ctx.fillRect(OX+EXIT.c*CELL+2, OY+EXIT.r*CELL+2, CELL-4, CELL-4);
+    ctx.fillStyle='rgba(255,255,255,0.06)';
+    ctx.fillRect(OX+SPAWN.c*CELL+2, OY+SPAWN.r*CELL+2, CELL-4, CELL-4);
+    ctx.fillStyle='rgba(79,209,197,0.9)';
+    ctx.font='bold 11px system-ui';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('EXIT', ex.x, ex.y);
+
+    // walls
+    ctx.strokeStyle='#5a6b83';
+    ctx.lineWidth=2;
+    ctx.lineCap='round';
+    ctx.beginPath();
+    for(let r=0;r<ROWS;r++){
+      for(let c=0;c<COLS;c++){
+        const w=maze[r][c];
+        const x=OX+c*CELL, y=OY+r*CELL;
+        if(w.n){ ctx.moveTo(x,y);           ctx.lineTo(x+CELL,y); }
+        if(w.w){ ctx.moveTo(x,y);           ctx.lineTo(x,y+CELL); }
+        if(w.e){ ctx.moveTo(x+CELL,y);      ctx.lineTo(x+CELL,y+CELL); }
+        if(w.s){ ctx.moveTo(x,y+CELL);      ctx.lineTo(x+CELL,y+CELL); }
+      }
+    }
+    ctx.stroke();
+
+    // bots (interpolated)
+    const rad=CELL*0.28;
+    for(const b of bots){
+      const f=cellCenter(b.renderFrom.r,b.renderFrom.c);
+      const t=cellCenter(b.renderTo.r,b.renderTo.c);
+      const done=b.finishTick!==null;
+      const pp = done?1:p;
+      const x=lerp(f.x,t.x,pp), y=lerp(f.y,t.y,pp);
+      ctx.beginPath();
+      ctx.arc(x,y,rad,0,Math.PI*2);
+      ctx.fillStyle='hsl('+HUES[b.id]+',70%,'+(done?42:58)+'%)';
+      ctx.fill();
+      if(done){
+        ctx.lineWidth=2; ctx.strokeStyle='rgba(255,255,255,0.85)'; ctx.stroke();
+      }
+    }
+
+    // HUD
+    let comp=0; for(const b of bots) if(b.finishTick!==null) comp++;
+    document.getElementById('completed').textContent = comp+' / '+N_BOTS;
+    const tEl=document.getElementById('timer');
+    tEl.textContent = String(elapsed);
+    if(allDone()) tEl.classList.add('frozen'); else tEl.classList.remove('frozen');
+  }
+
+  // ---------- animation loop (visual only) ----------
+  let playing=true;
+  let lastTickTime=now();
+  function frame(t){
+    if(playing && !allDone()){
+      if(t - lastTickTime >= TICK_MS){ advanceTick(); lastTickTime=t; }
+    }
+    const p = (playing && !allDone()) ? Math.min(1,(t-lastTickTime)/TICK_MS) : 1;
+    draw(p);
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- public API ----------
+  const game={
+    tick:function(n){
+      playing=false;                    // hand control to the script driver
+      n = (n==null)?1:(n|0);
+      for(let i=0;i<n;i++) advanceTick();
+      draw(1);
+      return elapsed;
+    },
+    reset:function(seed){ doReset(typeof seed==='number'?seed:undefined); draw(1); },
+    get elapsed(){ return elapsed; },
+    get size(){ return {rows:ROWS, cols:COLS}; },
+    get spawn(){ return {r:SPAWN.r, c:SPAWN.c}; },
+    get exit(){ return {r:EXIT.r, c:EXIT.c}; },
+    walls:function(r,c){ const w=maze[r][c]; return {n:w.n,e:w.e,s:w.s,w:w.w}; },
+    get bots(){ return bots; }
+  };
+  window.game=game;
+
+  // ---------- wire up ----------
+  document.getElementById('reset').addEventListener('click', function(){ doReset(); });
+
+  doReset(1);              // deterministic first maze (seed 1)
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maze Exploration Game</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        #maze-container {
+            display: flex;
+            align-items: flex-start;
+            gap: 20px;
+        }
+        
+        #maze {
+            border: 2px solid #333;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        
+        #controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            min-width: 200px;
+        }
+        
+        .stat-box {
+            background-color: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        h1 { margin-top: 0; font-size: 24px; color: #333; }
+        h2 { margin: 0 0 10px 0; font-size: 18px; color: #555; }
+        
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        
+        button:hover {
+            background-color: #45a049;
+        }
+        
+        .stat-value {
+            font-weight: bold;
+            color: #2E8B57;
+            font-size: 24px;
+        }
+        
+        .bot-info {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+        
+        .bot-dot {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Maze Exploration Game</h1>
+    
+    <div id="maze-container">
+        <canvas id="maze" width="400" height="400"></canvas>
+        
+        <div id="controls">
+            <div class="stat-box">
+                <h2>Statistics</h2>
+                <p>Completed: <span id="completed" class="stat-value">0/24</span></p>
+                <p>Time: <span id="timer" class="stat-value">0</span></p>
+            </div>
+            
+            <button id="reset">Reset Game</button>
+            
+            <div class="stat-box">
+                <h2>Bots Status</h2>
+                <div id="bots-status"></div>
+            </div>
+        </div>
+    </div>
+
+<script>
+/**
+ * Maze Generation and Bot Exploration Engine
+ */
+
+// Seeded random number generator (Mulberry32 algorithm)
+class Random {
+    constructor(seed) {
+        this.state = seed >>> 0;
+    }
+    
+    next() {
+        let t = this.state += 0x6D2B79F5;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+    
+    // Get random integer in range [min, max)
+    nextInt(min, max) {
+        return Math.floor(this.next() * (max - min)) + min;
+    }
+}
+
+// Maze cell class
+class Cell {
+    constructor(r, c) {
+        this.r = r;
+        this.c = c;
+        this.visited = false;
+        // Walls: n, e, s, w (true means wall exists)
+        this.walls = { n: true, e: true, s: true, w: true };
+    }
+}
+
+// Bot class
+class Bot {
+    constructor(id, startR, startC) {
+        this.id = id;
+        this.r = startR;
+        this.c = startC;
+        this.path = [{ r: startR, c: startC }];
+        this.deadEnds = [];
+        this.finishTick = null;
+        
+        // For smooth interpolation
+        this.currentX = startC;
+        this.currentY = startR;
+        this.targetX = startC;
+        this.targetY = startR;
+        this.progress = 0;
+        
+        // Exploration preferences (direction order)
+        const directions = ['n', 'e', 's', 'w'];
+        // Give each bot a different random direction preference
+        const rng = new Random(id + 1);
+        for (let i = directions.length - 1; i > 0; i--) {
+            const j = rng.nextInt(0, i + 1);
+            [directions[i], directions[j]] = [directions[j], directions[i]];
+        }
+        this.directionOrder = directions;
+    }
+
+    // Get current position
+    getPosition() {
+        return { r: this.r, c: this.c };
+    }
+
+    // Check if bot has reached target cell for smooth movement
+    hasArrived() {
+        return Math.abs(this.currentX - this.targetX) < 0.01 && 
+               Math.abs(this.currentY - this.targetY) < 0.01;
+    }
+}
+
+// Maze game class
+class MazeGame {
+    constructor(canvasId, size = 15) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
+        this.size = { rows: size, cols: size };
+        this.cellSize = this.canvas.width / size;
+        
+        // Game state
+        this.maze = null;
+        this.spawn = null;
+        this.exit = null;
+        this.bots = [];
+        this.elapsed = 0;
+        this.completedCount = 0;
+        this.lastBotFinished = false;
+        
+        // For smooth animation
+        this.interpolationStep = 0.1; // Movement speed per tick
+        
+        // Bind methods
+        this.reset = this.reset.bind(this);
+        this.tick = this.tick.bind(this);
+        this.render = this.render.bind(this);
+        
+        // Initialize with default seed
+        this.reset();
+    }
+
+    // Generate a perfect maze using recursive backtracker algorithm
+    generateMaze(seed) {
+        const rng = new Random(seed || Date.now());
+        const rows = this.size.rows;
+        const cols = this.size.cols;
+        
+        // Initialize grid of cells
+        const grid = [];
+        for (let r = 0; r < rows; r++) {
+            const row = [];
+            for (let c = 0; c < cols; c++) {
+                row.push(new Cell(r, c));
+            }
+            grid.push(row);
+        }
+        
+        // Stack for backtracking
+        const stack = [];
+        
+        // Start at random cell
+        let currentR = rng.nextInt(0, rows);
+        let currentC = rng.nextInt(0, cols);
+        grid[currentR][currentC].visited = true;
+        
+        // While there are unvisited cells
+        let visitedCount = 1;
+        const totalCells = rows * cols;
+        
+        while (visitedCount < totalCells) {
+            // Get unvisited neighbors
+            const neighbors = [];
+            
+            // Check all directions
+            const directions = [
+                { r: -1, c: 0, dir: 'n' },
+                { r: 0, c: 1, dir: 'e' },
+                { r: 1, c: 0, dir: 's' },
+                { r: 0, c: -1, dir: 'w' }
+            ];
+            
+            // Shuffle directions for randomness
+            for (let i = directions.length - 1; i > 0; i--) {
+                const j = rng.nextInt(0, i + 1);
+                [directions[i], directions[j]] = [directions[j], directions[i]];
+            }
+            
+            for (const d of directions) {
+                const nr = currentR + d.r;
+                const nc = currentC + d.c;
+                
+                if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !grid[nr][nc].visited) {
+                    neighbors.push({ ...d, r: nr, c: nc });
+                }
+            }
+            
+            if (neighbors.length > 0) {
+                // Choose random unvisited neighbor
+                const next = neighbors[rng.nextInt(0, neighbors.length)];
+                
+                // Remove walls between current and next
+                grid[currentR][currentC].walls[next.dir] = false;
+                const oppositeDir = { n: 's', s: 'n', e: 'w', w: 'e' };
+                grid[next.r][next.c].walls[oppositeDir[next.dir]] = false;
+                
+                // Push current to stack and move to next
+                stack.push({ r: currentR, c: currentC });
+                currentR = next.r;
+                currentC = next.c;
+                grid[currentR][currentC].visited = true;
+                visitedCount++;
+            } else if (stack.length > 0) {
+                // Backtrack
+                const prev = stack.pop();
+                currentR = prev.r;
+                currentC = prev.c;
+            }
+        }
+        
+        return { grid, spawn: { r: 0, c: 0 }, exit: { r: rows - 1, c: cols - 1 } };
+    }
+
+    // Create bots
+    createBots() {
+        this.bots = [];
+        for (let i = 0; i < 24; i++) {
+            this.bots.push(new Bot(i, this.spawn.r, this.spawn.c));
+        }
+        this.completedCount = 0;
+        this.lastBotFinished = false;
+    }
+
+    // Reset game
+    reset(seed) {
+        const mazeData = this.generateMaze(seed);
+        this.maze = mazeData.grid;
+        this.spawn = mazeData.spawn;
+        this.exit = mazeData.exit;
+        
+        this.createBots();
+        this.elapsed = 0;
+        this.lastBotFinished = false;
+        
+        // Update UI
+        this.updateUI();
+    }
+
+    // Get walls for a cell
+    walls(r, c) {
+        if (r < 0 || r >= this.size.rows || c < 0 || c >= this.size.cols) {
+            return { n: true, e: true, s: true, w: true };
+        }
+        const cell = this.maze[r][c];
+        return { ...cell.walls };
+    }
+
+    // Get available moves from a position
+    getAvailableMoves(r, c) {
+        const cellWalls = this.walls(r, c);
+        const moves = [];
+        
+        if (!cellWalls.n && r > 0) moves.push({ r: r - 1, c: c, dir: 'n' });
+        if (!cellWalls.e && c < this.size.cols - 1) moves.push({ r: r, c: c + 1, dir: 'e' });
+        if (!cellWalls.s && r < this.size.rows - 1) moves.push({ r: r + 1, c: c, dir: 's' });
+        if (!cellWalls.w && c > 0) moves.push({ r: r, c: c - 1, dir: 'w' });
+        
+        return moves;
+    }
+
+    // Bot movement logic
+    moveBot(bot) {
+        // If bot has finished, it stays at exit
+        if (bot.finishTick !== null) return;
+
+        const currentPos = { r: bot.r, c: bot.c };
+        
+        // Check if we're at the exit
+        if (currentPos.r === this.exit.r && currentPos.c === this.exit.c) {
+            bot.finishTick = this.elapsed;
+            this.completedCount++;
+            if (this.completedCount === 24) {
+                this.lastBotFinished = true;
+            }
+            return;
+        }
+
+        // Get available moves
+        const moves = this.getAvailableMoves(bot.r, bot.c);
+        
+        // Filter out dead ends and already visited paths (except when no other choice)
+        let preferredMoves = [];
+        
+        for (const move of moves) {
+            const nextPos = { r: move.r, c: move.c };
+            
+            // Check if this is a dead end in bot's memory
+            const isDeadEnd = bot.deadEnds.some(d => d.r === nextPos.r && d.c === nextPos.c);
+            
+            // Check if we've been to this cell before (in our path)
+            const hasVisited = bot.path.some(p => p.r === nextPos.r && p.c === nextPos.c);
+            
+            // If it's not a dead end and we haven't visited, or it's the only option
+            if (!isDeadEnd || moves.length === 1) {
+                preferredMoves.push(move);
+            }
+        }
+
+        // If no preferred moves (dead end), use all available moves
+        const possibleMoves = preferredMoves.length > 0 ? preferredMoves : moves;
+
+        if (possibleMoves.length === 0) {
+            // Should not happen in a perfect maze, but just in case
+            return;
+        }
+
+        // Sort moves by bot's direction preference
+        possibleMoves.sort((a, b) => {
+            const indexA = bot.directionOrder.indexOf(a.dir);
+            const indexB = bot.directionOrder.indexOf(b.dir);
+            return indexA - indexB;
+        });
+
+        // Choose the first move (highest priority)
+        const nextMove = possibleMoves[0];
+        
+        // Move to next cell
+        bot.r = nextMove.r;
+        bot.c = nextMove.c;
+        
+        // Add to path
+        bot.path.push({ r: bot.r, c: bot.c });
+        
+        // If we've been here before and it's not the previous cell, mark as dead end
+        const prevCell = bot.path[bot.path.length - 2];
+        if (prevCell && 
+            bot.path.filter(p => p.r === bot.r && p.c === bot.c).length > 1) {
+            // Check if this is truly a dead end (only one way in/out)
+            const nextMoves = this.getAvailableMoves(bot.r, bot.c);
+            
+            // If only one move available and it's back the way we came
+            if (nextMoves.length === 1 && 
+                nextMoves[0].r === prevCell.r && nextMoves[0].c === prevCell.c) {
+                
+                // Mark as dead end if not already marked
+                const isAlreadyDead = bot.deadEnds.some(d => d.r === bot.r && d.c === bot.c);
+                if (!isAlreadyDead) {
+                    bot.deadEnds.push({ r: bot.r, c: bot.c });
+                }
+            }
+        }
+
+        // Set target for smooth movement
+        bot.targetX = bot.c;
+        bot.targetY = bot.r;
+    }
+
+    // Update bot positions for smooth animation
+    updateBotPositions() {
+        for (const bot of this.bots) {
+            if (!bot.hasArrived()) {
+                // Interpolate towards target
+                const dx = bot.targetX - bot.currentX;
+                const dy = bot.targetY - bot.currentY;
+                
+                if (Math.abs(dx) < this.interpolationStep && Math.abs(dy) < this.interpolationStep) {
+                    bot.currentX = bot.targetX;
+                    bot.currentY = bot.targetY;
+                } else {
+                    bot.currentX += dx * this.interpolationStep;
+                    bot.currentY += dy * this.interpolationStep;
+                }
+            } else if (bot.finishTick === null && 
+                      bot.r === this.exit.r && bot.c === this.exit.c) {
+                // First time reaching exit
+                bot.finishTick = this.elapsed;
+                this.completedCount++;
+                if (this.completedCount === 24) {
+                    this.lastBotFinished = true;
+                }
+            }
+        }
+    }
+
+    // Advance simulation by n ticks
+    tick(n) {
+        for (let i = 0; i < n && !this.lastBotFinished; i++) {
+            // Move all bots
+            for (const bot of this.bots) {
+                this.moveBot(bot);
+            }
+            
+            // Update positions for smooth animation
+            this.updateBotPositions();
+            
+            // Increment timer if not finished
+            if (!this.lastBotFinished) {
+                this.elapsed++;
+            }
+        }
+        
+        // Update UI
+        this.updateUI();
+    }
+
+    // Render maze and bots
+    render() {
+        const ctx = this.ctx;
+        const cellSize = this.cellSize;
+        
+        // Clear canvas
+        ctx.fillStyle = '#f0f0f0';
+        ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        
+        // Draw maze walls
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        
+        for (let r = 0; r < this.size.rows; r++) {
+            for (let c = 0; c < this.size.cols; c++) {
+                const cell = this.maze[r][c];
+                
+                // Calculate coordinates
+                const x = c * cellSize;
+                const y = r * cellSize;
+                
+                // Draw walls
+                if (cell.walls.n) {
+                    ctx.moveTo(x, y);
+                    ctx.lineTo(x + cellSize, y);
+                }
+                if (cell.walls.e) {
+                    ctx.moveTo(x + cellSize, y);
+                    ctx.lineTo(x + cellSize, y + cellSize);
+                }
+                if (cell.walls.s) {
+                    ctx.moveTo(x + cellSize, y + cellSize);
+                    ctx.lineTo(x, y + cellSize);
+                }
+                if (cell.walls.w) {
+                    ctx.moveTo(x, y + cellSize);
+                    ctx.lineTo(x, y);
+                }
+            }
+        }
+        
+        ctx.stroke();
+        
+        // Draw spawn and exit
+        const spawnX = this.spawn.c * cellSize + cellSize / 2;
+        const spawnY = this.spawn.r * cellSize + cellSize / 2;
+        const exitX = this.exit.c * cellSize + cellSize / 2;
+        const exitY = this.exit.r * cellSize + cellSize / 2;
+        
+        // Draw spawn
+        ctx.fillStyle = '#4CAF50';
+        ctx.beginPath();
+        ctx.arc(spawnX, spawnY, cellSize * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Draw exit
+        ctx.fillStyle = '#F44336';
+        ctx.fillRect(exitX - cellSize/4, exitY - cellSize/4, cellSize/2, cellSize/2);
+        
+        // Draw bots
+        const colors = [
+            '#FF5722', '#E91E63', '#9C27B0', '#673AB7', 
+            '#3F51B5', '#2196F3', '#03A9F4', '#00BCD4',
+            '#009688', '#4CAF50', '#8BC34A', '#CDDC39',
+            '#FFEB3B', '#FFC107', '#FF9800', '#795548',
+            '#607D8B', '#9E9E9E', '#3F51B5', '#2196F3',
+            '#00BCD4', '#4CAF50', '#CDDC39', '#FFEB3B'
+        ];
+        
+        for (let i = 0; i < this.bots.length; i++) {
+            const bot = this.bots[i];
+            
+            // Calculate position
+            const x = bot.currentX * cellSize + cellSize / 2;
+            const y = bot.currentY * cellSize + cellSize / 2;
+            
+            // Draw bot
+            ctx.fillStyle = colors[i % colors.length];
+            if (bot.finishTick !== null) {
+                ctx.globalAlpha = 0.5; // Dim finished bots
+            }
+            
+            ctx.beginPath();
+            ctx.arc(x, y, cellSize * 0.3, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.globalAlpha = 1.0;
+        }
+    }
+
+    // Update UI elements
+    updateUI() {
+        document.getElementById('completed').textContent = `${this.completedCount}/24`;
+        document.getElementById('timer').textContent = this.elapsed;
+        
+        const botsStatus = document.getElementById('bots-status');
+        botsStatus.innerHTML = '';
+        
+        for (const bot of this.bots) {
+            const div = document.createElement('div');
+            div.className = 'bot-info';
+            
+            const colorIndex = bot.id % 24;
+            const colors = [
+                '#FF5722', '#E91E63', '#9C27B0', '#673AB7', 
+                '#3F51B5', '#2196F3', '#00BCD4', '#009688',
+                '#4CAF50', '#8BC34A', '#CDDC39', '#FFEB3B',
+                '#FFC107', '#FF9800', '#795548', '#607D8B'
+            ];
+            
+            div.innerHTML = `
+                <div class="bot-dot" style="background-color: ${colors[colorIndex]}"></div>
+                <span>Bot ${bot.id}: ${bot.finishTick !== null ? `Finished (tick ${bot.finishTick})` : 'Exploring'}</span>
+            `;
+            
+            botsStatus.appendChild(div);
+        }
+    }
+
+    // Get current game state
+    getState() {
+        return {
+            elapsed: this.elapsed,
+            size: { ...this.size },
+            spawn: { ...this.spawn },
+            exit: { ...this.exit },
+            walls: (r, c) => this.walls(r, c),
+            bots: this.bots.map(bot => ({
+                path: [...bot.path],
+                deadEnds: [...bot.deadEnds],
+                finishTick: bot.finishTick
+            }))
+        };
+    }
+}
+
+// Initialize game when page loads
+let game;
+
+window.addEventListener('load', () => {
+    // Create maze game with 15x15 size
+    game = new MazeGame('maze', 15);
+    
+    // Add reset button handler
+    document.getElementById('reset').addEventListener('click', () => {
+        game.reset();
+    });
+    
+    // Initial render
+    game.render();
+});
+
+// Expose game API to window
+window.game = {
+    tick: (n) => {
+        if (!game) return;
+        game.tick(n);
+        game.render();
+    },
+    reset: (seed) => {
+        if (!game) return;
+        game.reset(seed);
+        game.render();
+    },
+    get elapsed() {
+        return game ? game.elapsed : 0;
+    },
+    get size() {
+        return game ? { ...game.size } : null;
+    },
+    get spawn() {
+        return game ? { ...game.spawn } : null;
+    },
+    get exit() {
+        return game ? { ...game.exit } : null;
+    },
+    walls: (r, c) => {
+        if (!game) return { n: true, e: true, s: true, w: true };
+        return game.walls(r, c);
+    },
+    get bots() {
+        if (!game) return [];
+        return game.bots.map(bot => ({
+            path: [...bot.path],
+            deadEnds: [...bot.deadEnds],
+            finishTick: bot.finishTick
+        }));
+    }
+};
+
+// Start with a default tick to initialize animation
+window.game.tick(0);
+</script>
+</body>
+</html>

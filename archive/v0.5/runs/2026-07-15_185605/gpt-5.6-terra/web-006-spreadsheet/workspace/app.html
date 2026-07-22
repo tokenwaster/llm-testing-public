@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-width: 600px;
+    min-height: 400px;
+    background: #f4f7fb;
+    color: #1d2a3a;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  .app {
+    width: min(960px, calc(100vw - 32px));
+    min-width: 600px;
+    min-height: 400px;
+    margin: 16px auto;
+    padding: 18px;
+    background: white;
+    border: 1px solid #cfd8e3;
+    border-radius: 10px;
+    box-shadow: 0 3px 14px rgba(30, 55, 85, 0.12);
+  }
+  h1 {
+    margin: 0 0 14px;
+    font-size: 20px;
+  }
+  .sheet-wrap {
+    overflow-x: auto;
+    border: 1px solid #b9c6d5;
+    border-radius: 6px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 44px repeat(10, minmax(72px, 1fr));
+    min-width: 764px;
+  }
+  .corner,
+  .col-header,
+  .row-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #eaf0f6;
+    color: #31445b;
+    font-weight: bold;
+    border-right: 1px solid #c7d2de;
+    border-bottom: 1px solid #c7d2de;
+    height: 32px;
+    user-select: none;
+  }
+  .cell-holder {
+    height: 32px;
+    border-right: 1px solid #d5dde6;
+    border-bottom: 1px solid #d5dde6;
+  }
+  .cell-holder:nth-child(11n) {
+    border-right: 0;
+  }
+  input.cell {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    outline: none;
+    padding: 5px 7px;
+    font-size: 14px;
+    color: #172435;
+    background: #fff;
+  }
+  input.cell:focus {
+    background: #fffceb;
+    box-shadow: inset 0 0 0 2px #4b89dc;
+  }
+  .controls {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+    align-items: start;
+    margin-top: 15px;
+  }
+  button {
+    border: 0;
+    border-radius: 5px;
+    background: #2d72c9;
+    color: white;
+    padding: 9px 13px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:hover { background: #205caa; }
+  textarea {
+    width: 100%;
+    min-height: 72px;
+    resize: vertical;
+    border: 1px solid #b9c6d5;
+    border-radius: 5px;
+    padding: 7px;
+    font-family: monospace;
+    font-size: 12px;
+  }
+  .hint {
+    margin: 12px 0 0;
+    font-size: 12px;
+    color: #56687c;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Mini Spreadsheet</h1>
+  <div class="sheet-wrap">
+    <div class="grid" id="grid" role="grid" aria-label="Spreadsheet"></div>
+  </div>
+
+  <div class="controls">
+    <button id="export" type="button">Export CSV</button>
+    <textarea id="csv" aria-label="Exported CSV" placeholder="CSV export appears here"></textarea>
+  </div>
+
+  <p class="hint">Click a cell to edit its raw value or formula. Press Enter or click away to commit.</p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const cols = "ABCDEFGHIJ".split("");
+  const rows = Array.from({ length: 10 }, (_, i) => i + 1);
+  const cells = Object.create(null);
+
+  function addressIsValid(address) {
+    return /^[A-J](10|[1-9])$/.test(address);
+  }
+
+  function normalizeAddress(address) {
+    return String(address || "").trim().toUpperCase();
+  }
+
+  function makeGrid() {
+    const grid = document.getElementById("grid");
+
+    const corner = document.createElement("div");
+    corner.className = "corner";
+    corner.setAttribute("role", "columnheader");
+    grid.appendChild(corner);
+
+    cols.forEach(function (col) {
+      const header = document.createElement("div");
+      header.className = "col-header";
+      header.setAttribute("role", "columnheader");
+      header.textContent = col;
+      grid.appendChild(header);
+    });
+
+    rows.forEach(function (row) {
+      const rowHeader = document.createElement("div");
+      rowHeader.className = "row-header";
+      rowHeader.setAttribute("role", "rowheader");
+      rowHeader.textContent = row;
+      grid.appendChild(rowHeader);
+
+      cols.forEach(function (col) {
+        const address = col + row;
+        const holder = document.createElement("div");
+        holder.className = "cell-holder";
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "cell";
+        input.id = "cell-" + address;
+        input.setAttribute("aria-label", address);
+        input.autocomplete = "off";
+        input.spellcheck = false;
+
+        cells[address] = {
+          raw: "",
+          display: "",
+          input: input,
+          ast: null,
+          parseError: false
+        };
+
+        input.addEventListener("focus", function () {
+          input.value = cells[address].raw;
+        });
+
+        input.addEventListener("blur", function () {
+          commit(address, input.value);
+        });
+
+        input.addEventListener("keydown", function (event) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            input.blur();
+          }
+        });
+
+        holder.appendChild(input);
+        grid.appendChild(holder);
+      });
+    });
+  }
+
+  function tokenize(expression) {
+    const tokens = [];
+    let i = 0;
+
+    while (i < expression.length) {
+      const ch = expression[i];
+
+      if (/\s/.test(ch)) {
+        i++;
+        continue;
+      }
+
+      if ("+-*/()".includes(ch)) {
+        tokens.push({ type: ch, value: ch });
+        i++;
+        continue;
+      }
+
+      const numberMatch = expression.slice(i).match(/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/);
+      if (numberMatch) {
+        tokens.push({ type: "number", value: Number(numberMatch[0]) });
+        i += numberMatch[0].length;
+        continue;
+      }
+
+      const wordMatch = expression.slice(i).match(/^[A-Za-z]+\d*/);
+      if (wordMatch) {
+        tokens.push({ type: "word", value: wordMatch[0].toUpperCase() });
+        i += wordMatch[0].length;
+        continue;
+      }
+
+      throw new Error("Invalid token");
+    }
+
+    return tokens;
+  }
+
+  function parseFormula(raw) {
+    if (!raw.startsWith("=")) return null;
+
+    const tokens = tokenize(raw.slice(1));
+    let pos = 0;
+
+    function peek() {
+      return tokens[pos];
+    }
+
+    function consume(type) {
+      const token = peek();
+      if (!token || token.type !== type) throw new Error("Expected " + type);
+      pos++;
+      return token;
+    }
+
+    function primary() {
+      const token = peek();
+      if (!token) throw new Error("Unexpected end");
+
+      if (token.type === "number") {
+        pos++;
+        return { kind: "number", value: token.value };
+      }
+
+      if (token.type === "word") {
+        pos++;
+        if (!addressIsValid(token.value)) throw new Error("Invalid reference");
+        return { kind: "ref", address: token.value };
+      }
+
+      if (token.type === "(") {
+        pos++;
+        const node = expressionNode();
+        consume(")");
+        return node;
+      }
+
+      throw new Error("Bad expression");
+    }
+
+    function unary() {
+      const token = peek();
+      if (token && (token.type === "+" || token.type === "-")) {
+        pos++;
+        return { kind: "unary", op: token.type, value: unary() };
+      }
+      return primary();
+    }
+
+    function term() {
+      let node = unary();
+      while (peek() && (peek().type === "*" || peek().type === "/")) {
+        const op = peek().type;
+        pos++;
+        node = { kind: "binary", op: op, left: node, right: unary() };
+      }
+      return node;
+    }
+
+    function expressionNode() {
+      let node = term();
+      while (peek() && (peek().type === "+" || peek().type === "-")) {
+        const op = peek().type;
+        pos++;
+        node = { kind: "binary", op: op, left: node, right: term() };
+      }
+      return node;
+    }
+
+    if (tokens.length === 0) throw new Error("Empty formula");
+    const ast = expressionNode();
+    if (pos !== tokens.length) throw new Error("Trailing tokens");
+    return ast;
+  }
+
+  function collectReferences(node, list) {
+    if (!node) return;
+    if (node.kind === "ref") {
+      list.push(node.address);
+    } else if (node.kind === "unary") {
+      collectReferences(node.value, list);
+    } else if (node.kind === "binary") {
+      collectReferences(node.left, list);
+      collectReferences(node.right, list);
+    }
+  }
+
+  function numericPlainValue(raw) {
+    if (raw === "") return { ok: true, value: 0 };
+    const trimmed = raw.trim();
+    if (trimmed === "") return { ok: false };
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)) {
+      return { ok: false };
+    }
+    const n = Number(trimmed);
+    return Number.isFinite(n) ? { ok: true, value: n } : { ok: false };
+  }
+
+  function formatNumber(value) {
+    if (Object.is(value, -0)) value = 0;
+    return String(value);
+  }
+
+  function recalculate() {
+    const deps = Object.create(null);
+    const cycleCells = new Set();
+
+    Object.keys(cells).forEach(function (address) {
+      const cell = cells[address];
+      cell.ast = null;
+      cell.parseError = false;
+      deps[address] = [];
+
+      if (cell.raw.startsWith("=")) {
+        try {
+          cell.ast = parseFormula(cell.raw);
+          collectReferences(cell.ast, deps[address]);
+        } catch (error) {
+          cell.parseError = true;
+        }
+      }
+    });
+
+    const color = Object.create(null);
+    const stack = [];
+
+    function visit(address) {
+      color[address] = 1;
+      stack.push(address);
+
+      deps[address].forEach(function (next) {
+        if (color[next] === 0 || color[next] === undefined) {
+          visit(next);
+        } else if (color[next] === 1) {
+          const start = stack.indexOf(next);
+          for (let i = start; i < stack.length; i++) {
+            cycleCells.add(stack[i]);
+          }
+        }
+      });
+
+      stack.pop();
+      color[address] = 2;
+    }
+
+    Object.keys(cells).forEach(function (address) {
+      if (!color[address]) visit(address);
+    });
+
+    const memo = Object.create(null);
+
+    function evaluateAst(node) {
+      if (node.kind === "number") return { status: "number", value: node.value };
+
+      if (node.kind === "ref") {
+        const ref = evaluateCell(node.address);
+        if (ref.status !== "number") return { status: "error" };
+        return ref;
+      }
+
+      if (node.kind === "unary") {
+        const value = evaluateAst(node.value);
+        if (value.status !== "number") return { status: "error" };
+        const result = node.op === "-" ? -value.value : value.value;
+        return Number.isFinite(result) ? { status: "number", value: result } : { status: "error" };
+      }
+
+      const left = evaluateAst(node.left);
+      const right = evaluateAst(node.right);
+      if (left.status !== "number" || right.status !== "number") return { status: "error" };
+
+      let result;
+      if (node.op === "+") result = left.value + right.value;
+      if (node.op === "-") result = left.value - right.value;
+      if (node.op === "*") result = left.value * right.value;
+      if (node.op === "/") result = left.value / right.value;
+
+      return Number.isFinite(result) ? { status: "number", value: result } : { status: "error" };
+    }
+
+    function evaluateCell(address) {
+      if (memo[address]) return memo[address];
+
+      const cell = cells[address];
+
+      if (cycleCells.has(address)) {
+        memo[address] = { status: "cycle", display: "#CYCLE" };
+        return memo[address];
+      }
+
+      if (!cell.raw.startsWith("=")) {
+        const numeric = numericPlainValue(cell.raw);
+        memo[address] = numeric.ok
+          ? { status: "number", value: numeric.value, display: cell.raw }
+          : { status: "text", display: cell.raw };
+        return memo[address];
+      }
+
+      if (cell.parseError || !cell.ast) {
+        memo[address] = { status: "error", display: "#ERR" };
+        return memo[address];
+      }
+
+      const result = evaluateAst(cell.ast);
+      if (result.status === "number") {
+        memo[address] = {
+          status: "number",
+          value: result.value,
+          display: formatNumber(result.value)
+        };
+      } else {
+        memo[address] = { status: "error", display: "#ERR" };
+      }
+      return memo[address];
+    }
+
+    Object.keys(cells).forEach(function (address) {
+      const result = evaluateCell(address);
+      cells[address].display = result.display;
+    });
+
+    render();
+  }
+
+  function render() {
+    Object.keys(cells).forEach(function (address) {
+      const cell = cells[address];
+      if (document.activeElement !== cell.input) {
+        cell.input.value = cell.display;
+      }
+    });
+  }
+
+  function commit(address, text) {
+    cells[address].raw = String(text);
+    recalculate();
+  }
+
+  function csvEscape(value) {
+    value = String(value);
+    return /[",\r\n]/.test(value) ? '"' + value.replace(/"/g, '""') + '"' : value;
+  }
+
+  makeGrid();
+  recalculate();
+
+  document.getElementById("export").addEventListener("click", function () {
+    const lines = rows.map(function (row) {
+      return cols.map(function (col) {
+        return csvEscape(cells[col + row].display);
+      }).join(",");
+    });
+    document.getElementById("csv").value = lines.join("\n");
+  });
+
+  window.sheet = {
+    set: function (address, text) {
+      address = normalizeAddress(address);
+      if (!addressIsValid(address)) throw new Error("Invalid cell address");
+      cells[address].raw = String(text);
+      recalculate();
+    },
+    get: function (address) {
+      address = normalizeAddress(address);
+      if (!addressIsValid(address)) throw new Error("Invalid cell address");
+      return cells[address].display;
+    },
+    raw: function (address) {
+      address = normalizeAddress(address);
+      if (!addressIsValid(address)) throw new Error("Invalid cell address");
+      return cells[address].raw;
+    }
+  };
+})();
+</script>
+</body>
+</html>

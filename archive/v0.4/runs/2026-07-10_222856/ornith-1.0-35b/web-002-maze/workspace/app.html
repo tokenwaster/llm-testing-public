@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Bots — 24 Autonomous Pathfinders</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    background:#0b0e1a;
+    color:#c8c8f0;
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    min-height:100vh;overflow:hidden;
+  }
+  #hud{
+    display:flex;gap:28px;align-items:center;margin-bottom:18px;
+    font-size:17px;background:rgba(255,255,255,.04);
+    padding:10px 28px;border-radius:10px;
+    border:1px solid rgba(255,255,255,.06);
+  }
+  #completed{color:#00ff99;font-weight:700;font-variant-numeric:tabular-nums}
+  #timer{color:#ffcc33;font-variant-numeric:tabular-nums}
+  #reset{
+    background:#c8c8f0;color:#0b0e1a;border:none;padding:8px 22px;
+    border-radius:6px;font-size:15px;font-weight:700;cursor:pointer;
+    transition:background .15s,transform .1s;
+  }
+  #reset:hover{background:#fff;transform:scale(1.04)}
+  #reset:active{transform:scale(.97)}
+  canvas{
+    border-radius:10px;
+    box-shadow:0 0 60px rgba(80,80,255,.12),0 0 120px rgba(80,80,255,.06);
+  }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <span>Bots completed: <span id="completed">0 / 24</span></span>
+  <span>Time: <span id="timer">0.0s</span></span>
+  <button id="reset">Reset</button>
+</div>
+
+<canvas id="maze" width="525" height="525"></canvas>
+
+<script>
+(function(){
+"use strict";
+
+/* ── constants ─────────────────────────────────────── */
+const COLS        = 21;
+const ROWS        = 21;
+const CELL        = 25;            // px per cell → canvas 525×525
+const NUM_BOTS    = 24;
+const AUTO_MS     = 170;           // ms between auto-ticks in the anim loop
+
+/* ── mutable state ─────────────────────────────────── */
+let grid       = [];   // COLS × ROWS wall flags per cell
+let bots       = [];   // array of bot objects
+let completedN = 0;
+let t0         = 0;    // performance.now() at game start
+let running    = false;
+let rafId      = null;
+let lastAuto   = 0;
+
+/* ══════════════════════════════════════════════════════
+   MAZE GENERATION — recursive backtracker (DFS)
+   Produces a perfect maze → guaranteed solvable.
+   ══════════════════════════════════════════════════════ */
+function generateMaze(){
+  const g = [];
+  for(let y=0;y<ROWS;y++){
+    g[y]=[];
+    for(let x=0;x<COLS;x++)
+      g[y][x]={top:true,right:true,bottom:true,left:true};
+  }
+  const vis = Array.from({length:ROWS},()=>Array(COLS).fill(false));
+  const stk = [{x:0,y:0}];  vis[0][0]=true;
+
+  const DIRS=[
+    {dx:0,dy:-1,wall:'top',   opp:'bottom'},
+    {dx:1, dy:0, wall:'right',opp:'left'},
+    {dx:0,dy:1, wall:'bottom',opp:'top'},
+    {dx:-1,dy:0,wall:'left',  opp:'right'}
+  ];
+
+  while(stk.length){
+    const c=stk[stk.length-1];
+    const nb=[];
+    for(const d of DIRS){
+      const nx=c.x+d.dx, ny=c.y+d.dy;
+      if(nx>=0&&nx<COLS&&ny>=0&&ny<ROWS&&!vis[ny][nx])
+        nb.push({x:nx,y:ny,w:d.wall,o:d.opp});
+    }
+    if(nb.length){
+      const ch=nb[Math.random()*nb.length|0];
+      g[c.y][c.x][ch.w]=false;
+      g[ch.y][ch.x][ch.o]=false;
+      vis[ch.y][ch.x]=true;
+      stk.push({x:ch.x,y:ch.y});
+    } else stk.pop();
+  }
+  return g;
+}
+
+/* ══════════════════════════════════════════════════════
+   BFS PATHFINDING — shortest path in unweighted grid
+   ══════════════════════════════════════════════════════ */
+function bfs(sx,sy,ex,ey){
+  const vis=Array.from({length:ROWS},()=>Array(COLS).fill(false));
+  const Q=[{x:sx,y:sy,path:[{x:sx,y:sy}]}];
+  vis[sy][sx]=true;
+  const D=[
+    {dx:0,dy:-1,w:'top'},{dx:1,dy:0,w:'right'},
+    {dx:0,dy:1,w:'bottom'},{dx:-1,dy:0,w:'left'}
+  ];
+  while(Q.length){
+    const cur=Q.shift();
+    if(cur.x===ex&&cur.y===ey) return cur.path;
+    for(const d of D){
+      const nx=cur.x+d.dx, ny=cur.y+d.dy;
+      if(nx>=0&&nx<COLS&&ny>=0&&ny<ROWS&&!vis[ny][nx]&&!grid[cur.y][cur.x][d.w]){
+        vis[ny][nx]=true;
+        Q.push({x:nx,y:ny,path:[...cur.path,{x:nx,y:ny}]});
+      }
+    }
+  }
+  return null; // unreachable — impossible in a perfect maze
+}
+
+/* ══════════════════════════════════════════════════════
+   GAME INIT / RESET
+   ══════════════════════════════════════════════════════ */
+function initGame(){
+  grid=generateMaze();
+  completedN=0;
+  t0=performance.now();
+  running=true;
+  lastAuto=performance.now();
+
+  bots=[];
+  for(let i=0;i<NUM_BOTS;i++){
+    const path=bfs(0,0,COLS-1,ROWS-1);
+    const delay=Math.floor(Math.random()*45);          // stagger 0‑44 ticks
+    const hue=(i*360/NUM_BOTS)%360;
+    bots.push({
+      x:0,y:0, path, pathIdx:0, delay,
+      done:false,
+      color:`hsl(${hue},82%,58%)`,
+      idx:i
+    });
+  }
+  updateHUD();
+}
+
+/* ══════════════════════════════════════════════════════
+   TICK — synchronous simulation advance
+   Each step: every unfinished bot advances one cell.
+   ══════════════════════════════════════════════════════ */
+function tick(n){
+  for(let s=0;s<n;s++){
+    if(!running) break;
+    let allDone=true;
+    for(const b of bots){
+      if(b.done) continue;
+      allDone=false;
+      if(b.delay>0){b.delay--;continue;}
+      b.pathIdx++;
+      if(b.pathIdx>=b.path.length){
+        b.done=true; completedN++;
+      } else {
+        b.x=b.path[b.pathIdx].x;
+        b.y=b.path[b.pathIdx].y;
+      }
+    }
+    if(allDone) running=false;
+  }
+  updateHUD();
+}
+
+/* ══════════════════════════════════════════════════════
+   HUD
+   ══════════════════════════════════════════════════════ */
+function updateHUD(){
+  document.getElementById("completed").textContent=completedN+" / "+NUM_BOTS;
+  const s=(performance.now()-t0)/1000;
+  document.getElementById("timer").textContent=s<60?s.toFixed(1)+"s":
+    Math.floor(s/60)+":"+((s%60)|0).toString().padStart(2,"0");
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDERING — canvas draw
+   ══════════════════════════════════════════════════════ */
+function render(){
+  const cv=document.getElementById("maze");
+  const ctx=cv.getContext("2d");
+  const W=cv.width, H=cv.height;
+
+  /* background */
+  ctx.fillStyle="#131830";
+  ctx.fillRect(0,0,W,H);
+
+  /* subtle checkerboard */
+  for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++){
+    if((x+y)&1){ctx.fillStyle="rgba(255,255,255,.018)";ctx.fillRect(x*CELL,y*CELL,CELL,CELL);}
+  }
+
+  /* spawn glow (top-left) */
+  const t=performance.now()/1000;
+  const p=.4+.3*Math.sin(t*3);
+  let g=ctx.createRadialGradient(CELL/2,CELL/2,0,CELL/2,CELL/2,CELL*.9);
+  g.addColorStop(0,`rgba(0,255,140,${p})`);g.addColorStop(1,"transparent");
+  ctx.fillStyle=g;ctx.fillRect(0,0,CELL,CELL);
+
+  /* exit glow (bottom-right) */
+  const ex=(COLS-1)*CELL, ey=(ROWS-1)*CELL;
+  g=ctx.createRadialGradient(ex+CELL/2,ey+CELL/2,0,ex+CELL/2,ey+CELL/2,CELL*.9);
+  g.addColorStop(0,`rgba(255,80,50,${p})`);g.addColorStop(1,"transparent");
+  ctx.fillStyle=g;ctx.fillRect(ex,ey,CELL,CELL);
+
+  /* walls */
+  ctx.strokeStyle="#7a7aaa";ctx.lineWidth=2;ctx.lineCap="round";
+  for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++){
+    const c=grid[y][x], px=x*CELL, py=y*CELL;
+    if(c.top){ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(px+CELL,py);ctx.stroke();}
+    if(c.right){ctx.beginPath();ctx.moveTo(px+CELL,py);ctx.lineTo(px+CELL,py+CELL);ctx.stroke();}
+    if(c.bottom){ctx.beginPath();ctx.moveTo(px,py+CELL);ctx.lineTo(px+CELL,py+CELL);ctx.stroke();}
+    if(c.left){ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(px,py+CELL);ctx.stroke();}
+  }
+
+  /* bots */
+  for(const b of bots){
+    const bx=b.x*CELL+CELL/2, by=b.y*CELL+CELL/2;
+    const R=CELL*.36;
+    const ph=b.idx*.7+t*4;
+    const scale=1+.08*Math.sin(ph);
+
+    /* outer glow */
+    ctx.beginPath();ctx.arc(bx,by,R*1.9*scale,0,Math.PI*2);
+    ctx.fillStyle="rgba(255,255,255,.06)";ctx.fill();
+
+    /* body */
+    ctx.beginPath();ctx.arc(bx,by,R*scale,0,Math.PI*2);
+    ctx.fillStyle=b.done?"rgba(255,255,255,.18)":b.color;
+    ctx.fill();
+    ctx.strokeStyle="rgba(255,255,255,.55)";ctx.lineWidth=1.4;ctx.stroke();
+
+    /* inner highlight */
+    ctx.beginPath();ctx.arc(bx-R*.18,by-R*.18,R*.3,0,Math.PI*2);
+    ctx.fillStyle="rgba(255,255,255,.25)";ctx.fill();
+  }
+
+  /* completed banner */
+  if(completedN===NUM_BOTS){
+    ctx.fillStyle=`rgba(0,255,140,${.15+.1*Math.sin(t*4)})`;
+    ctx.font="bold 22px system-ui";ctx.textAlign="center";
+    ctx.fillText("ALL BOTS COMPLETE",W/2,H-12);
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   ANIMATION LOOP
+   Auto-advances one tick every AUTO_MS ms, renders each frame.
+   ══════════════════════════════════════════════════════ */
+function loop(ts){
+  if(running&&ts-lastAuto>=AUTO_MS){tick(1);lastAuto=ts;}
+  render();
+  rafId=requestAnimationFrame(loop);
+}
+
+/* ══════════════════════════════════════════════════════
+   RESET (also wired to #reset button)
+   ══════════════════════════════════════════════════════ */
+function resetGame(){
+  if(rafId)cancelAnimationFrame(rafId);
+  initGame();
+  rafId=requestAnimationFrame(loop);
+}
+
+/* ── wire up DOM button ────────────────────────────── */
+document.getElementById("reset").addEventListener("click",resetGame);
+
+/* ── kick off ──────────────────────────────────────── */
+initGame();
+rafId=requestAnimationFrame(loop);
+
+/* ══════════════════════════════════════════════════════
+   PROGRAMMATIC API — exposed on window.game
+   ══════════════════════════════════════════════════════ */
+window.game={
+  get bots(){return bots;},
+  get completed(){return completedN;},
+  get elapsedMs(){return performance.now()-t0;},
+  tick:function(n){tick(n);},
+  reset:function(){resetGame();}
+};
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Spreadsheet</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #e8e8e8; padding: 12px; min-width: 640px; }
+h1 { font-size: 16px; margin-bottom: 8px; color: #333; }
+#app { min-width: 600px; min-height: 400px; background: #fff; border: 1px solid #bbb; padding: 10px; }
+table { border-collapse: collapse; width: 100%; }
+th {
+  background: #d0d7de; border: 1px solid #aaa;
+  text-align: center; padding: 3px 6px; font-size: 12px;
+  user-select: none; white-space: nowrap;
+}
+th.corner { min-width: 34px; }
+th.col-header { min-width: 70px; }
+th.row-header { min-width: 34px; }
+td { border: 1px solid #ccc; padding: 0; }
+td input {
+  display: block; width: 100%; height: 26px;
+  border: none; outline: none;
+  padding: 2px 5px; font-size: 12px; font-family: monospace;
+  background: #fff; color: #111;
+}
+td input:focus {
+  background: #fffde7;
+  box-shadow: inset 0 0 0 2px #1a73e8;
+  position: relative; z-index: 1;
+}
+td input.err { color: #c0392b; }
+#toolbar { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+#export {
+  padding: 6px 14px; font-size: 13px; cursor: pointer;
+  background: #1a73e8; color: #fff; border: none; border-radius: 4px;
+}
+#export:hover { background: #1558b0; }
+#csv {
+  display: block; width: 100%; height: 110px; margin-top: 8px;
+  font-family: monospace; font-size: 11px; resize: vertical;
+  border: 1px solid #bbb; padding: 6px;
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <table id="grid"></table>
+  <div id="toolbar">
+    <button id="export">Export CSV</button>
+  </div>
+  <textarea id="csv" placeholder="CSV output will appear here after clicking Export CSV…"></textarea>
+</div>
+<script>
+(function () {
+  const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  const ROWS = [1,2,3,4,5,6,7,8,9,10];
+  const rawData = {};
+
+  /* ── Build grid ── */
+  const table = document.getElementById('grid');
+
+  const hdr = table.insertRow();
+  let th = document.createElement('th');
+  th.className = 'corner'; hdr.appendChild(th);
+  for (const c of COLS) {
+    th = document.createElement('th');
+    th.className = 'col-header'; th.textContent = c; hdr.appendChild(th);
+  }
+
+  for (const r of ROWS) {
+    const tr = table.insertRow();
+    th = document.createElement('th');
+    th.className = 'row-header'; th.textContent = r; tr.appendChild(th);
+    for (const c of COLS) {
+      const id = c + r;
+      const td = tr.insertCell();
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.id = 'cell-' + id;
+      inp.autocomplete = 'off';
+      inp.spellcheck = false;
+
+      inp.addEventListener('focus', () => {
+        inp.value = rawData[id] || '';
+        inp.classList.remove('err');
+      });
+      inp.addEventListener('blur', () => {
+        rawData[id] = inp.value;
+        recalcAll();
+      });
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
+
+      td.appendChild(inp);
+    }
+  }
+
+  /* ── Tokenizer ── */
+  function tokenize(expr) {
+    const toks = [];
+    let i = 0;
+    while (i < expr.length) {
+      const ch = expr[i];
+      if (ch === ' ') { i++; continue; }
+      if ('+-*/()'.includes(ch)) { toks.push({ t: 'op', v: ch }); i++; continue; }
+      if ((ch >= '0' && ch <= '9') || ch === '.') {
+        let s = '';
+        while (i < expr.length && ((expr[i] >= '0' && expr[i] <= '9') || expr[i] === '.'))
+          s += expr[i++];
+        toks.push({ t: 'num', v: parseFloat(s) });
+        continue;
+      }
+      if (ch >= 'A' && ch <= 'J') {
+        let s = ch; i++;
+        while (i < expr.length && expr[i] >= '0' && expr[i] <= '9') s += expr[i++];
+        if (!/^[A-J]([1-9]|10)$/.test(s)) throw new Error('bad ref');
+        toks.push({ t: 'ref', v: s });
+        continue;
+      }
+      throw new Error('bad char: ' + ch);
+    }
+    return toks;
+  }
+
+  /* ── Recursive-descent parser ── */
+  function evalFormula(exprStr, visiting) {
+    const toks = tokenize(exprStr);
+    let pos = 0;
+
+    function peek()    { return toks[pos]; }
+    function consume() { return toks[pos++]; }
+
+    function expression() {
+      let v = term();
+      while (peek() && (peek().v === '+' || peek().v === '-')) {
+        const op = consume().v, r = term();
+        if (v === '#CYCLE' || r === '#CYCLE') return '#CYCLE';
+        if (v === '#ERR'   || r === '#ERR')   return '#ERR';
+        v = op === '+' ? v + r : v - r;
+      }
+      return v;
+    }
+
+    function term() {
+      let v = factor();
+      while (peek() && (peek().v === '*' || peek().v === '/')) {
+        const op = consume().v, r = factor();
+        if (v === '#CYCLE' || r === '#CYCLE') return '#CYCLE';
+        if (v === '#ERR'   || r === '#ERR')   return '#ERR';
+        if (op === '/') { v = v / r; }
+        else            { v = v * r; }
+      }
+      return v;
+    }
+
+    function factor() {
+      const tok = peek();
+      if (!tok) throw new Error('unexpected end');
+      if (tok.t === 'op' && tok.v === '(') {
+        consume();
+        const v = expression();
+        if (!peek() || peek().v !== ')') throw new Error('missing )');
+        consume();
+        return v;
+      }
+      if (tok.t === 'op' && tok.v === '-') { consume(); const v = factor(); return (v === '#CYCLE' || v === '#ERR') ? v : -v; }
+      if (tok.t === 'op' && tok.v === '+') { consume(); return factor(); }
+      if (tok.t === 'num') { consume(); return tok.v; }
+      if (tok.t === 'ref') {
+        consume();
+        const rv = evalCell(tok.v, visiting);
+        if (rv === '#CYCLE' || rv === '#ERR') return rv;
+        if (typeof rv === 'string') {
+          if (rv === '') return 0;
+          const n = parseFloat(rv);
+          return isNaN(n) ? '#ERR' : n;
+        }
+        return rv;
+      }
+      throw new Error('unexpected token');
+    }
+
+    const result = expression();
+    if (pos !== toks.length) throw new Error('trailing tokens');
+    return result;
+  }
+
+  /* ── Cell evaluation ── */
+  function evalCell(id, visiting) {
+    if (!visiting) visiting = new Set();
+    const raw = rawData[id] || '';
+    if (raw === '') return 0;
+    if (!raw.startsWith('=')) {
+      const n = parseFloat(raw);
+      return isNaN(n) ? raw : n;
+    }
+    if (visiting.has(id)) return '#CYCLE';
+    visiting.add(id);
+    let result;
+    try {
+      result = evalFormula(raw.slice(1), visiting);
+    } catch(e) {
+      result = '#ERR';
+    }
+    visiting.delete(id);
+    return result;
+  }
+
+  function displayValue(id) {
+    const raw = rawData[id] || '';
+    if (!raw.startsWith('=')) return raw;
+    const v = evalCell(id);
+    if (v === '#CYCLE' || v === '#ERR') return v;
+    if (typeof v === 'number') {
+      if (!isFinite(v) || isNaN(v)) return '#ERR';
+      return String(parseFloat(v.toPrecision(10)));
+    }
+    return String(v);
+  }
+
+  function recalcAll() {
+    for (const c of COLS) {
+      for (const r of ROWS) {
+        const id = c + r;
+        const inp = document.getElementById('cell-' + id);
+        if (document.activeElement === inp) continue;
+        const d = displayValue(id);
+        inp.value = d;
+        inp.classList.toggle('err', d === '#ERR' || d === '#CYCLE');
+      }
+    }
+  }
+
+  /* ── Export CSV ── */
+  document.getElementById('export').addEventListener('click', () => {
+    const lines = ROWS.map(r =>
+      COLS.map(c => displayValue(c + r)).join(',')
+    );
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  /* ── Scripting API ── */
+  window.sheet = {
+    set(ref, value) {
+      const inp = document.getElementById('cell-' + ref);
+      if (!inp) return;
+      rawData[ref] = value;
+      recalcAll();
+    },
+    get(ref) {
+      return displayValue(ref);
+    },
+    raw(ref) {
+      return rawData[ref] || '';
+    }
+  };
+
+  recalcAll();
+})();
+</script>
+</body>
+</html>

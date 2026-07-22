@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Explorer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:#1a1a2e;font-family:'Segoe UI',system-ui,sans-serif;color:#eee}
+h1{margin-bottom:8px;font-size:1.4em;color:#e94560;letter-spacing:1px}
+#stats{display:flex;gap:24px;margin-bottom:10px;font-size:1.05em}
+#stats span{background:#16213e;padding:5px 14px;border-radius:5px}
+#maze{border:3px solid #e94560;border-radius:5px;overflow:hidden;box-shadow:0 0 24px rgba(233,69,96,.25)}
+#reset{margin-top:14px;padding:9px 28px;font-size:.95em;background:#e94560;color:#fff;border:none;border-radius:5px;cursor:pointer;transition:background .2s}
+#reset:hover{background:#c73650}
+</style>
+</head>
+<body>
+<h1>Maze Explorer</h1>
+<div id="stats">
+  <span>Completed: <strong id="completed">0 / 24</strong></span>
+  <span>Time: <strong id="timer">0.0s</strong></span>
+</div>
+<canvas id="maze"></canvas>
+<button id="reset">New Maze</button>
+
+<script>
+"use strict";
+
+/* ── Seeded PRNG (mulberry32) ─────────────────────────────── */
+function createRng(seed){
+  var s=seed|0;
+  return function(){
+    s=(s+0x6D2B79F5)|0;
+    var t=Math.imul(s^(s>>>15),1|s);
+    t=(t+Math.imul(t^(t>>>7),61|t))^t;
+    return((t^(t>>>14))>>>0)/4294967296;
+  };
+}
+
+/* ── Constants ────────────────────────────────────────────── */
+var ROWS=20, COLS=20, CELL=28;
+var CANVAS_SIZE=ROWS*CELL; // 560px
+var NUM_BOTS=24;
+var ANIM_MS=160;
+
+var DIRS=[
+  {name:'n',dr:-1,dc:0,opp:'s'},
+  {name:'e',dr:0,dc:1,opp:'w'},
+  {name:'s',dr:1,dc:0,opp:'n'},
+  {name:'w',dr:0,dc:-1,opp:'e'}
+];
+
+function enc(r,c){return r*1000+c;}
+
+/* ── Maze generation (iterative DFS / recursive backtracking) */
+var mazeGrid=null;
+var EXIT_R, EXIT_C;
+
+function generateMaze(rows,cols,rng){
+  var g=[];
+  for(var r=0;r<rows;r++){
+    g[r]=[];
+    for(var c=0;c<cols;c++)
+      g[r][c]={n:true,e:true,s:true,w:true};
+  }
+  var vis=Array.from({length:rows},function(){return Array(cols).fill(false);});
+  var stack=[{r:0,c:0}];
+  vis[0][0]=true;
+  while(stack.length){
+    var cur=stack[stack.length-1];
+    var nb=[];
+    for(var d=0;d<DIRS.length;d++){
+      var nr=cur.r+DIRS[d].dr, nc=cur.c+DIRS[d].dc;
+      if(nr>=0&&nr<rows&&nc>=0&&nc<cols&&!vis[nr][nc])
+        nb.push({r:nr,c:nc,dir:DIRS[d].name});
+    }
+    if(nb.length){
+      var nx=nb[Math.floor(rng()*nb.length)];
+      g[cur.r][cur.c][nx.dir]=false;
+      var opp={n:'s',e:'w',s:'n',w:'e'}[nx.dir];
+      g[nx.r][nx.c][opp]=false;
+      vis[nx.r][nx.c]=true;
+      stack.push({r:nx.r,c:nx.c});
+    } else {
+      stack.pop();
+    }
+  }
+  return g;
+}
+
+function getWalls(r,c){
+  if(r<0||r>=ROWS||c<0||c>=COLS) return{n:true,e:true,s:true,w:true};
+  var cell=mazeGrid[r][c];
+  return{n:!!cell.n,e:!!cell.e,s:!!cell.s,w:!!cell.w};
+}
+
+/* ── Bot ──────────────────────────────────────────────────── */
+function Bot(id,startR,startC,dirOrder){
+  this.id=id;
+  this.pos={r:startR,c:startR===0?startC:startC};
+  // fix: pos should use startC not startR for c
+  this.pos={r:startR,c:startC};
+  this.path=[{r:startR,c:startC}];       // every cell entered in order
+  this.dfsStack=[{r:startR,c:startC}];    // current DFS stack
+  this.deadEnds=new Set();                 // encoded keys of fully-explored cells
+  this.discovered=new Map();               // discovered wall configs per cell
+  this.dirOrder=dirOrder;                  // shuffled direction names
+  this.finished=false;
+  this.finishTick=null;
+
+  var key=enc(startR,startC);
+  this.discovered.set(key,getWalls(startR,startC));
+}
+
+Bot.prototype.step=function(tickCount){
+  if(this.finished) return;
+
+  var p=this.pos;
+  if(p.r===EXIT_R&&p.c===EXIT_C){
+    this.finished=true;
+    this.finishTick=tickCount;
+    return;
+  }
+
+  var key=enc(p.r,p.c);
+  var walls=this.discovered.get(key);
+  if(!walls) return; // safety
+
+  /* try forward move in preferred direction order */
+  for(var di=0;di<this.dirOrder.length;di++){
+    var dn=this.dirOrder[di];
+    if(walls[dn]) continue;
+    var dd=null;
+    for(var d2=0;d2<DIRS.length;d2++) if(DIRS[d2].name===dn){dd=DIRS[d2];break;}
+    var nr=p.r+dd.dr, nc=p.c+dd.dc;
+    if(nr<0||nr>=ROWS||nc<0||nc>=COLS) continue;
+    var nk=enc(nr,nc);
+    if(this.deadEnds.has(nk)) continue;
+
+    /* move forward */
+    this.pos={r:nr,c:nc};
+    this.path.push({r:nr,c:nc});
+    this.dfsStack.push({r:nr,c:nc});
+    var nkey=enc(nr,nc);
+    if(!this.discovered.has(nkey))
+      this.discovered.set(nkey,getWalls(nr,nc));
+    return;
+  }
+
+  /* no forward move → backtrack */
+  this.deadEnds.add(key);
+  if(this.dfsStack.length>1){
+    this.dfsStack.pop();
+    var prev=this.dfsStack[this.dfsStack.length-1];
+    this.pos={r:prev.r,c:prev.c};
+    this.path.push({r:prev.r,c:prev.c}); // record backtrack entry
+  } else {
+    /* should never happen in a connected maze */
+    this.finished=true;
+  }
+};
+
+/* ── Game state ───────────────────────────────────────────── */
+var bots=[];
+var elapsed=0;
+var gameFinished=false;
+var lastTickTime=0;
+var animProgress=1.0;
+var animFrom=[];   // {from:{r,c}, to:{r,c}} per bot
+
+/* ── Game API ─────────────────────────────────────────────── */
+var game={};
+
+Object.defineProperty(game,'size',{get:function(){return{rows:ROWS,cols:COLS};}});
+Object.defineProperty(game,'spawn',{get:function(){return{r:0,c:0};}});
+Object.defineProperty(game,'exit',{get:function(){return{r:EXIT_R,c:EXIT_C};}});
+
+game.walls=function(r,c){ return getWalls(r,c); };
+
+Object.defineProperty(game,'elapsed',{get:function(){return elapsed;}});
+
+Object.defineProperty(game,'bots',{get:function(){
+  return bots.map(function(b){
+    var de=[];
+    b.deadEnds.forEach(function(k){de.push({r:Math.floor(k/1000),c:k%1000});});
+    return{
+      path:b.path.slice(),
+      deadEnds:de,
+      finishTick:b.finishTick
+    };
+  });
+}});
+
+game.reset=function(seed){
+  var s=(typeof seed==='number'&&!isNaN(seed))?seed|0:((Math.random()*2147483647)|0);
+
+  mazeGrid=generateMaze(ROWS,COLS,createRng(s));
+  EXIT_R=ROWS-1;
+  EXIT_C=COLS-1;
+
+  bots=[];
+  for(var i=0;i<NUM_BOTS;i++){
+    var brng=createRng(s+i+1);
+    var order=[].concat(DIRS).sort(function(){return brng()-0.5;}).map(function(d){return d.name;});
+    bots.push(new Bot(i,0,0,order));
+  }
+
+  elapsed=0;
+  gameFinished=false;
+  lastTickTime=performance.now();
+  animProgress=1.0;
+  animFrom=bots.map(function(b){return{from:{r:b.pos.r,c:b.pos.c},to:{r:b.pos.r,c:b.pos.c}};});
+
+  updateUI();
+};
+
+game.tick=function(n){
+  if(gameFinished||n<=0) return;
+
+  /* capture current visual positions as "from" */
+  var fromPos=bots.map(function(b,i){
+    if(animProgress>0&&animProgress<1){
+      var f=animFrom[i].from, t=animFrom[i].to;
+      var tt=easeInOut(animProgress);
+      return{r:f.r+(t.r-f.r)*tt, c:f.c+(t.c-f.c)*tt};
+    }
+    return{r:b.pos.r,c:b.pos.c};
+  });
+
+  for(var t=0;t<n;t++){
+    elapsed++;
+    var allDone=true;
+    for(var bi=0;bi<bots.length;bi++){
+      if(!bots[bi].finished){
+        allDone=false;
+        bots[bi].step(elapsed);
+      }
+    }
+    if(allDone){gameFinished=true;break;}
+  }
+
+  var toPos=bots.map(function(b){return{r:b.pos.r,c:b.pos.c};});
+  animFrom=[];
+  for(var j=0;j<bots.length;j++)
+    animFrom.push({from:fromPos[j],to:toPos[j]});
+  animProgress=0;
+  lastTickTime=performance.now();
+
+  updateUI();
+};
+
+window.game=game;
+
+/* ── Rendering ────────────────────────────────────────────── */
+var canvas=document.getElementById('maze');
+var ctx=canvas.getContext('2d');
+canvas.width=CANVAS_SIZE;
+canvas.height=CANVAS_SIZE;
+
+var completedEl=document.getElementById('completed');
+var timerEl=document.getElementById('timer');
+
+function updateUI(){
+  var done=bots.filter(function(b){return b.finished;}).length;
+  completedEl.textContent=done+' / '+NUM_BOTS;
+  timerEl.textContent=(elapsed*0.05).toFixed(1)+'s';
+}
+
+function easeInOut(t){
+  return t<0.5?2*t*t:-2*(t-1)*(t-1)+1;
+}
+
+var BOT_COLORS=[
+  '#e94560','#0f3460','#16c79a','#f5a623','#9b59b6','#e74c3c',
+  '#3498db','#2ecc71','#f39c12','#1abc9c','#e67e22','#8e44ad',
+  '#ff6b6b','#4ecdc4','#ffe66d','#a8e6cf','#fd79a8','#74b9ff',
+  '#55efc4','#fab1a0','#81ecec','#ff7675','#74b9ff','#dfe6e9'
+];
+
+function drawMaze(){
+  /* background */
+  ctx.fillStyle='#faf3e6';
+  ctx.fillRect(0,0,CANVAS_SIZE,CANVAS_SIZE);
+
+  /* cell fill */
+  for(var r=0;r<ROWS;r++){
+    for(var c=0;c<COLS;c++){
+      ctx.fillStyle=(r===EXIT_R&&c===EXIT_C)?'#ffeaa7':'#faf3e6';
+      ctx.fillRect(c*CELL+1,r*CELL+1,CELL-2,CELL-2);
+    }
+  }
+
+  /* walls */
+  ctx.strokeStyle='#2c2c54';
+  ctx.lineWidth=3;
+  ctx.lineCap='round';
+  for(var r=0;r<ROWS;r++){
+    for(var c=0;c<COLS;c++){
+      var w=getWalls(r,c);
+      var x=c*CELL, y=r*CELL;
+      if(w.n){ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+CELL,y);ctx.stroke();}
+      if(w.e){ctx.beginPath();ctx.moveTo(x+CELL,y);ctx.lineTo(x+CELL,y+CELL);ctx.stroke();}
+      if(w.s){ctx.beginPath();ctx.moveTo(x,y+CELL);ctx.lineTo(x+CELL,y+CELL);ctx.stroke();}
+      if(w.w){ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x,y+CELL);ctx.stroke();}
+    }
+  }
+
+  /* exit star */
+  var ex=EXIT_C*CELL+CELL/2, ey=EXIT_R*CELL+CELL/2;
+  ctx.fillStyle='#e94560';
+  ctx.beginPath();ctx.arc(ex,ey,CELL/3,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#fff';
+  ctx.font='bold '+Math.round(CELL/3.2)+'px sans-serif';
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText('★',ex,ey);
+
+  /* start marker */
+  var sx=CELL/2, sy=CELL/2;
+  ctx.fillStyle='#0f3460';
+  ctx.beginPath();ctx.arc(sx,sy,CELL/5,0,Math.PI*2);ctx.fill();
+}
+
+function drawBots(prog){
+  for(var i=0;i<bots.length;i++){
+    var b=bots[i];
+    var x,y;
+    if(prog>0&&prog<1&&!b.finished){
+      var f=animFrom[i].from, t=animFrom[i].to;
+      var tt=easeInOut(prog);
+      x=(f.c+(t.c-f.c)*tt)*CELL+CELL/2;
+      y=(f.r+(t.r-f.r)*tt)*CELL+CELL/2;
+    } else {
+      x=b.pos.c*CELL+CELL/2;
+      y=b.pos.r*CELL+CELL/2;
+    }
+
+    /* glow for finished bots */
+    if(b.finished){
+      ctx.fillStyle='rgba(46,204,113,.25)';
+      ctx.beginPath();ctx.arc(x,y,CELL/2.8,0,Math.PI*2);ctx.fill();
+    }
+
+    /* dot */
+    ctx.fillStyle=BOT_COLORS[i%BOT_COLORS.length];
+    ctx.beginPath();ctx.arc(x,y,CELL/5.5,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,.7)';
+    ctx.lineWidth=1.5;
+    ctx.stroke();
+
+    /* finished checkmark */
+    if(b.finished){
+      ctx.fillStyle='#fff';
+      ctx.font='bold '+Math.round(CELL/6)+'px sans-serif';
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText('✓',x,y+1);
+    }
+  }
+}
+
+/* ── Animation loop ───────────────────────────────────────── */
+var rafId=null;
+function renderLoop(){
+  drawMaze();
+
+  if(animProgress<1){
+    var now=performance.now();
+    animProgress=Math.min(1, animProgress+(now-lastTickTime)/ANIM_MS);
+    lastTickTime=now;
+  } else {
+    /* keep loop alive for new ticks */
+  }
+
+  drawBots(animProgress);
+  rafId=requestAnimationFrame(renderLoop);
+}
+
+/* ── Events & init ────────────────────────────────────────── */
+document.getElementById('reset').addEventListener('click',function(){
+  game.reset();
+});
+
+game.reset(42);
+renderLoop();
+</script>
+</body>
+</html>

@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Maze Exploration Game</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e1e1e;
+            color: #dcdcdc;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            border: 4px solid #333;
+            background-color: #f4f4f4;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        .ui-panel {
+            margin-top: 15px;
+            text-align: center;
+            font-size: 1.2rem;
+            display: flex;
+            gap: 30px;
+            align-items: center;
+        }
+
+        .stat-box {
+            background: #2a2a2a;
+            padding: 8px 16px;
+            border-radius: 4px;
+            min-width: 120px;
+            text-align: center;
+            font-weight: bold;
+            border: 1px solid #444;
+        }
+
+        button {
+            background-color: #3a3a3a;
+            color: white;
+            border: 1px solid #555;
+            padding: 8px 20px;
+            font-size: 1rem;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background-color: #4a4a4a;
+        }
+
+        /* Debug/Info overlay */
+        #debug-info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #888;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="mazeCanvas" width="600" height="600"></canvas>
+    <div id="debug-info"></div>
+</div>
+
+<div class="ui-panel">
+    <div class="stat-box" id="timer">0 ticks</div>
+    <div class="stat-box" id="completed">0/24 bots completed</div>
+    <button id="reset">Reset Game</button>
+</div>
+
+<script>
+/**
+ * Seeded Random Number Generator (Mulberry32)
+ */
+function createRNG(seed) {
+    let s0 = 0xdeadbeef, s1 = 0x12345678, s2 = 0x98765432, s3 = 0xefcdabca;
+    return function() {
+        const t = (s0 += 0x6D2B79F5);
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+/**
+ * Maze Generation (Recursive Backtracker)
+ */
+class Maze {
+    constructor(rows, cols, rng) {
+        this.rows = rows;
+        this.cols = cols;
+        this.rng = rng;
+        
+        // Initialize walls: all true initially
+        this.walls = [];
+        for(let r=0; r<rows; r++) {
+            let row = [];
+            for(let c=0; c<cols; c++) {
+                row.push({n:false, e:false, s:false, w:false});
+            }
+            this.walls.push(row);
+        }
+
+        // Generate maze
+        this.generate();
+    }
+
+    generate() {
+        // Stack for DFS backtracking
+        let stack = [];
+        
+        // Start at 0,0 (assuming odd grid logic usually helps, but we'll handle even/odd)
+        // Standard RB works on a grid where every cell is visited.
+        // We need to ensure connectivity.
+        
+        // To simplify, we treat the maze as a graph where we carve passages.
+        // Let's use a standard algorithm: pick random unvisited cell, carve path to stack top.
+        
+        let visited = new Set();
+        let current = {r: 0, c: 0};
+        visited.add(`${current.r},${current.c}`);
+        stack.push(current);
+
+        // Directions for carving (N, E, S, W)
+        const dirs = [
+            {dr: -2, dc: 0}, // N
+            {dr: 0, dc: 2},  // E
+            {dr: 2, dc: 0},  // S
+            {dr: 0, dc: -2}  // W
+        ];
+
+        while(stack.length > 0) {
+            let cell = stack[stack.length - 1];
+            let neighbors = [];
+
+            for(let d of dirs) {
+                let nr = cell.r + d.dr;
+                let nc = cell.c + d.dc;
+
+                if(nr >= 0 && nr < this.rows && nc >= 0 && nc < this.cols && !visited.has(`${nr},${nc}`)) {
+                    neighbors.push({r: nr, c: nc, dr: d.dr, dc: d.dc});
+                }
+            }
+
+            if(neighbors.length > 0) {
+                // Pick random neighbor
+                let next = neighbors[this.rng()];
+                
+                // Remove walls between current and next
+                this.removeWalls(cell, next);
+                
+                visited.add(`${next.r},${next.c}`);
+                stack.push(next);
+            } else {
+                stack.pop();
+            }
+        }
+
+        // Mark exit (bottom-right)
+        this.exit = {r: this.rows - 1, c: this.cols - 1};
+    }
+
+    removeWalls(a, b) {
+        let dr = Math.abs(b.r - a.r);
+        let dc = Math.abs(b.c - a.c);
+
+        if(dr === 2) { // Vertical connection (N/S)
+            if(b.r < a.r) { // North
+                this.walls[a.r][a.c].n = false;
+                this.walls[b.r][b.c].s = false;
+            } else { // South
+                this.walls[a.r][a.c].s = false;
+                this.walls[b.r][b.c].n = false;
+            }
+        } else if(dc === 2) { // Horizontal connection (E/W)
+            if(b.c < a.c) { // West
+                this.walls[a.r][a.c].w = false;
+                this.walls[b.r][b.c].e = false;
+            } else { // East
+                this.walls[a.r][a.c].e = false;
+                this.walls[b.r][b.c].w = false;
+            }
+        }
+    }
+
+    getWalls(r, c) {
+        return this.walls[r][c];
+    }
+}
+
+/**
+ * Bot Class
+ */
+class Bot {
+    constructor(id, spawnR, spawnC, exitR, exitC, walls, rng) {
+        this.id = id;
+        this.r = spawnR;
+        this.c = spawnC;
+        this.exitR = exitR;
+        this.exitC = exitC;
+        this.walls = walls;
+        this.path = [{r: spawnR, c: spawnC}]; // History of cells entered
+        this.deadEnds = new Set(); // Cells marked as dead ends (branches)
+        this.finishTick = null;
+        
+        // Exploration preference: Random permutation of directions [N, E, S, W]
+        const dirs = ['n', 'e', 's', 'w'];
+        let shuffled = [...dirs];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+            const j = Math.floor(rng() * (i + 1));
+            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        this.dirOrder = shuffled; // e.g., ['e', 'n', 's', 'w']
+
+        // Visual interpolation state
+        this.x = spawnR; // Logical row (0..rows-1)
+        this.y = spawnC; // Logical col (0..cols-1)
+    }
+
+    move() {
+        if(this.finishTick !== null) return false; // Already finished
+
+        let currentWalls = this.walls[this.r][this.c];
+        
+        // Find valid neighbors (not walls, not visited in path)
+        // Note: In a perfect maze, we only need to check unvisited cells.
+        // However, we must handle backtracking logic carefully.
+        
+        let candidates = [];
+        const dirsMap = {n:{dr:-1,dc:0}, e:{dr:0,dc:1}, s:{dr:1,dc:0}, w:{dr:0,dc:-1}};
+
+        for(let dir of this.dirOrder) {
+            let d = dirsMap[dir];
+            let nr = this.r + d.dr;
+            let nc = this.c + d.dc;
+
+            // Check bounds
+            if(nr >= 0 && nr < this.walls.length && nc >= 0 && nc < this.walls[0].length) {
+                // Check wall
+                let blocked = false;
+                if(dir === 'n' && currentWalls.n) blocked = true;
+                if(dir === 'e' && currentWalls.e) blocked = true;
+                if(dir === 's' && currentWalls.s) blocked = true;
+                if(dir === 'w' && currentWalls.w) blocked = true;
+
+                if(!blocked) {
+                    // Check if visited in path (blind exploration rule)
+                    let isVisited = false;
+                    for(let p of this.path) {
+                        if(p.r === nr && p.c === nc) {
+                            isVisited = true;
+                            break;
+                        }
+                    }
+
+                    if(!isVisited) {
+                        candidates.push({r: nr, c: nc, dir: dir});
+                    }
+                }
+            }
+        }
+
+        if(candidates.length > 0) {
+            // Move forward
+            let next = candidates[this.rng()];
+            this.path.push(next);
+            this.r = next.r;
+            this.c = next.c;
+            
+            // Check exit
+            if(this.r === this.exitR && this.c === this.exitC) {
+                this.finishTick = 0; // Will be set to global tick later
+                return true;
+            }
+        } else {
+            // Dead end or fully explored branch -> Backtrack
+            // Remove last cell from path (effectively moving back to previous)
+            if(this.path.length > 1) {
+                this.path.pop();
+                let prev = this.path[this.path.length - 1];
+                this.r = prev.r;
+                this.c = prev.c;
+                
+                // Mark current cell as dead end branch? 
+                // The prompt says "records that branch in its own memory as dead".
+                // Usually, the cell we just came from (the one with no unvisited neighbors) is a dead end.
+                // But strictly speaking, the path segment leading here is dead.
+                // We'll mark the current cell as a dead end for future reference if needed, 
+                // but standard DFS logic handles this via the stack/path popping.
+                // Let's add to deadEnds set to prevent re-entering this specific cul-de-sac easily?
+                // Actually, in a perfect maze, once you backtrack, you never want to go back into that branch unless it's the only way out (which is impossible in perfect maze without loops).
+                // So we can mark the current cell as dead.
+                this.deadEnds.add(`${this.r},${this.c}`);
+            }
+        }
+        
+        return false;
+    }
+
+    getRng() {
+        // Use a simple deterministic random for movement choice if needed, 
+        // but since we shuffle dirOrder, we can just pick the first valid one found?
+        // No, to spread out, we should pick randomly among valid candidates.
+        // We need access to a rng instance. Let's assume it's passed or use Math.random().
+        // For determinism in `tick`, we need consistent randomness. 
+        // The prompt says "tick(n) must be deterministic". So we can't use Math.random() inside tick unless seeded.
+        // However, the Bot class doesn't hold a seed. We will pass a rng to move or use a shared one.
+        // Let's assume `move` is called with context or uses a shared RNG.
+    }
+}
+
+/**
+ * Game Controller
+ */
+const canvas = document.getElementById('mazeCanvas');
+const ctx = canvas.getContext('2d');
+const timerEl = document.getElementById('timer');
+const completedEl = document.getElementById('completed');
+const resetBtn = document.getElementById('reset');
+const debugInfo = document.getElementById('debug-info');
+
+let maze;
+let bots = [];
+let elapsed = 0;
+let isFrozen = false;
+let animationId;
+let lastTickTime = 0;
+
+// Shared RNG for the game loop (deterministic based on seed)
+let gameRng;
+
+function initGame(seed) {
+    // Reset state
+    if(maze) maze = null;
+    if(bots) bots = [];
+    
+    const rows = 20;
+    const cols = 20;
+    
+    // Initialize RNG
+    if (seed === undefined || seed === null) {
+        gameRng = createRNG(Math.random() * 1e9);
+    } else {
+        gameRng = createRNG(seed);
+    }
+
+    maze = new Maze(rows, cols, gameRng);
+    
+    // Spawn bots at top-left (0,0) or random? Prompt says "bots at spawn". Usually implies a single point.
+    // Let's put them all at (1,1) to avoid walls if possible, or just (0,0). 
+    // The maze generation starts at (0,0), so (0,0) is safe.
+    const spawnR = 0;
+    const spawnC = 0;
+
+    bots = [];
+    for(let i=0; i<24; i++) {
+        bots.push(new Bot(i, spawnR, spawnC, maze.exit.r, maze.exit.c, maze.walls, gameRng));
+    }
+
+    elapsed = 0;
+    isFrozen = false;
+    
+    // UI Reset
+    timerEl.innerText = "0 ticks";
+    completedEl.innerText = "0/24 bots completed";
+    
+    if(animationId) cancelAnimationFrame(animationId);
+    lastTickTime = performance.now();
+    animationId = requestAnimationFrame(renderLoop);
+}
+
+// Expose API to window
+window.game = {
+    tick: function(n) {
+        if(isFrozen) return; // Should not happen unless frozen
+        
+        for(let i=0; i<n; i++) {
+            let finishedThisTick = false;
+            
+            // Update bots
+            for(let bot of bots) {
+                if(bot.finishTick === null) {
+                    // Check if we are at exit (should be handled by move, but double check)
+                    if(bot.r === maze.exit.r && bot.c === maze.exit.c) {
+                        bot.finishTick = elapsed + 1;
+                        finishedThisTick = true;
+                    } else {
+                        let moved = bot.move(); // Uses gameRng for determinism
+                        if(moved) {
+                            // If move returns true, it means we reached exit? 
+                            // My Bot.move logic sets finishTick inside.
+                            // Let's rely on the check at start of loop or end of move.
+                            // Actually, my Bot.move checks exit and returns true.
+                            if(bot.finishTick === null) {
+                                bot.finishTick = elapsed + 1;
+                                finishedThisTick = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if all finished
+            let allFinished = bots.every(b => b.finishTick !== null);
+            if(allFinished) {
+                isFrozen = true;
+            }
+        }
+        
+        elapsed += n;
+        updateUI();
+    },
+    
+    reset: function(seed) {
+        initGame(seed);
+    },
+
+    get size() { return {rows: maze.rows, cols: maze.cols}; },
+    get spawn() { return {r: 0, c: 0}; }, // Default spawn
+    get exit() { return maze.exit; },
+    
+    walls: function(r, c) {
+        if(!maze) return null;
+        return maze.walls[r][c];
+    },
+
+    get bots() {
+        return bots.map(b => ({
+            id: b.id,
+            path: b.path,
+            deadEnds: Array.from(b.deadEnds),
+            finishTick: b.finishTick
+        }));
+    },
+
+    get elapsed() { return elapsed; }
+};
+
+function updateUI() {
+    timerEl.innerText = `${elapsed} ticks`;
+    let completedCount = bots.filter(b => b.finishTick !== null).length;
+    completedEl.innerText = `${completedCount}/24 bots completed`;
+    
+    if(completedCount === 24) {
+        debugInfo.innerText = "All bots found the exit!";
+    } else {
+        debugInfo.innerText = "";
+    }
+}
+
+function renderLoop(timestamp) {
+    // Clear canvas
+    ctx.fillStyle = "#f0f0f0";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if(maze) {
+        const cellSize = canvas.width / maze.cols;
+        
+        // Draw Walls
+        ctx.strokeStyle = "#333";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        
+        for(let r=0; r<maze.rows; r++) {
+            for(let c=0; c<maze.cols; c++) {
+                let w = maze.walls[r][c];
+                let x = c * cellSize;
+                let y = r * cellSize;
+                
+                if(w.n) { ctx.moveTo(x, y); ctx.lineTo(x + cellSize, y); }
+                if(w.e) { ctx.moveTo(x + cellSize, y); ctx.lineTo(x + cellSize, y + cellSize); }
+                if(w.s) { ctx.moveTo(x, y + cellSize); ctx.lineTo(x + cellSize, y + cellSize); } // Wait, s is bottom wall of current? No.
+                // Standard grid: 
+                // n: top wall (y=0)
+                // e: right wall (x=width)
+                // s: bottom wall (y=height)
+                // w: left wall (x=0)
+                
+                if(w.n) { ctx.moveTo(x, y); ctx.lineTo(x + cellSize, y); }
+                if(w.e) { ctx.moveTo(x + cellSize, y); ctx.lineTo(x + cellSize, y + cellSize); }
+                if(w.s) { ctx.moveTo(x, y + cellSize); ctx.lineTo(x + cellSize, y + cellSize); }
+                if(w.w) { ctx.moveTo(x, y); ctx.lineTo(x, y + cellSize); }
+            }
+        }
+        ctx.stroke();
+
+        // Draw Exit Marker
+        let ex = maze.exit.c * cellSize;
+        let ey = maze.exit.r * cellSize;
+        ctx.fillStyle = "#4caf50";
+        ctx.fillRect(ex + 2, ey + 2, cellSize - 4, cellSize - 4);
+
+        // Draw Bots
+        for(let bot of bots) {
+            // Interpolate position
+            let targetX = bot.c * cellSize;
+            let targetY = bot.r * cellSize;
+            
+            // Smooth movement (lerp)
+            // We need a sub-tick counter or just simple lerp per frame.
+            // Since tick() is synchronous, we don't have delta time inside tick().
+            // We can use the render loop to interpolate between logical cells.
+            
+            // Simple approach: if bot moved in last tick (implied by path change), animate.
+            // But we don't store "lastPos". Let's assume instant movement for logic, 
+            // but visually lerp towards target based on a speed factor.
+            
+            // To make it smooth without storing history, we can just update x/y every frame.
+            // However, if tick() happened 10 times, bot is at new cell.
+            // We need to know the "logical" position.
+            // Let's store logical pos in bot object? 
+            // Actually, `bot.r` and `bot.c` are updated in `tick`.
+            // So we just lerp from previous visual pos to current logical pos.
+            
+            // But wait, if I call tick(10), bot moves 10 steps instantly logically.
+            // If I render immediately after, it should be at new cell.
+            // The prompt says "move SMOOTHLY (interpolated between cells)".
+            // This implies we need to track position continuously.
+            
+            // Let's store `bot.visualX` and `bot.visualY`.
+            // But Bot class doesn't have them. I'll add them or use a separate array.
+            // Actually, simpler: just update visual pos every frame towards logical pos.
+            // If tick() happened recently, logical pos is far away.
+            
+            // Let's modify Bot to store visualPos.
+        }
+    }
+
+    requestAnimationFrame(renderLoop);
+}
+
+// Override Bot class to support smooth rendering state
+class Bot {
+    constructor(id, spawnR, spawnC, exitR, exitC, walls, rng) {
+        this.id = id;
+        this.r = spawnR;
+        this.c = spawnC;
+        this.exitR = exitR;
+        this.exitC = exitC;
+        this.walls = walls;
+        this.path = [{r: spawnR, c: spawnC}]; 
+        this.deadEnds = new Set(); 
+        this.finishTick = null;
+        
+        const dirs = ['n', 'e', 's', 'w'];
+        let shuffled = [...dirs];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+            const j = Math.floor(rng() * (i + 1));
+            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        this.dirOrder = shuffled;
+
+        // Visual state
+        this.visualX = spawnR; 
+        this.visualY = spawnC;
+    }
+    
+    move() {
+        if(this.finishTick !== null) return false; 
+
+        let currentWalls = this.walls[this.r][this.c];
+        let candidates = [];
+        const dirsMap = {n:{dr:-1,dc:0}, e:{dr:0,dc:1}, s:{dr:1,dc:0}, w:{dr:0,dc:-1}};
+
+        for(let dir of this.dirOrder) {
+            let d = dirsMap[dir];
+            let nr = this.r + d.dr;
+            let nc = this.c + d.dc;
+
+            if(nr >= 0 && nr < this.walls.length && nc >= 0 && nc < this.walls[0].length) {
+                let blocked = false;
+                if(dir === 'n' && currentWalls.n) blocked = true;
+                if(dir === 'e' && currentWalls.e) blocked = true;
+                if(dir === 's' && currentWalls.s) blocked = true;
+                if(dir === 'w' && currentWalls.w) blocked = true;
+
+                if(!blocked) {
+                    let isVisited = false;
+                    for(let p of this.path) {
+                        if(p.r === nr && p.c === nc) {
+                            isVisited = true;
+                            break;
+                        }
+                    }
+                    if(!isVisited) {
+                        candidates.push({r: nr, c: nc, dir: dir});
+                    }
+                }
+            }
+        }
+
+        if(candidates.length > 0) {
+            let next = candidates[Math.floor(this.rng() * candidates.length)];
+            this.path.push(next);
+            this.r = next.r;
+            this.c = next.c;
+            
+            if(this.r === this.exitR && this.c === this.exitC) {
+                this.finishTick = 0; 
+                return true;
+            }
+        } else {
+            if(this.path.length > 1) {
+                this.path.pop();
+                let prev = this.path[this.path.length - 1];
+                this.r = prev.r;
+                this.c = prev.c;
+                this.deadEnds.add(`${this.r},${this.c}`);
+            }
+        }
+        
+        return false;
+    }
+
+    getRng() {
+        // We need to access the game's RNG here for determinism.
+        // But Bot is instantiated with a specific seed logic? 
+        // Actually, `window.game` has `rng`? No.
+        // The prompt says "tick(n) must be deterministic".
+        // So inside `move`, we should use a shared RNG instance if possible.
+        // However, the Bot constructor takes `rng`. Let's pass it.
+        // But wait, `window.game.bots` returns array of objects.
+        // If I store `this.rng` in Bot, it works.
+    }
+}
+
+// Fix: Pass RNG to Bot and use it.
+// Also need to update render loop to handle interpolation.
+// Let's refactor the render loop slightly to access bot visual state.
+
+// We need to attach `rng` to bots so they can be deterministic.
+// The `Bot` constructor takes `rng`.
+// But wait, `window.game.bots` returns a snapshot? Or live reference?
+// "array of 24 bot objects". Usually implies live reference or at least data access.
+// I'll return the actual Bot instances from window.game.bots.
+
+// Update render loop to handle interpolation
+function renderLoop(timestamp) {
+    if(!maze) return;
+    
+    const cellSize = canvas.width / maze.cols;
+    
+    ctx.fillStyle = "#f0f0f0";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw Maze Walls
+    ctx.strokeStyle = "#333";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for(let r=0; r<maze.rows; r++) {
+        for(let c=0; c<maze.cols; c++) {
+            let w = maze.walls[r][c];
+            let x = c * cellSize;
+            let y = r * cellSize;
+            
+            if(w.n) { ctx.moveTo(x, y); ctx.lineTo(x + cellSize, y); }
+            if(w.e) { ctx.moveTo(x + cellSize, y); ctx.lineTo(x + cellSize, y + cellSize); }
+            if(w.s) { ctx.moveTo(x, y + cellSize); ctx.lineTo(x + cellSize, y + cellSize); }
+            if(w.w) { ctx.moveTo(x, y); ctx.lineTo(x, y + cellSize); }
+        }
+    }
+    ctx.stroke();
+
+    // Draw Exit
+    let ex = maze.exit.c * cellSize;
+    let ey = maze.exit.r * cellSize;
+    ctx.fillStyle = "#4caf50";
+    ctx.fillRect(ex + 2, ey + 2, cellSize - 4, cellSize - 4);
+
+    // Draw Bots
+    for(let bot of bots) {
+        // Interpolate visual position towards logical position
+        let targetX = bot.c * cellSize;
+        let targetY = bot.r * cellSize;
+        
+        // Simple lerp factor. 
+        // If tick happened recently, we want to move fast?
+        // Or just constant speed. Let's use a fixed interpolation speed per frame.
+        // But if `tick` jumps 10 steps, we need to cover that distance.
+        // We can't know how many ticks passed since last render without tracking time.
+        // However, the prompt implies `tick(n)` is synchronous.
+        // So between frames, logical state might have changed multiple times?
+        // No, usually game loop runs at 60fps. If user calls tick(1) once per frame, it's fine.
+        // If user calls tick(10), we need to move 10 steps.
+        
+        // Let's use a simple linear interpolation based on time delta?
+        // Or just update visual pos every frame towards logical pos with a speed factor.
+        // Speed = (target - current) * 0.2 per frame.
+        
+        bot.visualX += (targetX - bot.visualX) * 0.15;
+        bot.visualY += (targetY - bot.visualY) * 0.15;
+
+        let vx = bot.visualX + cellSize/2;
+        let vy = bot.visualY + cellSize/2;
+        
+        // Color based on ID
+        ctx.fillStyle = `hsl(${(bot.id * 15) % 360}, 70%, 50%)`;
+        ctx.beginPath();
+        ctx.arc(vx, vy, cellSize * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Draw ID text if finished
+        if(bot.finishTick !== null) {
+            ctx.fillStyle = "#000";
+            ctx.font = "10px Arial";
+            ctx.fillText("FINISHED", vx - 15, vy + cellSize/2);
+        }
+    }
+
+    updateUI();
+    requestAnimationFrame(renderLoop);
+}
+
+// Re-define Bot to include rng property for determinism inside move
+class Bot {
+    constructor(id, spawnR, spawnC, exitR, exitC, walls, rng) {
+        this.id = id;
+        this.r = spawnR;
+        this.c = spawnC;
+        this.exitR = exitR;
+        this.exitC = exitC;
+        this.walls = walls;
+        this.path = [{r: spawnR, c: spawnC}]; 
+        this.deadEnds = new Set(); 
+        this.finishTick = null;
+        
+        const dirs = ['n', 'e', 's', 'w'];
+        let shuffled = [...dirs];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+            const j = Math.floor(rng() * (i + 1));
+            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        this.dirOrder = shuffled;
+
+        this.visualX = spawnR; 
+        this.visualY = spawnC;
+        this.rng = rng; // Store RNG for deterministic movement choice
+    }
+    
+    move() {
+        if(this.finishTick !== null) return false; 
+
+        let currentWalls = this.walls[this.r][this.c];
+        let candidates = [];
+        const dirsMap = {n:{dr:-1,dc:0}, e:{dr:0,dc:1}, s:{dr:1,dc:0}, w:{dr:0,dc:-1}};
+
+        for(let dir of this.dirOrder) {
+            let d = dirsMap[dir];
+            let nr = this.r + d.dr;
+            let nc = this.c + d.dc;
+
+            if(nr >= 0 && nr < this.walls.length && nc >= 0 && nc < this.walls[0].length) {
+                let blocked = false;
+                if(dir === 'n' && currentWalls.n) blocked = true;
+                if(dir === 'e' && currentWalls.e) blocked = true;
+                if(dir === 's' && currentWalls.s) blocked = true;
+                if(dir === 'w' && currentWalls.w) blocked = true;
+
+                if(!blocked) {
+                    let isVisited = false;
+                    for(let p of this.path) {
+                        if(p.r === nr && p.c === nc) {
+                            isVisited = true;
+                            break;
+                        }
+                    }
+                    if(!isVisited) {
+                        candidates.push({r: nr, c: nc, dir: dir});
+                    }
+                }
+            }
+        }
+
+        if(candidates.length > 0) {
+            let next = candidates[Math.floor(this.rng() * candidates.length)];
+            this.path.push(next);
+            this.r = next.r;
+            this.c = next.c;
+            
+            if(this.r === this.exitR && this.c === this.exitC) {
+                this.finishTick = 0; 
+                return true;
+            }
+        } else {
+            if(this.path.length > 1) {
+                this.path.pop();
+                let prev = this.path[this.path.length - 1];
+                this.r = prev.r;
+                this.c = prev.c;
+                this.deadEnds.add(`${this.r},${this.c}`);
+            }
+        }
+        
+        return false;
+    }
+}
+
+// Update initGame to use the new Bot class and expose bots correctly
+function initGame(seed) {
+    const rows = 20;
+    const cols = 20;
+    
+    if (seed === undefined || seed === null) {
+        gameRng = createRNG(Math.random() * 1e9);
+    } else {
+        gameRng = createRNG(seed);
+    }
+
+    maze = new Maze(rows, cols, gameRng);
+    
+    const spawnR = 0;
+    const spawnC = 0;
+
+    bots = [];
+    for(let i=0; i<24; i++) {
+        bots.push(new Bot(i, spawnR, spawnC, maze.exit.r, maze.exit.c, maze.walls, gameRng));
+    }
+
+    elapsed = 0;
+    isFrozen = false;
+    
+    timerEl.innerText = "0 ticks";
+    completedEl.innerText = "0/24 bots completed";
+    
+    if(animationId) cancelAnimationFrame(animationId);
+    lastTickTime = performance.now();
+    animationId = requestAnimationFrame(renderLoop);
+}
+
+resetBtn.addEventListener('click', () => {
+    // Reset with current seed or random? 
+    // Usually reset implies "start over". If no seed was provided initially, use random.
+    // But we need to know if a seed was used.
+    // Let's just call initGame() which defaults to random if no arg.
+    // Or better: pass the current gameRng seed? 
+    // The prompt says `window.game.reset(seed?)`.
+    // If I click reset, I probably want a new random maze unless I pass a seed.
+    initGame();
+});
+
+// Initial start
+initGame();
+
+</script>
+</body>
+</html>

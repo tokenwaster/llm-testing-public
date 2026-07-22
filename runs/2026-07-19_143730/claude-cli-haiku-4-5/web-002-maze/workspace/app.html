@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maze Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: #1a1a1a;
+            color: #fff;
+            gap: 20px;
+        }
+        #controls {
+            display: flex;
+            gap: 40px;
+            align-items: center;
+            font-size: 18px;
+        }
+        #maze {
+            border: 3px solid #666;
+            background: #000;
+            image-rendering: pixelated;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        .stat {
+            display: flex;
+            gap: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <div class="stat">Completed: <span id="completed">0</span>/24</div>
+        <div class="stat">Time: <span id="timer">0</span> ticks</div>
+        <button id="reset">Reset</button>
+    </div>
+    <canvas id="maze" width="800" height="800"></canvas>
+
+    <script>
+        class Random {
+            constructor(seed) {
+                this.seed = seed || 1;
+            }
+            next() {
+                this.seed = (this.seed * 9301 + 49297) % 233280;
+                return this.seed / 233280;
+            }
+        }
+
+        function generateMaze(rows, cols, seed) {
+            const rng = new Random(seed);
+            const maze = Array(rows).fill(null).map(() =>
+                Array(cols).fill(null).map(() => ({
+                    n: true, e: true, s: true, w: true
+                }))
+            );
+
+            const visited = Array(rows).fill(null).map(() => Array(cols).fill(false));
+
+            function carve(r, c) {
+                visited[r][c] = true;
+                const dirs = [
+                    [-1, 0, 'n', 's'],
+                    [0, 1, 'e', 'w'],
+                    [1, 0, 's', 'n'],
+                    [0, -1, 'w', 'e']
+                ];
+
+                for (let i = dirs.length - 1; i > 0; i--) {
+                    const j = Math.floor(rng.next() * (i + 1));
+                    [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
+                }
+
+                for (const [dr, dc, wall1, wall2] of dirs) {
+                    const nr = r + dr;
+                    const nc = c + dc;
+                    if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) {
+                        maze[r][c][wall1] = false;
+                        maze[nr][nc][wall2] = false;
+                        carve(nr, nc);
+                    }
+                }
+            }
+
+            carve(0, 0);
+            return maze;
+        }
+
+        class Bot {
+            constructor(r, c, seed, maze) {
+                this.r = r;
+                this.c = c;
+                this.maze = maze;
+                this.path = [{r, c}];
+                this.deadEnds = [];
+                this.finishTick = null;
+                this.rng = new Random(seed);
+                this.edgeTraversals = new Map();
+            }
+
+            edgeKey(r1, c1, r2, c2) {
+                if (r1 > r2 || (r1 === r2 && c1 > c2)) {
+                    return `${r2},${c2},${r1},${c1}`;
+                }
+                return `${r1},${c1},${r2},${c2}`;
+            }
+
+            recordEdge(r1, c1, r2, c2) {
+                const k = this.edgeKey(r1, c1, r2, c2);
+                this.edgeTraversals.set(k, (this.edgeTraversals.get(k) || 0) + 1);
+            }
+
+            getEdgeCount(r1, c1, r2, c2) {
+                const k = this.edgeKey(r1, c1, r2, c2);
+                return this.edgeTraversals.get(k) || 0;
+            }
+
+            getNeighbors() {
+                const walls = this.maze[this.r][this.c];
+                const neighbors = [];
+                if (!walls.n) neighbors.push([-1, 0]);
+                if (!walls.e) neighbors.push([0, 1]);
+                if (!walls.s) neighbors.push([1, 0]);
+                if (!walls.w) neighbors.push([0, -1]);
+                return neighbors;
+            }
+
+            move() {
+                const neighbors = this.getNeighbors();
+                const moves = neighbors.map(([dr, dc]) => {
+                    const nr = this.r + dr;
+                    const nc = this.c + dc;
+                    const count = this.getEdgeCount(this.r, this.c, nr, nc);
+                    return {dr, dc, nr, nc, count};
+                });
+
+                let targets = moves.filter(m => m.count === 0);
+                if (targets.length === 0) {
+                    targets = moves.filter(m => m.count === 1);
+                }
+
+                if (targets.length === 0) {
+                    if (this.path.length > 1) {
+                        const prev = this.path[this.path.length - 2];
+                        this.recordEdge(this.r, this.c, prev.r, prev.c);
+                        this.path.pop();
+                        this.r = prev.r;
+                        this.c = prev.c;
+                    }
+                    return;
+                }
+
+                const target = targets[Math.floor(this.rng.next() * targets.length)];
+                this.recordEdge(this.r, this.c, target.nr, target.nc);
+                this.r = target.nr;
+                this.c = target.nc;
+                this.path.push({r: target.nr, c: target.nc});
+            }
+        }
+
+        class Game {
+            constructor() {
+                this.rows = 21;
+                this.cols = 21;
+                this.seed = 12345;
+                this.maze = null;
+                this.bots = [];
+                this.elapsed = 0;
+                this.spawn = {r: 0, c: 0};
+                this.exit = {r: this.rows - 1, c: this.cols - 1};
+                this.completed = 0;
+                this.finished = false;
+                this.init();
+            }
+
+            init() {
+                this.maze = generateMaze(this.rows, this.cols, this.seed);
+                this.bots = [];
+                for (let i = 0; i < 24; i++) {
+                    this.bots.push(new Bot(this.spawn.r, this.spawn.c, this.seed + i * 7919, this.maze));
+                }
+                this.elapsed = 0;
+                this.completed = 0;
+                this.finished = false;
+            }
+
+            reset(seed) {
+                this.seed = seed !== undefined ? seed : Math.floor(Math.random() * 1000000);
+                this.init();
+            }
+
+            tick(n) {
+                for (let i = 0; i < n; i++) {
+                    if (this.finished) break;
+
+                    for (const bot of this.bots) {
+                        if (bot.finishTick !== null) continue;
+                        bot.move();
+
+                        if (bot.r === this.exit.r && bot.c === this.exit.c) {
+                            bot.finishTick = this.elapsed;
+                            this.completed++;
+                            if (this.completed === this.bots.length) {
+                                this.finished = true;
+                            }
+                        }
+                    }
+
+                    if (!this.finished) {
+                        this.elapsed++;
+                    }
+                }
+            }
+
+            size() {
+                return {rows: this.rows, cols: this.cols};
+            }
+
+            walls(r, c) {
+                if (r < 0 || r >= this.rows || c < 0 || c >= this.cols) {
+                    return {n: true, e: true, s: true, w: true};
+                }
+                return this.maze[r][c];
+            }
+        }
+
+        const game = new Game();
+        const canvas = document.getElementById('maze');
+        const ctx = canvas.getContext('2d', {alpha: false});
+
+        function render() {
+            const cellSize = canvas.width / game.cols;
+            const lineWidth = 2;
+
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = lineWidth;
+
+            for (let r = 0; r < game.rows; r++) {
+                for (let c = 0; c < game.cols; c++) {
+                    const x = c * cellSize;
+                    const y = r * cellSize;
+                    const walls = game.walls(r, c);
+
+                    if (walls.n) {
+                        ctx.beginPath();
+                        ctx.moveTo(x, y);
+                        ctx.lineTo(x + cellSize, y);
+                        ctx.stroke();
+                    }
+                    if (walls.e) {
+                        ctx.beginPath();
+                        ctx.moveTo(x + cellSize, y);
+                        ctx.lineTo(x + cellSize, y + cellSize);
+                        ctx.stroke();
+                    }
+                    if (walls.s) {
+                        ctx.beginPath();
+                        ctx.moveTo(x, y + cellSize);
+                        ctx.lineTo(x + cellSize, y + cellSize);
+                        ctx.stroke();
+                    }
+                    if (walls.w) {
+                        ctx.beginPath();
+                        ctx.moveTo(x, y);
+                        ctx.lineTo(x, y + cellSize);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            const spawnX = game.spawn.c * cellSize + cellSize / 2;
+            const spawnY = game.spawn.r * cellSize + cellSize / 2;
+            ctx.fillStyle = '#0f0';
+            ctx.beginPath();
+            ctx.arc(spawnX, spawnY, cellSize / 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            const exitX = game.exit.c * cellSize + cellSize / 2;
+            const exitY = game.exit.r * cellSize + cellSize / 2;
+            ctx.fillStyle = '#f00';
+            ctx.beginPath();
+            ctx.arc(exitX, exitY, cellSize / 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            const colors = [
+                '#FF3333', '#33FF33', '#3333FF', '#FFFF33', '#FF33FF', '#33FFFF',
+                '#FF8833', '#8833FF', '#33FF88', '#FF3388', '#88FF33', '#3388FF',
+                '#FF5533', '#5533FF', '#33FF55', '#FF3355', '#55FF33', '#3355FF',
+                '#FF6633', '#6633FF', '#33FF66', '#FF3366', '#66FF33', '#3366FF'
+            ];
+
+            for (let i = 0; i < game.bots.length; i++) {
+                const bot = game.bots[i];
+                const botX = bot.c * cellSize + cellSize / 2;
+                const botY = bot.r * cellSize + cellSize / 2;
+                ctx.fillStyle = colors[i % colors.length];
+                ctx.beginPath();
+                ctx.arc(botX, botY, cellSize / 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            document.getElementById('completed').textContent = game.completed;
+            document.getElementById('timer').textContent = game.elapsed;
+        }
+
+        window.game = {
+            tick: (n) => {
+                game.tick(n);
+                render();
+            },
+            reset: (seed) => {
+                game.reset(seed);
+                render();
+            },
+            get elapsed() { return game.elapsed; },
+            get size() { return game.size(); },
+            get spawn() { return game.spawn; },
+            get exit() { return game.exit; },
+            walls: (r, c) => game.walls(r, c),
+            get bots() { return game.bots; }
+        };
+
+        document.getElementById('reset').addEventListener('click', () => {
+            game.reset();
+            render();
+        });
+
+        render();
+    </script>
+</body>
+</html>

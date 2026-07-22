@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Falling Sand</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        #sand {
+            background-color: #000;
+            border: 2px solid #333;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            image-rendering: pixelated;
+            cursor: crosshair;
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            background-color: #2c2c2c;
+            color: white;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: 1px solid #444;
+        }
+        button:hover { background-color: #3c3c3c; transform: translateY(-1px); }
+        button:active { transform: translateY(1px); }
+        button.active { box-shadow: inset 0 0 5px rgba(0,0,0,0.8); border-color: #666; font-weight: bold; }
+
+        /* Button Specific Colors */
+        #mat-sand.active { background-color: #f4c430; color: black; border-color: #e6b829; }
+        #mat-water.active { background-color: #1e90ff; color: white; border-color: #1a7fd5; }
+        #mat-wall.active { background-color: #a9a9a9; color: black; border-color: #888; }
+        #mat-acid.active { background-color: #32cd32; color: black; border-color: #2ebd2e; }
+        #mat-empty.active { background-color: #555; color: white; border-color: #777; }
+    </style>
+</head>
+<body>
+
+<canvas id="sand" width="200" height="200"></canvas>
+
+<div class="controls">
+    <button id="mat-sand" class="active">Sand</button>
+    <button id="mat-water">Water</button>
+    <button id="mat-wall">Wall</button>
+    <button id="mat-acid">Acid</button>
+    <button id="mat-empty">Eraser</button>
+    <div style="width: 1px; background: #444; margin: 0 5px;"></div>
+    <button id="clear">Clear Grid</button>
+</div>
+
+<script>
+(function() {
+    // Configuration
+    const W = 200;
+    const H = 200;
+    
+    // Material Codes
+    const EMPTY = 0;
+    const SAND = 1;
+    const WATER = 2;
+    const WALL = 3;
+    const ACID = 4;
+
+    // Grid State (Flat Array)
+    let grid = new Uint8Array(W * H);
+    
+    // DOM Elements
+    const canvas = document.getElementById('sand');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const buttons = document.querySelectorAll('[id^="mat-"]');
+    const clearBtn = document.getElementById('clear');
+
+    // Canvas Scaling Logic
+    function getGridPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = W / rect.width;
+        const scaleY = H / rect.height;
+        return {
+            x: Math.floor((e.clientX - rect.left) * scaleX),
+            y: Math.floor((e.clientY - rect.top) * scaleY)
+        };
+    }
+
+    // Helper to get/set grid safely (clamps bounds)
+    function getCell(x, y) {
+        if (x < 0 || x >= W || y < 0 || y >= H) return WALL; // Boundaries act as solid walls
+        return grid[y * W + x];
+    }
+
+    function setCell(x, y, type) {
+        if (x < 0 || x >= W || y < 0 || y >= H) return; // Don't write to boundaries directly
+        grid[y * W + x] = type;
+    }
+
+    // Precomputed RGB Colors for rendering
+    const COLORS_RGB = {
+        [EMPTY]: [18, 18, 18],
+        [SAND]: [244, 196, 48],
+        [WATER]: [30, 144, 255],
+        [WALL]: [169, 169, 169],
+        [ACID]: [50, 205, 50]
+    };
+
+    // Rendering
+    function draw() {
+        const imgData = ctx.createImageData(W, H);
+        const data = imgData.data;
+        
+        for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+                const type = grid[y * W + x];
+                const rgb = COLORS_RGB[type];
+                const idx = (y * W + x) * 4;
+                data[idx] = rgb[0];
+                data[idx+1] = rgb[1];
+                data[idx+2] = rgb[2];
+                data[idx+3] = 255; // Alpha
+            }
+        }
+        ctx.putImageData(imgData, 0, 0);
+    }
+
+    // Simulation Logic
+    function update() {
+        // Iterate bottom-up to prevent teleporting
+        for (let y = H - 2; y >= 0; y--) {
+            for (let x = 0; x < W; x++) {
+                const type = getCell(x, y);
+                
+                if (type === EMPTY || type === WALL) continue;
+
+                // --- SAND LOGIC ---
+                if (type === SAND) {
+                    const below = getCell(x, y + 1);
+                    
+                    // Fall straight down into empty
+                    if (below === EMPTY) {
+                        setCell(x, y + 1, SAND);
+                        setCell(x, y, EMPTY);
+                        continue;
+                    }
+                    // Sink in water/acid (swap)
+                    else if (below === WATER || below === ACID) {
+                        setCell(x, y + 1, SAND);
+                        setCell(x, y, below);
+                        continue;
+                    }
+
+                    // Blocked: Slide diagonally
+                    const dir = Math.random() < 0.5 ? -1 : 1;
+                    const d1x = x + dir;
+                    const d2x = x - dir;
+                    
+                    let moved = false;
+                    if (d1x >= 0 && d1x < W && getCell(d1x, y + 1) === EMPTY) {
+                        setCell(d1x, y + 1, SAND);
+                        setCell(x, y, EMPTY);
+                        moved = true;
+                    } else if (d2x >= 0 && d2x < W && getCell(d2x, y + 1) === EMPTY) {
+                        setCell(d2x, y + 1, SAND);
+                        setCell(x, y, EMPTY);
+                        moved = true;
+                    }
+                }
+
+                // --- WATER LOGIC ---
+                else if (type === WATER) {
+                    const below = getCell(x, y + 1);
+                    
+                    // Fall straight down into empty
+                    if (below === EMPTY) {
+                        setCell(x, y + 1, WATER);
+                        setCell(x, y, EMPTY);
+                        continue;
+                    }
+
+                    // Spread horizontally when blocked
+                    const dir = Math.random() < 0.5 ? -1 : 1;
+                    const d1x = x + dir;
+                    const d2x = x - dir;
+
+                    if (d1x >= 0 && d1x < W && getCell(d1x, y) === EMPTY) {
+                        setCell(d1x, y, WATER);
+                        setCell(x, y, EMPTY);
+                    } else if (d2x >= 0 && d2x < W && getCell(d2x, y) === EMPTY) {
+                        setCell(d2x, y, WATER);
+                        setCell(x, y, EMPTY);
+                    }
+                }
+
+                // --- ACID LOGIC ---
+                else if (type === ACID) {
+                    const below = getCell(x, y + 1);
+                    const left = getCell(x - 1, y);
+                    const right = getCell(x + 1, y);
+
+                    let dissolved = false;
+                    // Dissolve neighbor below or beside
+                    if (below === SAND || below === WALL) {
+                        setCell(x, y + 1, EMPTY); 
+                        setCell(x, y, EMPTY);     
+                        continue;
+                    }
+                    if ((x > 0 && (left === SAND || left === WALL)) || 
+                        (x < W - 1 && (right === SAND || right === WALL))) {
+                         if(x>0 && (left===SAND||left===WALL)) setCell(x-1, y, EMPTY);
+                         if(x<W-1 && (right===SAND||right===WALL)) setCell(x+1, y, EMPTY);
+                         setCell(x, y, EMPTY);
+                         continue;
+                    }
+
+                    // Movement like water
+                    const below2 = getCell(x, y + 1);
+                    if (below2 === EMPTY) {
+                        setCell(x, y + 1, ACID);
+                        setCell(x, y, EMPTY);
+                        continue;
+                    } else if (below2 === SAND || below2 === WALL) {
+                         // If blocked by solid, dissolve it
+                         setCell(x, y + 1, EMPTY);
+                         setCell(x, y, EMPTY);
+                         continue;
+                    }
+
+                    const dir = Math.random() < 0.5 ? -1 : 1;
+                    const d1x = x + dir;
+                    const d2x = x - dir;
+
+                    if (d1x >= 0 && d1x < W && getCell(d1x, y) === EMPTY) {
+                        setCell(d1x, y, ACID);
+                        setCell(x, y, EMPTY);
+                    } else if (d2x >= 0 && d2x < W && getCell(d2x, y) === EMPTY) {
+                        setCell(d2x, y, ACID);
+                        setCell(x, y, EMPTY);
+                    }
+                }
+            }
+        }
+    }
+
+    // API Implementation
+    window.sim = {
+        w: W,
+        h: H,
+        
+        tick: function(n) {
+            for (let i = 0; i < n; i++) {
+                update();
+            }
+            draw();
+        },
+
+        get: function(x, y) {
+            const val = getCell(x, y);
+            switch(val) {
+                case EMPTY: return "empty";
+                case SAND: return "sand";
+                case WATER: return "water";
+                case WALL: return "wall";
+                case ACID: return "acid";
+                default: return "empty";
+            }
+        },
+
+        set: function(x, y, material) {
+            let type = EMPTY;
+            switch(material) {
+                case "sand": type = SAND; break;
+                case "water": type = WATER; break;
+                case "wall": type = WALL; break;
+                case "acid": type = ACID; break;
+                default: type = EMPTY; break;
+            }
+            setCell(x, y, type);
+        },
+
+        clear: function() {
+            grid.fill(EMPTY);
+            draw();
+        }
+    };
+
+    // Animation Loop
+    let lastTime = 0;
+    const FPS = 30; 
+    function loop(timestamp) {
+        if (!lastTime) lastTime = timestamp;
+        const elapsed = timestamp - lastTime;
+        
+        if (elapsed > 1000 / FPS) {
+            update();
+            draw();
+            lastTime = timestamp;
+        }
+        requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    // UI Interaction
+    let isDrawing = false;
+    let currentMaterial = SAND;
+
+    function paint(e) {
+        const pos = getGridPos(e);
+        if (pos.x >= 0 && pos.x < W && pos.y >= 0 && pos.y < H) {
+            setCell(pos.x, pos.y, currentMaterial);
+            draw(); 
+        }
+    }
+
+    canvas.addEventListener('mousedown', (e) => { isDrawing = true; paint(e); });
+    window.addEventListener('mouseup', () => { isDrawing = false; });
+    canvas.addEventListener('mousemove', (e) => { if (isDrawing) paint(e); });
+
+    // Button Selection
+    buttons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            buttons.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            
+            const matId = btn.id.replace('mat-', '');
+            if (matId === 'empty') currentMaterial = EMPTY;
+            else if (matId === 'sand') currentMaterial = SAND;
+            else if (matId === 'water') currentMaterial = WATER;
+            else if (matId === 'wall') currentMaterial = WALL;
+            else if (matId === 'acid') currentMaterial = ACID;
+        });
+    });
+
+    clearBtn.addEventListener('click', () => {
+        window.sim.clear();
+    });
+
+})();
+</script>
+</body>
+</html>

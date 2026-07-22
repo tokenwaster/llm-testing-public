@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Bot Explorer</title>
+<style>
+  body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #eee; margin: 0; padding: 10px; }
+  #maze { border: 2px solid #333; background: #fff; box-shadow: 0 0 10px rgba(0,0,0,0.2); }
+  .controls { margin: 10px 0; display: flex; gap: 20px; align-items: center; font-size: 1.2em; }
+  #timer, #completed { font-weight: bold; color: #222; }
+  button { padding: 8px 16px; font-size: 1em; cursor: pointer; background: #4CAF50; color: white; border: none; border-radius: 4px; }
+  button:hover { background: #45a049; }
+</style>
+</head>
+<body>
+<div class="controls">
+  <div>Completed: <span id="completed">0</span>/24</div>
+  <div>Timer: <span id="timer">0</span> ticks</div>
+  <button id="reset">Reset</button>
+</div>
+<canvas id="maze" width="600" height="600"></canvas>
+
+<script>
+/* ===== Seeded PRNG (mulberry32) ===== */
+function createPRNG(seed) {
+  let t = seed >>> 0;
+  return function() {
+    t += 0x6D2B79F5;
+    let r = Math.imul(t ^ (t >>> 15), t | 1);
+    r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ===== Maze Generation (Perfect Maze via Randomized DFS) ===== */
+function generateMaze(rows, cols, rng) {
+  const maze = Array.from({length: rows}, () => Array.from({length: cols}, () => ({
+    n: true, e: true, s: true, w: true, visited: false
+  })));
+  const stack = [];
+  const startR = 0, startC = 0;
+  maze[startR][startC].visited = true;
+  stack.push({r: startR, c: startC});
+
+  const dirs = ['N','E','S','W'];
+  const dr = {N:-1, E:0, S:1, W:0};
+  const dc = {N:0, E:1, S:0, W:-1};
+  const opposite = {N:'S', E:'W', S:'N', W:'E'};
+
+  while (stack.length) {
+    const cur = stack[stack.length-1];
+    const neighbors = [];
+    for (const d of dirs) {
+      const nr = cur.r + dr[d], nc = cur.c + dc[d];
+      if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !maze[nr][nc].visited) {
+        neighbors.push(d);
+      }
+    }
+    if (neighbors.length) {
+      const chosen = neighbors[Math.floor(rng() * neighbors.length)];
+      const nr = cur.r + dr[chosen], nc = cur.c + dc[chosen];
+      maze[cur.r][cur.c][chosen] = false;
+      maze[nr][nc][opposite[chosen]] = false;
+      maze[nr][nc].visited = true;
+      stack.push({r: nr, c: nc});
+    } else {
+      stack.pop();
+    }
+  }
+  // clean visited flags
+  for (let r=0; r<rows; r++) for (let c=0; c<cols; c++) delete maze[r][c].visited;
+  return maze;
+}
+
+/* ===== Bot Class ===== */
+class Bot {
+  constructor(id, spawn, exit, maze, directionOrder, color) {
+    this.id = id;
+    this.spawn = spawn;
+    this.exit = exit;
+    this.maze = maze;
+    this.directionOrder = directionOrder; // array of 'N','E','S','W'
+    this.color = color;
+
+    this.currentCell = {r: spawn.r, c: spawn.c};
+    this.stack = [{r: spawn.r, c: spawn.c}];
+    this.visited = new Set([`${spawn.r},${spawn.c}`]);
+    this.deadEndsSet = new Set();
+    this.path = [{r: spawn.r, c: spawn.c}];
+    this.deadEnds = [];
+    this.finishTick = null;
+
+    // visual
+    this.targetCell = null;
+    this.progress = 1;
+  }
+
+  step(tickCount) {
+    if (this.finishTick !== null) return;
+    const cur = this.currentCell;
+    if (cur.r === this.exit.r && cur.c === this.exit.c) {
+      this.finishTick = tickCount;
+      return;
+    }
+
+    const dr = {N:-1, E:0, S:1, W:0};
+    const dc = {N:0, E:1, S:0, W:-1};
+    let moved = false;
+
+    for (const d of this.directionOrder) {
+      const nr = cur.r + dr[d], nc = cur.c + dc[d];
+      if (nr < 0 || nr >= this.maze.length || nc < 0 || nc >= this.maze[0].length) continue;
+      if (this.maze[cur.r][cur.c][d]) continue; // wall
+      const key = `${nr},${nc}`;
+      if (!this.visited.has(key)) {
+        // move forward
+        this.stack.push({r: nr, c: nc});
+        this.visited.add(key);
+        this.currentCell = {r: nr, c: nc};
+        this.path.push({r: nr, c: nc});
+        this.targetCell = {r: nr, c: nc};
+        this.progress = 0;
+        moved = true;
+        break;
+      }
+    }
+
+    if (!moved) {
+      // dead end or fully explored
+      const key = `${cur.r},${cur.c}`;
+      if (!this.deadEndsSet.has(key)) {
+        this.deadEndsSet.add(key);
+        this.deadEnds.push({r: cur.r, c: cur.c});
+      }
+      if (this.stack.length > 1) {
+        this.stack.pop();
+        const prev = this.stack[this.stack.length-1];
+        this.currentCell = prev;
+        this.path.push({r: prev.r, c: prev.c});
+        this.targetCell = prev;
+        this.progress = 0;
+      }
+    }
+  }
+}
+
+/* ===== Game State ===== */
+const ROWS = 20, COLS = 20;
+let maze = null;
+let spawn = null;
+let exit = null;
+let bots = [];
+let tickCount = 0;
+let frozenElapsed = null;
+let seedUsed = null;
+let animationId = null;
+let autoPlayInterval = null;
+const canvas = document.getElementById('maze');
+const ctx = canvas.getContext('2d');
+const cellSize = canvas.width / COLS; // 30
+
+/* ===== Rendering ===== */
+function cellCenter(cell) {
+  return {x: (cell.c + 0.5) * cellSize, y: (cell.r + 0.5) * cellSize};
+}
+
+function drawMaze() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'square';
+
+  for (let r=0; r<ROWS; r++) {
+    for (let c=0; c<COLS; c++) {
+      const cell = maze[r][c];
+      const x = c * cellSize, y = r * cellSize;
+      if (cell.n) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x+cellSize, y); ctx.stroke(); }
+      if (cell.e) { ctx.beginPath(); ctx.moveTo(x+cellSize, y); ctx.lineTo(x+cellSize, y+cellSize); ctx.stroke(); }
+      if (cell.s) { ctx.beginPath(); ctx.moveTo(x+cellSize, y+cellSize); ctx.lineTo(x, y+cellSize); ctx.stroke(); }
+      if (cell.w) { ctx.beginPath(); ctx.moveTo(x, y+cellSize); ctx.lineTo(x, y); ctx.stroke(); }
+    }
+  }
+  // draw exit
+  const ex = cellCenter(exit);
+  ctx.fillStyle = '#4CAF50';
+  ctx.fillRect(ex.x - cellSize*0.4, ex.y - cellSize*0.4, cellSize*0.8, cellSize*0.8);
+  // draw spawn
+  const sp = cellCenter(spawn);
+  ctx.fillStyle = '#2196F3';
+  ctx.fillRect(sp.x - cellSize*0.4, sp.y - cellSize*0.4, cellSize*0.8, cellSize*0.8);
+}
+
+function drawBots() {
+  for (const bot of bots) {
+    let x, y;
+    if (bot.targetCell && bot.progress < 1) {
+      const from = cellCenter(bot.currentCell);
+      const to = cellCenter(bot.targetCell);
+      x = from.x + (to.x - from.x) * bot.progress;
+      y = from.y + (to.y - from.y) * bot.progress;
+    } else {
+      const pos = cellCenter(bot.currentCell);
+      x = pos.x; y = pos.y;
+    }
+    ctx.beginPath();
+    ctx.arc(x, y, cellSize * 0.3, 0, Math.PI*2);
+    ctx.fillStyle = bot.color;
+    ctx.fill();
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+function animateVisuals(timestamp) {
+  if (!lastFrame) lastFrame = timestamp;
+  const dt = timestamp - lastFrame;
+  lastFrame = timestamp;
+
+  for (const bot of bots) {
+    if (bot.targetCell && bot.progress < 1) {
+      bot.progress += dt / 200; // 200ms per move
+      if (bot.progress >= 1) {
+        bot.progress = 1;
+        bot.currentCell = bot.targetCell;
+        bot.targetCell = null;
+      }
+    }
+  }
+  drawMaze();
+  drawBots();
+  updateUI();
+  animationId = requestAnimationFrame(animateVisuals);
+}
+let lastFrame = 0;
+
+function updateUI() {
+  document.getElementById('completed').textContent = bots.filter(b => b.finishTick !== null).length;
+  document.getElementById('timer').textContent = game.elapsed;
+}
+
+/* ===== Game API ===== */
+const game = {
+  tick(n) {
+    if (frozenElapsed !== null) return; // timer frozen, simulation effectively stopped
+    for (let i=0; i<n; i++) {
+      tickCount++;
+      for (const bot of bots) bot.step(tickCount);
+      // check if all finished
+      if (bots.every(b => b.finishTick !== null)) {
+        frozenElapsed = tickCount;
+        if (autoPlayInterval) clearInterval(autoPlayInterval);
+        break;
+      }
+    }
+    updateUI();
+  },
+  reset(seed) {
+    // stop any running auto-play
+    if (autoPlayInterval) clearInterval(autoPlayInterval);
+    // generate seed
+    seedUsed = (typeof seed === 'number') ? seed : Math.floor(Math.random() * 1e9);
+    const rng = createPRNG(seedUsed);
+
+    // generate maze
+    maze = generateMaze(ROWS, COLS, rng);
+
+    // pick spawn and exit distinct
+    const cells = [];
+    for (let r=0; r<ROWS; r++) for (let c=0; c<COLS; c++) cells.push({r,c});
+    // shuffle
+    for (let i=cells.length-1; i>0; i--) {
+      const j = Math.floor(rng() * (i+1));
+      [cells[i], cells[j]] = [cells[j], cells[i]];
+    }
+    spawn = cells[0];
+    exit = cells[1];
+
+    // create bots
+    bots = [];
+    for (let i=0; i<24; i++) {
+      // each bot gets a shuffled direction order
+      const dirs = ['N','E','S','W'];
+      for (let j=dirs.length-1; j>0; j--) {
+        const k = Math.floor(rng() * (j+1));
+        [dirs[j], dirs[k]] = [dirs[k], dirs[j]];
+      }
+      const hue = (i * 360 / 24) % 360;
+      const color = `hsl(${hue}, 80%, 50%)`;
+      bots.push(new Bot(i, spawn, exit, maze, dirs, color));
+    }
+
+    tickCount = 0;
+    frozenElapsed = null;
+    updateUI();
+    drawMaze();
+    drawBots();
+
+    // start auto-play (20 ticks per second)
+    autoPlayInterval = setInterval(() => {
+      if (frozenElapsed === null) game.tick(1);
+    }, 50);
+  },
+  get elapsed() { return frozenElapsed !== null ? frozenElapsed : tickCount; },
+  get size() { return {rows: ROWS, cols: COLS}; },
+  get spawn() { return {r: spawn.r, c: spawn.c}; },
+  get exit() { return {r: exit.r, c: exit.c}; },
+  walls(r, c) {
+    if (r<0 || r>=ROWS || c<0 || c>=COLS) return {n:true,e:true,s:true,w:true};
+    const cell = maze[r][c];
+    return {n: cell.n, e: cell.e, s: cell.s, w: cell.w};
+  },
+  get bots() { return bots; }
+};
+
+// expose
+window.game = game;
+
+// reset button
+document.getElementById('reset').addEventListener('click', () => game.reset());
+
+// start render loop
+requestAnimationFrame(animateVisuals);
+
+// initial reset
+game.reset();
+</script>
+</body>
+</html>

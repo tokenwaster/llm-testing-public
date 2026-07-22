@@ -1,0 +1,48 @@
+import heapq
+from collections import defaultdict
+
+def topo_sort(edges: list[tuple[str, str]], nodes: list[str] | None = None) -> list[str] | None:
+    # Build adjacency list and in-degree count
+    graph = defaultdict(list)
+    in_degree = defaultdict(int)
+    
+    # Collect all nodes from edges
+    all_nodes = set()
+    
+    for a, b in edges:
+        all_nodes.add(a)
+        all_nodes.add(b)
+        graph[a].append(b)
+        in_degree[b] += 1
+    
+    # Add additional nodes if provided
+    if nodes is not None:
+        for node in nodes:
+            all_nodes.add(node)
+            # Ensure the node exists in in_degree even with 0 in-degree
+            if node not in in_degree:
+                in_degree[node] = 0
+    
+    # Initialize heap with nodes that have in-degree 0
+    heap = []
+    for node in all_nodes:
+        if in_degree[node] == 0:
+            heapq.heappush(heap, node)
+    
+    result = []
+    while heap:
+        # Pop the lexicographically smallest node
+        current = heapq.heappop(heap)
+        result.append(current)
+        
+        # Reduce in-degree of neighbors
+        for neighbor in graph[current]:
+            in_degree[neighbor] -= 1
+            if in_degree[neighbor] == 0:
+                heapq.heappush(heap, neighbor)
+    
+    # If we didn't process all nodes, there's a cycle
+    if len(result) != len(all_nodes):
+        return None
+    
+    return result

@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Spreadsheet</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background: #f4f4f9; }
+        .container { display: flex; flex-direction: column; gap: 20px; align-items: center; }
+        table { border-collapse: collapse; background: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1); table-layout: fixed; width: 600px; height: 400px; }
+        th, td { border: 1px solid #ccc; position: relative; }
+        th { background: #eee; font-weight: bold; user-select: none; width: 60px; height: 30px; }
+        td { padding: 0; width: 60px; height: 30px; }
+        input { width: 100%; height: 100%; border: none; box-sizing: border-box; text-align: center; font-size: 13px; outline: none; padding: 0; }
+        input:focus { background: #eef; border: 2px solid #4a90e2; z-index: 10; position: relative; }
+        .controls { display: flex; gap: 10px; align-items: center; width: 600px; }
+        #csv { width: 100%; height: 100px; font-family: monospace; margin-top: 10px; }
+        button { padding: 8px 16px; cursor: pointer; background: #4a90e2; color: white; border: none; border-radius: 4px; }
+        button:hover { background: #357abd; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <table id="grid"></table>
+    <div class="controls">
+        <button id="export">Export CSV</button>
+        <textarea id="csv" placeholder="CSV output will appear here..."></textarea>
+    </div>
+</div>
+
+<script>
+    const ROWS = 10;
+    const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+    const data = {}; // Raw text values
+    const computed = {}; // Computed display values
+
+    // Initialize Grid UI
+    const gridEl = document.getElementById('grid');
+    let tableHtml = '<tr><th></th>';
+    COLS.forEach(c => tableHtml += `<th>${c}</th>`);
+    tableHtml += '</tr>';
+
+    for (let r = 1; r <= ROWS; r++) {
+        tableHtml += `<tr><th>${r}</th>`;
+        COLS.forEach(c => {
+            const id = `${c}${r}`;
+            tableHtml += `<td><input id="cell-${id}" data-cell="${id}" spellcheck="false"></td>`;
+        });
+        tableHtml += '</tr>';
+    }
+    gridEl.innerHTML = tableHtml;
+
+    function safeEval(expr) {
+        // Only allow numbers, basic operators, parentheses and dots
+        if (/[^0-9.+\-*/() \s]/.test(expr)) throw new Error("Invalid");
+        return Function(`"use strict"; return (${expr})`)();
+    }
+
+    function evaluate(cellId, path = new Set()) {
+        if (path.has(cellId)) return "#CYCLE";
+        path.add(cellId);
+
+        const raw = data[cellId] || "";
+        if (!raw.startsWith("=")) {
+            path.delete(cellId);
+            return raw; 
+        }
+
+        const expr = raw.substring(1);
+        const refRegex = /[A-J](10|[1-9])/g;
+        const refs = [...expr.matchAll(refRegex)];
+
+        // Helper to get value for math: empty cells count as 0
+        const getValForFormula = (id) => {
+            const val = evaluate(id, new Set(path));
+            if (val === "#CYCLE" || val === "#ERR") return val;
+            return val === "" ? "0" : val;
+        };
+
+        // Handle single reference case: =A1
+        if (refs.length === 1 && expr === refs[0][0]) {
+            const refCell = refs[0][0];
+            const result = getValForFormula(refCell);
+            path.delete(cellId);
+            return result;
+        }
+
+        // Handle complex formulas
+        let substitutedExpr = expr;
+        for (const match of refs) {
+            const refCell = match[0];
+            const val = getValForFormula(refCell);
+            if (val === "#CYCLE") { path.delete(cellId); return "#CYCLE"; }
+            if (val === "#ERR") { path.delete(cellId); return "#ERR"; }
+            substitutedExpr = substitutedExpr.replace(new RegExp(`\\b${refCell}\\b`, 'g'), val);
+        }
+
+        try {
+            const res = safeEval(substitutedExpr);
+            path.delete(cellId);
+            return isNaN(res) ? "#ERR" : res;
+        } catch (e) {
+            path.delete(cellId);
+            return "#ERR";
+        }
+    }
+
+    function updateAll() {
+        COLS.forEach(c => {
+            for (let r = 1; r <= ROWS; r++) {
+                const id = `${c}${r}`;
+                computed[id] = evaluate(id, new Set());
+            }
+        });
+
+        // Update UI inputs if not currently focused
+        COLS.forEach(c => {
+            for (let r = 1; r <= ROWS; r++) {
+                const id = `${c}${r}`;
+                const input = document.getElementById(`cell-${id}`);
+                if (document.activeElement !== input) {
+                    input.value = computed[id];
+                }
+            }
+        });
+    }
+
+    // Event Listeners for Inputs
+    document.querySelectorAll('input').forEach(input => {
+        const cellId = input.dataset.cell;
+
+        input.onfocus = () => {
+            input.value = data[cellId] || "";
+        };
+
+        const commit = () => {
+            data[cellId] = input.value;
+            updateAll();
+        };
+
+        input.onblur = commit;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') {
+                input.blur();
+                commit();
+            }
+        };
+    });
+
+    // Export CSV Logic
+    document.getElementById('export').onclick = () => {
+        let csvContent = "";
+        for (let r = 1; r <= ROWS; r++) {
+            const row = [];
+            COLS.forEach(c => {
+                row.push(computed[`${c}${r}`] === undefined ? "" : computed[`${c}${r}`]);
+            });
+            csvContent += row.join(",") + (r < ROWS ? "\n" : "");
+        }
+        document.getElementById('csv').value = csvContent;
+    };
+
+    // Scripting API
+    window.sheet = {
+        set: function(cell, val) {
+            data[cell] = val;
+            const input = document.getElementById(`cell-${cell}`);
+            if (input) input.value = val;
+            updateAll();
+        },
+        get: function(cell) {
+            return computed[cell];
+        },
+        raw: function(cell) {
+            return data[cell] || "";
+        }
+    };
+
+    // Initial calculation
+    updateAll();
+</script>
+</body>
+</html>

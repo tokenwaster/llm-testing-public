@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Falling Sand Sandbox</title>
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --panel-bg: #252525;
+            --text-color: #e0e0e0;
+            --accent-color: #4CAF50;
+            --border-color: #333;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #app-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            padding: 20px;
+            background-color: var(--panel-bg);
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        canvas {
+            background-color: #000;
+            border: 2px solid var(--border-color);
+            cursor: crosshair;
+            image-rendering: pixelated; /* Keep pixels sharp */
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.8);
+        }
+
+        #controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+            width: 100%;
+            max-width: 640px;
+        }
+
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            transition: transform 0.1s, opacity 0.2s;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+            filter: brightness(1.1);
+        }
+
+        button:active {
+            transform: translateY(1px);
+        }
+
+        .btn-sand { background-color: #fbc02d; color: #3e270f; border: 1px solid #f57f17; }
+        .btn-water { background-color: #4fc3f7; color: #01579b; border: 1px solid #0288d1; }
+        .btn-wall { background-color: #757575; color: #263238; border: 1px solid #424242; }
+        .btn-acid { background-color: #b2dfdb; color: #004d40; border: 1px solid #00695c; }
+        .btn-empty { background-color: #37474f; color: #eceff1; border: 1px solid #546e7a; }
+        
+        .btn-clear { 
+            background-color: #d32f2f; 
+            color: white; 
+            border: 1px solid #b71c1c; 
+            margin-top: 10px;
+        }
+
+        /* Active state for selection */
+        button.selected {
+            box-shadow: 0 0 0 2px rgba(255,255,255,0.3);
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+
+<div id="app-container">
+    <canvas id="sand" width="640" height="640"></canvas>
+    
+    <div id="controls">
+        <button id="mat-sand" class="btn-sand selected" onclick="selectMaterial('sand')">Sand</button>
+        <button id="mat-water" class="btn-water" onclick="selectMaterial('water')">Water</button>
+        <button id="mat-wall" class="btn-wall" onclick="selectMaterial('wall')">Wall</button>
+        <button id="mat-acid" class="btn-acid" onclick="selectMaterial('acid')">Acid</button>
+        <button id="mat-empty" class="btn-empty" onclick="selectMaterial('empty')">Eraser</button>
+    </div>
+
+    <button id="clear" class="btn-clear" onclick="sim.clear()">Clear Grid</button>
+</div>
+
+<script>
+/**
+ * Falling Sand Simulation Engine
+ */
+
+// Configuration
+const CELL_SIZE = 4; // Visual scaling factor for canvas vs logical grid
+const GRID_W = 160;  // Logical width (at least 80)
+const GRID_H = 160;  // Logical height (at least 80)
+
+// Materials
+const MAT_EMPTY = 'empty';
+const MAT_SAND = 'sand';
+const MAT_WATER = 'water';
+const MAT_WALL = 'wall';
+const MAT_ACID = 'acid';
+
+// Canvas Setup
+const canvas = document.getElementById('sand');
+const ctx = canvas.getContext('2d');
+
+// Resize canvas to match logical grid scaled up
+canvas.width = GRID_W * CELL_SIZE;
+canvas.height = GRID_H * CELL_STATE; // Wait, let's fix this.
+
+// Let's use a fixed resolution for the simulation logic but scale visually if needed, 
+// or just map 1:1. The prompt asks for "at least 400x400 CSS pixels".
+// We will set logical grid to 80x80 and render it scaled up via CSS transform or canvas size.
+// Let's stick to a fixed logical resolution of 80x80 for performance and simplicity, 
+// but render at 640x640 (8x scale) for crisp pixels.
+
+const LOGICAL_W = 80;
+const LOGICAL_H = 80;
+
+canvas.width = LOGICAL_W * CELL_SIZE;
+canvas.height = LOGICAL_H * CELL_SIZE;
+
+// State
+let grid = new Array(LOGICAL_W * LOGICAL_H).fill(MAT_EMPTY);
+let selectedMaterial = MAT_SAND;
+
+// Exposed API
+window.sim = {
+    w: LOGICAL_W,
+    h: LOGICAL_H,
+    
+    tick: function(n) {
+        // We run the simulation n times. 
+        // To ensure determinism and prevent anti-gravity issues, we iterate bottom-up.
+        for (let i = 0; i < n; i++) {
+            updateGrid();
+        }
+    },
+
+    get: function(x, y) {
+        if (x < 0 || x >= LOGICAL_W || y < 0 || y >= LOGICAL_H) return MAT_EMPTY;
+        return grid[y * LOGICAL_W + x];
+    },
+
+    set: function(x, y, material) {
+        if (x < 0 || x >= LOGICAL_W || y < 0 || y >= LOGICAL_H) return;
+        // If we are painting, we shouldn't overwrite walls with sand/water/acid unless it's eraser?
+        // Actually, usually you can paint over walls in these games. 
+        // But let's allow setting anything to anything for simplicity of API.
+        grid[y * LOGICAL_W + x] = material;
+    },
+
+    clear: function() {
+        grid.fill(MAT_EMPTY);
+        draw();
+    }
+};
+
+// Helper: Random integer between min and max (inclusive)
+const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+// Main Update Loop
+function updateGrid() {
+    // We iterate from bottom to top. 
+    // This ensures particles move at most one cell per step and don't teleport.
+    
+    for (let y = LOGICAL_H - 2; y >= 0; y--) {
+        // To prevent bias in left/right movement, we can randomize the order of x checks
+        // or just iterate normally. Iterating normally is fine if we handle diagonals randomly.
+        
+        for (let x = 0; x < LOGICAL_W; x++) {
+            const idx = y * LOGICAL_W + x;
+            const mat = grid[idx];
+
+            if (mat === MAT_EMPTY || mat === MAT_WALL) continue;
+
+            // Determine target positions
+            const belowIdx = (y + 1) * LOGICAL_W + x;
+            const belowLeftIdx = (y + 1) * LOGICAL_W + (x - 1);
+            const belowRightIdx = (y + 1) * LOGICAL_W + (x + 1);
+            
+            // Check boundaries for diagonals
+            const validBelowLeft = x > 0;
+            const validBelowRight = x < LOGICAL_W - 1;
+
+            let moved = false;
+
+            if (mat === MAT_SAND) {
+                // Sand Logic: Fall down, swap with liquid, slide diagonally
+                
+                // 1. Try falling straight down
+                if (grid[belowIdx] === MAT_EMPTY || grid[belowIdx] === MAT_WATER || grid[belowIdx] === MAT_ACID) {
+                    grid[idx] = grid[belowIdx];
+                    grid[belowIdx] = MAT_SAND;
+                    moved = true;
+                } 
+                // 2. Try sliding diagonally (only if straight down is blocked by wall or empty but we prefer liquid?)
+                // Actually, standard sand rules: If below is solid, check diagonals.
+                else {
+                    // Check diagonals randomly
+                    const dirs = [];
+                    if (validBelowLeft) dirs.push({dx: -1, dy: 1});
+                    if (validBelowRight) dirs.push({dx: 1, dy: 1});
+                    
+                    // Shuffle directions to randomize choice
+                    dirs.sort(() => Math.random() - 0.5);
+
+                    for (let d of dirs) {
+                        const targetIdx = idx + d.dy * LOGICAL_W + d.dx;
+                        if (grid[targetIdx] === MAT_EMPTY || grid[targetIdx] === MAT_WATER || grid[targetIdx] === MAT_ACID) {
+                            grid[idx] = grid[targetIdx];
+                            grid[targetIdx] = MAT_SAND;
+                            moved = true;
+                            break; // Moved once per tick
+                        }
+                    }
+                }
+            } 
+            else if (mat === MAT_WATER || mat === MAT_ACID) {
+                // Liquid Logic: Fall down, spread sideways
+                
+                // 1. Try falling straight down
+                if (grid[belowIdx] === MAT_EMPTY || grid[belowIdx] === MAT_WALL) {
+                    grid[idx] = grid[belowIdx];
+                    grid[belowIdx] = mat;
+                    moved = true;
+                } 
+                // 2. Spread sideways
+                else {
+                    const dirs = [];
+                    if (x > 0) dirs.push({dx: -1, dy: 0});
+                    if (x < LOGICAL_W - 1) dirs.push({dx: 1, dy: 0});
+                    
+                    dirs.sort(() => Math.random() - 0.5);
+
+                    for (let d of dirs) {
+                        const targetIdx = idx + d.dx;
+                        // Liquid can only spread into empty or other liquid (to flow over walls)
+                        if (grid[targetIdx] === MAT_EMPTY || grid[targetIdx] === MAT_WATER || grid[targetIdx] === MAT_ACID) {
+                            grid[idx] = grid[targetIdx];
+                            grid[targetIdx] = mat;
+                            moved = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Acid Logic: Dissolve neighbors (only if it hasn't moved or as a side effect?)
+            // Usually acid moves like water. If it stays put, it might dissolve things around it.
+            // Let's add dissolution logic here.
+            
+            if (mat === MAT_ACID) {
+                // Check below and sides for sand/wall to dissolve
+                const neighbors = [
+                    {idx: belowIdx, dx: 0, dy: 1},
+                    {idx: idx - 1, dx: -1, dy: 0},
+                    {idx: idx + 1, dx: 1, dy: 0}
+                ];
+
+                for (let n of neighbors) {
+                    if (n.idx >= 0 && n.idx < grid.length) {
+                        const target = grid[n.idx];
+                        if (target === MAT_SAND || target === MAT_WALL) {
+                            // Dissolve!
+                            // Acid disappears, Target disappears (or becomes empty)
+                            grid[idx] = MAT_EMPTY; 
+                            grid[n.idx] = MAT_EMPTY; 
+                            moved = true; // Mark as processed so we don't move it again this tick?
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Rendering
+function draw() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Optimization: Draw in chunks or just loop. 
+    // Since grid is small (80x80), direct pixel manipulation is fast enough.
+    
+    const imageData = ctx.createImageData(LOGICAL_W * CELL_SIZE, LOGICAL_H * CELL_SIZE);
+    const data = imageData.data;
+
+    for (let y = 0; y < LOGICAL_H; y++) {
+        for (let x = 0; x < LOGICAL_W; x++) {
+            const idx = y * LOGICAL_W + x;
+            const mat = grid[idx];
+            
+            // Calculate pixel start index
+            const px = x * CELL_SIZE;
+            const py = y * CELL_SIZE;
+            const pIdx = (py * canvas.width) + px;
+
+            if (mat === MAT_EMPTY) {
+                ctx.fillStyle = '#111'; // Very dark empty space
+                ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+            } else if (mat === MAT_WALL) {
+                ctx.fillStyle = '#555';
+                ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+                // Add some noise/detail to wall
+                ctx.fillStyle = '#444';
+                ctx.fillRect(px + 1, py + 1, CELL_SIZE - 2, CELL_SIZE - 2);
+            } else if (mat === MAT_SAND) {
+                // Sand color variation
+                const shade = Math.floor(Math.random() * 30) + 200; 
+                ctx.fillStyle = `rgb(${shade}, ${shade-50}, 0)`;
+                ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+            } else if (mat === MAT_WATER) {
+                // Water color variation
+                const shade = Math.floor(Math.random() * 30) + 100; 
+                ctx.fillStyle = `rgb(${shade}, ${shade+50}, ${shade+200})`;
+                ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+            } else if (mat === MAT_ACID) {
+                // Acid color variation
+                const shade = Math.floor(Math.random() * 30) + 100; 
+                ctx.fillStyle = `rgb(${shade}, ${shade+255}, ${shade})`;
+                ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+            }
+        }
+    }
+    
+    // Put image data back (optional optimization if using fillRect is slow, but fillRect is usually fine for 80x80)
+    // Actually, let's just use fillRect loop for simplicity and correctness. 
+    // The previous logic was filling rects. Let's stick to that or optimize with ImageData if needed.
+    // Given the small grid (6400 pixels), fillRect is perfectly fine.
+}
+
+// UI Logic
+function selectMaterial(mat) {
+    selectedMaterial = mat;
+    
+    // Update button styles
+    document.querySelectorAll('button').forEach(b => b.classList.remove('selected'));
+    const btnId = `mat-${mat}`;
+    const btn = document.getElementById(btnId);
+    if (btn) btn.classList.add('selected');
+}
+
+// Mouse Interaction
+let isDrawing = false;
+
+canvas.addEventListener('mousedown', (e) => {
+    isDrawing = true;
+    paintAt(e);
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (isDrawing) paintAt(e);
+});
+
+window.addEventListener('mouseup', () => {
+    isDrawing = false;
+});
+
+function paintAt(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    const x = Math.floor((e.clientX - rect.left) * scaleX);
+    const y = Math.floor((e.clientY - rect.top) * scaleY);
+
+    // Convert screen coordinates to logical grid coordinates
+    // Since we scaled the canvas up (CELL_SIZE), we need to divide by CELL_SIZE
+    const gx = Math.floor(x / CELL_SIZE);
+    const gy = Math.floor(y / CELL_SIZE);
+
+    if (gx >= 0 && gx < LOGICAL_W && gy >= 0 && gy < LOGICAL_H) {
+        window.sim.set(gx, gy, selectedMaterial);
+        draw(); // Immediate redraw for responsiveness
+    }
+}
+
+// Initial Draw
+window.sim.clear();
+
+</script>
+</body>
+</html>

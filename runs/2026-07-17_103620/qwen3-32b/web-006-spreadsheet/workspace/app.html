@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Spreadsheet</title>
+    <style>
+        .grid-container {
+            display: grid;
+            grid-template-columns: 60px repeat(10, 54px);
+            grid-template-rows: 30px repeat(10, 37px);
+            border-collapse: collapse;
+            font-family: sans-serif;
+            margin-bottom: 20px;
+        }
+        .header {
+            text-align: center;
+            border: 1px solid #ccc;
+            padding: 5px;
+            background-color: #f0f0f0;
+        }
+        .row-header {
+            text-align: center;
+            border: 1px solid #ccc;
+            padding: 5px;
+            background-color: #f0f0f0;
+        }
+        .cell-input {
+            width: 100%;
+            height: 100%;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            text-align: right;
+        }
+        #export {
+            margin-top: 20px;
+        }
+        #csv {
+            margin-top: 10px;
+            width: 600px;
+            height: 150px;
+        }
+    </style>
+</head>
+<body>
+    <div class="grid-container" id="grid"></div>
+    <button id="export">Export CSV</button>
+    <textarea id="csv"></textarea>
+
+    <script>
+        let cells = {};
+        let displayValues = {};
+        let storedDependencies = {};
+        let dependentsMap = {};
+
+        function createGrid() {
+            const grid = document.getElementById('grid');
+            grid.innerHTML = '';
+            const letters = 'ABCDEFGHIJ'.split('');
+            const numbers = Array.from({length: 10}, (_, i) => i + 1);
+
+            // Column headers
+            for (let col of [''].concat(letters)) {
+                let cell = document.createElement('div');
+                cell.className = 'header';
+                if (col === '') {
+                    cell.textContent = '';
+                } else {
+                    cell.textContent = col;
+                }
+                grid.appendChild(cell);
+            }
+
+            // Rows and cells
+            for (let row of numbers) {
+                let cellHeader = document.createElement('div');
+                cellHeader.className = 'row-header';
+                cellHeader.textContent = row;
+                grid.appendChild(cellHeader);
+
+                for (let col of letters) {
+                    const input = document.createElement('input');
+                    input.id = `cell-${col}${row}`;
+                    input.className = 'cell-input';
+                    input.addEventListener('focus', handleFocus);
+                    input.addEventListener('blur', handleBlur);
+                    input.addEventListener('keydown', handleKeydown);
+                    grid.appendChild(input);
+                }
+            }
+
+            initSheet();
+        }
+
+        function initSheet() {
+            const letters = 'ABCDEFGHIJ'.split('');
+            const numbers = Array.from({length: 10}, (_, i) => i + 1);
+
+            cells = {};
+            displayValues = {};
+            storedDependencies = {};
+            dependentsMap = {};
+
+            for (let row of numbers) {
+                for (let col of letters) {
+                    const cellId = `${col}${row}`;
+                    cells[cellId] = '';
+                    displayValues[cellId] = '';
+                    storedDependencies[cellId] = [];
+                    dependentsMap[cellId] = [];
+                }
+            }
+        }
+
+        function handleFocus(e) {
+            const input = e.target;
+            const cellId = input.id.slice(5);
+            input.value = cells[cellId];
+        }
+
+        function handleBlur(e) {
+            const input = e.target;
+            const cellId = input.id.slice(5);
+            const newValue = input.value.trim();
+            if (newValue !== cells[cellId]) {
+                updateCell(cellId, newValue);
+            }
+        }
+
+        function handleKeydown(e) {
+            if (e.key === 'Enter') {
+                e.target.blur();
+            }
+        }
+
+        function isValidCell(cellId) {
+            const col = cellId[0];
+            const rowStr = cellId.slice(1);
+            const row = parseInt(rowStr, 10);
+            return col >= 'A' && col <= 'J' && !isNaN(row) && row >= 1 && row <= 10;
+        }
+
+        function updateCell(cellId, newValue) {
+            cells[cellId] = newValue;
+
+            // Update dependencies
+            const oldDependencies = storedDependencies[cellId];
+            let newDependencies = [];
+
+            if (newValue.startsWith('=')) {
+                const exprStr = newValue.slice(1).trim();
+                const cellRefs = [...exprStr.matchAll(/[A-J][0-9]+/g)].map(m => m[0]);
+                
+                for (const ref of cellRefs) {
+                    if (!isValidCell(ref)) {
+                        newDependencies = [];
+                        break;
+                    }
+                    newDependencies.push(ref);
+                }
+            }
+
+            // Remove old dependencies
+            if (oldDependencies) {
+                for (let depId of oldDependencies) {
+                    const index = dependentsMap[depId].indexOf(cellId);
+                    if (index !== -1) {
+                        dependentsMap[depId].splice(index, 1);
+                    }
+                }
+            }
+
+            storedDependencies[cellId] = newDependencies;
+
+            // Add new dependencies
+            for (let depId of newDependencies) {
+                if (!dependentsMap[depId]) {
+                    dependentsMap[depId] = [];
+                }
+                dependentsMap[depId].push(cellId);
+            }
+
+            recalculateDependents(cellId);
+        }
+
+        function recalculateDependents(cellId) {
+            const queue = [cellId];
+            const processed = new Set();
+
+            while (queue.length > 0) {
+                const currentCell = queue.shift();
+                if (processed.has(currentCell)) continue;
+                processed.add(currentCell);
+
+                const result = evaluateFormulaWithCycleCheck(currentCell, []);
+                displayValues[currentCell] = result.error ? result.error : result.display;
+
+                updateDisplayForCell(currentCell);
+
+                if (dependentsMap[currentCell]) {
+                    queue.push(...dependentsMap[currentCell]);
+                }
+            }
+        }
+
+        function evaluateFormulaWithCycleCheck(cellId, currentPath) {
+            if (currentPath.includes(cellId)) {
+                return { error: '#CYCLE' };
+            }
+
+            const newPath = [...currentPath, cellId];
+            const rawVal = cells[cellId];
+
+            let result;
+
+            try {
+                if (!rawVal.startsWith('=')) {
+                    // Plain text or empty
+                    if (rawVal === '') {
+                        result = { value: 0, display: '' };
+                    } else {
+                        const num = Number(rawVal);
+                        if (isNaN(num)) {
+                            result = { value: 0, display: rawVal };
+                        } else {
+                            result = { value: num, display: String(num) };
+                        }
+                    }
+                } else {
+                    // Formula
+                    const exprStr = rawVal.slice(1).trim();
+                    let cellRefs = [...exprStr.matchAll(/[A-J][0-9]+/g)].map(m => m[0]);
+
+                    for (const ref of cellRefs) {
+                        if (!isValidCell(ref)) {
+                            return { error: '#ERR' };
+                        }
+
+                        const depResult = evaluateFormulaWithCycleCheck(ref, newPath);
+                        if (depResult.error) {
+                            return { error: depResult.error };
+                        }
+
+                        exprStr = exprStr.replace(new RegExp(`\\b${ref}\\b`, 'g'), String(depResult.value));
+                    }
+
+                    try {
+                        const evaluatedValue = eval(exprStr);
+                        if (isNaN(evaluatedValue)) {
+                            throw new Error('Invalid syntax');
+                        }
+                        result = { value: evaluatedValue, display: String(evaluatedValue) };
+                    } catch (e) {
+                        return { error: '#ERR' };
+                    }
+                }
+            } catch (e) {
+                return { error: '#ERR' };
+            }
+
+            return result;
+        }
+
+        function updateDisplayForCell(cellId) {
+            const input = document.getElementById('cell-' + cellId);
+            if (input && !input.matches(':focus')) {
+                input.value = displayValues[cellId];
+            }
+        }
+
+        function setupExportButton() {
+            document.getElementById('export').addEventListener('click', () => {
+                const csvLines = [];
+                for (let row = 1; row <= 10; row++) {
+                    let line = '';
+                    for (let col of 'ABCDEFGHIJ'.split('')) {
+                        const cellId = `${col}${row}`;
+                        line += displayValues[cellId];
+                        if (col !== 'J') {
+                            line += ',';
+                        }
+                    }
+                    csvLines.push(line);
+                }
+                document.getElementById('csv').value = csvLines.join('\n');
+            });
+        }
+
+        window.sheet = {
+            set: function(cellId, value) {
+                const input = document.getElementById('cell-' + cellId);
+                if (input) {
+                    cells[cellId] = value;
+                    updateCell(cellId, value);
+                }
+            },
+            get: function(cellId) {
+                return displayValues[cellId];
+            },
+            raw: function(cellId) {
+                return cells[cellId];
+            }
+        };
+
+        window.onload = () => {
+            createGrid();
+            setupExportButton();
+        };
+    </script>
+</body>
+</html>

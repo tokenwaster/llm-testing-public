@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    margin: 16px;
+    background: #f5f6f8;
+  }
+  h1 { font-size: 18px; margin: 0 0 10px; }
+  #app {
+    min-width: 600px;
+    min-height: 400px;
+    display: inline-block;
+    background: #fff;
+    padding: 12px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+  }
+  table.sheet { border-collapse: collapse; }
+  table.sheet th {
+    background: #e8eaed;
+    border: 1px solid #bbb;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 2px 4px;
+    min-width: 24px;
+    text-align: center;
+  }
+  table.sheet td {
+    border: 1px solid #bbb;
+    padding: 0;
+  }
+  table.sheet input {
+    width: 62px;
+    height: 24px;
+    border: none;
+    padding: 2px 4px;
+    font-size: 13px;
+    font-family: inherit;
+    box-sizing: border-box;
+    background: transparent;
+  }
+  table.sheet input:focus {
+    outline: 2px solid #4a90d9;
+    background: #fffbe6;
+  }
+  #toolbar { margin-top: 10px; }
+  #export {
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #csv {
+    display: block;
+    margin-top: 8px;
+    width: 100%;
+    height: 140px;
+    box-sizing: border-box;
+    font-family: Consolas, monospace;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <table class="sheet" id="grid"></table>
+  <div id="toolbar">
+    <button id="export">Export CSV</button>
+    <textarea id="csv" placeholder="CSV output appears here"></textarea>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var COLS = ["A","B","C","D","E","F","G","H","I","J"];
+  var ROWS = [1,2,3,4,5,6,7,8,9,10];
+
+  // raw text per cell name, e.g. raws["A1"] = "=B2*2"
+  var raws = {};
+
+  /* ---------- build grid ---------- */
+  var table = document.getElementById("grid");
+  var thead = document.createElement("tr");
+  thead.appendChild(document.createElement("th")); // corner
+  COLS.forEach(function (c) {
+    var th = document.createElement("th");
+    th.textContent = c;
+    thead.appendChild(th);
+  });
+  table.appendChild(thead);
+
+  ROWS.forEach(function (r) {
+    var tr = document.createElement("tr");
+    var th = document.createElement("th");
+    th.textContent = r;
+    tr.appendChild(th);
+    COLS.forEach(function (c) {
+      var td = document.createElement("td");
+      var inp = document.createElement("input");
+      inp.id = "cell-" + c + r;
+      inp.dataset.name = c + r;
+      inp.autocomplete = "off";
+      inp.spellcheck = false;
+      td.appendChild(inp);
+      tr.appendChild(td);
+    });
+    table.appendChild(tr);
+  });
+
+  function isCellName(s) {
+    var m = /^([A-J])([1-9]|10)$/.exec(s);
+    return !!m;
+  }
+  function inputFor(name) {
+    return document.getElementById("cell-" + name);
+  }
+
+  /* ---------- formula parser / evaluator ---------- */
+
+  function SheetError(code) { this.code = code; }
+
+  function tokenize(src) {
+    var toks = [], i = 0;
+    while (i < src.length) {
+      var ch = src[i];
+      if (ch === " " || ch === "\t") { i++; continue; }
+      if ("+-*/()".indexOf(ch) !== -1) { toks.push({ t: ch }); i++; continue; }
+      if (ch >= "0" && ch <= "9" || ch === ".") {
+        var j = i;
+        while (j < src.length && (src[j] >= "0" && src[j] <= "9" || src[j] === ".")) j++;
+        var numStr = src.slice(i, j);
+        var num = Number(numStr);
+        if (!isFinite(num) || numStr === "." ) throw new SheetError("#ERR");
+        toks.push({ t: "num", v: num });
+        i = j;
+        continue;
+      }
+      if (/[A-Za-z]/.test(ch)) {
+        var k = i;
+        while (k < src.length && /[A-Za-z0-9]/.test(src[k])) k++;
+        var ref = src.slice(i, k).toUpperCase();
+        if (!isCellName(ref)) throw new SheetError("#ERR");
+        toks.push({ t: "ref", v: ref });
+        i = k;
+        continue;
+      }
+      throw new SheetError("#ERR");
+    }
+    return toks;
+  }
+
+  function parseEval(src, stack) {
+    var toks = tokenize(src);
+    var pos = 0;
+
+    function peek() { return toks[pos]; }
+    function next() { return toks[pos++]; }
+
+    function parseExpr() {
+      var v = parseTerm();
+      while (peek() && (peek().t === "+" || peek().t === "-")) {
+        var op = next().t;
+        var r = parseTerm();
+        v = op === "+" ? v + r : v - r;
+      }
+      return v;
+    }
+    function parseTerm() {
+      var v = parseFactor();
+      while (peek() && (peek().t === "*" || peek().t === "/")) {
+        var op = next().t;
+        var r = parseFactor();
+        v = op === "*" ? v * r : v / r;
+      }
+      return v;
+    }
+    function parseFactor() {
+      var tk = peek();
+      if (!tk) throw new SheetError("#ERR");
+      if (tk.t === "-") { next(); return -parseFactor(); }
+      if (tk.t === "+") { next(); return parseFactor(); }
+      if (tk.t === "num") { next(); return tk.v; }
+      if (tk.t === "ref") { next(); return numericValue(tk.v, stack); }
+      if (tk.t === "(") {
+        next();
+        var v = parseExpr();
+        if (!peek() || peek().t !== ")") throw new SheetError("#ERR");
+        next();
+        return v;
+      }
+      throw new SheetError("#ERR");
+    }
+
+    var result = parseExpr();
+    if (pos !== toks.length) throw new SheetError("#ERR");
+    if (!isFinite(result)) throw new SheetError("#ERR");
+    return result;
+  }
+
+  // Numeric value of a cell as seen from inside a formula.
+  // Throws SheetError("#CYCLE") on circular reference, "#ERR" on bad formula.
+  function numericValue(name, stack) {
+    if (stack.indexOf(name) !== -1) throw new SheetError("#CYCLE");
+    var raw = raws[name] || "";
+    if (raw === "") return 0;
+    if (raw.charAt(0) === "=") {
+      stack.push(name);
+      try {
+        return parseEval(raw.slice(1), stack);
+      } finally {
+        stack.pop();
+      }
+    }
+    var n = Number(raw);
+    return (raw.trim() !== "" && isFinite(n)) ? n : 0;
+  }
+
+  function formatNumber(n) {
+    // trim binary floating-point noise (e.g. 0.30000000000000004)
+    var r = Math.round(n * 1e10) / 1e10;
+    return String(r);
+  }
+
+  // The string a cell displays when not being edited.
+  function displayValue(name) {
+    var raw = raws[name] || "";
+    if (raw.charAt(0) !== "=") return raw;
+    try {
+      return formatNumber(numericValue(name, []));
+    } catch (e) {
+      if (e instanceof SheetError) return e.code;
+      return "#ERR";
+    }
+  }
+
+  /* ---------- recalculation / display ---------- */
+
+  function recalcAll() {
+    COLS.forEach(function (c) {
+      ROWS.forEach(function (r) {
+        var name = c + r;
+        var inp = inputFor(name);
+        if (document.activeElement !== inp) {
+          inp.value = displayValue(name);
+        }
+      });
+    });
+  }
+
+  function commit(name, text) {
+    raws[name] = String(text);
+    recalcAll();
+  }
+
+  /* ---------- wire up inputs ---------- */
+
+  COLS.forEach(function (c) {
+    ROWS.forEach(function (r) {
+      var name = c + r;
+      var inp = inputFor(name);
+      inp.addEventListener("focus", function () {
+        inp.value = raws[name] || "";
+        // select for convenient overwrite
+        inp.select();
+      });
+      inp.addEventListener("blur", function () {
+        commit(name, inp.value);
+      });
+      inp.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          inp.blur(); // triggers commit via blur handler
+        } else if (ev.key === "Escape") {
+          ev.preventDefault();
+          inp.value = raws[name] || "";
+          inp.blur();
+        }
+      });
+    });
+  });
+
+  /* ---------- CSV export ---------- */
+
+  document.getElementById("export").addEventListener("click", function () {
+    var lines = ROWS.map(function (r) {
+      return COLS.map(function (c) {
+        var v = displayValue(c + r);
+        // basic CSV escaping for values containing commas/quotes
+        if (/[",\n]/.test(v)) v = '"' + v.replace(/"/g, '""') + '"';
+        return v;
+      }).join(",");
+    });
+    document.getElementById("csv").value = lines.join("\n");
+  });
+
+  /* ---------- scripting API ---------- */
+
+  window.sheet = {
+    set: function (name, text) {
+      name = String(name).toUpperCase();
+      if (!isCellName(name)) throw new Error("bad cell: " + name);
+      commit(name, text);
+    },
+    get: function (name) {
+      name = String(name).toUpperCase();
+      if (!isCellName(name)) throw new Error("bad cell: " + name);
+      return displayValue(name);
+    },
+    raw: function (name) {
+      name = String(name).toUpperCase();
+      if (!isCellName(name)) throw new Error("bad cell: " + name);
+      return raws[name] || "";
+    }
+  };
+
+  recalcAll();
+})();
+</script>
+</body>
+</html>

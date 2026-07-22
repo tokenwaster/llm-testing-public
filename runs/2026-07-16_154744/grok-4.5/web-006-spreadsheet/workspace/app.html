@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #f5f6f8;
+    color: #222;
+  }
+  #app {
+    min-width: 600px;
+    min-height: 400px;
+    padding: 16px;
+  }
+  h1 {
+    margin: 0 0 12px;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .sheet-wrap {
+    overflow: auto;
+    background: #fff;
+    border: 1px solid #c5c9d0;
+    border-radius: 6px;
+    box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  }
+  table.sheet {
+    border-collapse: collapse;
+    table-layout: fixed;
+    min-width: 100%;
+  }
+  .sheet th, .sheet td {
+    border: 1px solid #d0d4db;
+    padding: 0;
+    height: 28px;
+  }
+  .sheet th {
+    background: #eef0f4;
+    color: #555;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+    width: 64px;
+    user-select: none;
+  }
+  .sheet th.row-head {
+    width: 36px;
+    min-width: 36px;
+  }
+  .sheet th.corner {
+    width: 36px;
+    background: #e4e7ec;
+  }
+  .sheet td input {
+    display: block;
+    width: 100%;
+    height: 28px;
+    border: none;
+    margin: 0;
+    padding: 2px 6px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: transparent;
+    outline: none;
+  }
+  .sheet td input:focus {
+    background: #fffbea;
+    box-shadow: inset 0 0 0 2px #4c8bf5;
+  }
+  .toolbar {
+    margin-top: 12px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  #export {
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: #2f6fed;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  #export:hover { background: #2458c4; }
+  #export:active { background: #1d4aa3; }
+  #csv {
+    flex: 1;
+    min-width: 280px;
+    min-height: 120px;
+    width: 100%;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    padding: 8px;
+    border: 1px solid #c5c9d0;
+    border-radius: 6px;
+    resize: vertical;
+    background: #fff;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <div class="sheet-wrap">
+    <table class="sheet" id="grid"></table>
+  </div>
+  <div class="toolbar">
+    <button type="button" id="export">Export CSV</button>
+    <textarea id="csv" placeholder="CSV export appears here"></textarea>
+  </div>
+</div>
+<script>
+(function () {
+  const COLS = 'ABCDEFGHIJ'.split('');
+  const ROWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  const rawData = Object.create(null);
+  const inputs = Object.create(null);
+  let cycleSet = new Set();
+  let displayCache = Object.create(null);
+
+  function cellId(col, row) {
+    return col + row;
+  }
+
+  function isValidRef(ref) {
+    return /^[A-J]([1-9]|10)$/.test(ref);
+  }
+
+  function plainToFormulaValue(raw) {
+    if (raw == null || raw === '') return { type: 'num', value: 0 };
+    const trimmed = String(raw).trim();
+    if (trimmed === '') return { type: 'num', value: 0 };
+    if (!isNaN(Number(trimmed)) && trimmed !== '') {
+      return { type: 'num', value: Number(trimmed) };
+    }
+    return { type: 'text', value: String(raw) };
+  }
+
+  function formatNumber(n) {
+    if (!isFinite(n)) return null;
+    if (Object.is(n, -0)) return '0';
+    return String(n);
+  }
+
+  function tokenize(expr) {
+    const s = String(expr).replace(/\s+/g, '');
+    const tokens = [];
+    let i = 0;
+    while (i < s.length) {
+      const ch = s[i];
+      if (/[0-9.]/.test(ch)) {
+        let j = i + 1;
+        while (j < s.length && /[0-9.]/.test(s[j])) j++;
+        const numStr = s.slice(i, j);
+        if (numStr === '.' || (numStr.match(/\./g) || []).length > 1) {
+          throw new Error('bad number');
+        }
+        const n = Number(numStr);
+        if (!isFinite(n)) throw new Error('bad number');
+        tokens.push({ type: 'num', value: n });
+        i = j;
+      } else if (/[A-Za-z]/.test(ch)) {
+        let j = i + 1;
+        while (j < s.length && /[0-9]/.test(s[j])) j++;
+        const ref = s.slice(i, j).toUpperCase();
+        if (!isValidRef(ref)) throw new Error('bad ref');
+        tokens.push({ type: 'ref', value: ref });
+        i = j;
+      } else if ('+-*/()'.includes(ch)) {
+        tokens.push({ type: 'op', value: ch });
+        i++;
+      } else {
+        throw new Error('bad char');
+      }
+    }
+    return tokens;
+  }
+
+  function evalCell(id, stack) {
+    if (cycleSet.has(id)) return { type: 'cycle' };
+    if (stack.includes(id)) {
+      const idx = stack.indexOf(id);
+      for (let i = idx; i < stack.length; i++) cycleSet.add(stack[i]);
+      return { type: 'cycle' };
+    }
+
+    const raw = rawData[id] != null ? String(rawData[id]) : '';
+    if (!raw.startsWith('=')) {
+      return plainToFormulaValue(raw);
+    }
+
+    const newStack = stack.concat([id]);
+    try {
+      const tokens = tokenize(raw.slice(1));
+      if (tokens.length === 0) throw new Error('empty');
+      const value = parseExpression(tokens, newStack);
+      if (cycleSet.has(id)) return { type: 'cycle' };
+      if (!isFinite(value)) return { type: 'err' };
+      return { type: 'num', value: value };
+    } catch (e) {
+      if (e && e.cycle) {
+        cycleSet.add(id);
+        return { type: 'cycle' };
+      }
+      return { type: 'err' };
+    }
+  }
+
+  function parseExpression(tokens, stack) {
+    let pos = 0;
+
+    function peek() {
+      return pos < tokens.length ? tokens[pos] : null;
+    }
+    function consume() {
+      return tokens[pos++];
+    }
+
+    function parseExpr() {
+      let left = parseTerm();
+      while (peek() && peek().type === 'op' && (peek().value === '+' || peek().value === '-')) {
+        const op = consume().value;
+        const right = parseTerm();
+        left = op === '+' ? left + right : left - right;
+      }
+      return left;
+    }
+
+    function parseTerm() {
+      let left = parseFactor();
+      while (peek() && peek().type === 'op' && (peek().value === '*' || peek().value === '/')) {
+        const op = consume().value;
+        const right = parseFactor();
+        left = op === '*' ? left * right : left / right;
+      }
+      return left;
+    }
+
+    function parseFactor() {
+      const t = peek();
+      if (!t) throw new Error('eof');
+
+      if (t.type === 'op' && t.value === '+') {
+        consume();
+        return parseFactor();
+      }
+      if (t.type === 'op' && t.value === '-') {
+        consume();
+        return -parseFactor();
+      }
+      if (t.type === 'op' && t.value === '(') {
+        consume();
+        const v = parseExpr();
+        const close = peek();
+        if (!close || close.type !== 'op' || close.value !== ')') throw new Error('paren');
+        consume();
+        return v;
+      }
+      if (t.type === 'num') {
+        consume();
+        return t.value;
+      }
+      if (t.type === 'ref') {
+        consume();
+        const res = evalCell(t.value, stack);
+        if (res.type === 'cycle') throw { cycle: true };
+        if (res.type !== 'num') throw new Error('type');
+        return res.value;
+      }
+      throw new Error('unexpected');
+    }
+
+    const result = parseExpr();
+    if (pos < tokens.length) throw new Error('trailing');
+    return result;
+  }
+
+  function computeDisplay(id) {
+    const raw = rawData[id] != null ? String(rawData[id]) : '';
+    if (!raw.startsWith('=')) {
+      return raw;
+    }
+    const result = evalCell(id, []);
+    if (result.type === 'cycle' || cycleSet.has(id)) return '#CYCLE';
+    if (result.type === 'err') return '#ERR';
+    if (result.type === 'num') {
+      const s = formatNumber(result.value);
+      return s == null ? '#ERR' : s;
+    }
+    return '#ERR';
+  }
+
+  function recalculateAll() {
+    cycleSet = new Set();
+    displayCache = Object.create(null);
+    for (const c of COLS) {
+      for (const r of ROWS) {
+        const id = cellId(c, r);
+        displayCache[id] = computeDisplay(id);
+      }
+    }
+    // Second pass: ensure every member of a cycle shows #CYCLE
+    // (cycleSet may grow during evaluation)
+    for (const c of COLS) {
+      for (const r of ROWS) {
+        const id = cellId(c, r);
+        const raw = rawData[id] != null ? String(rawData[id]) : '';
+        if (raw.startsWith('=') && cycleSet.has(id)) {
+          displayCache[id] = '#CYCLE';
+        }
+      }
+    }
+  }
+
+  function getDisplay(id) {
+    if (displayCache[id] !== undefined) return displayCache[id];
+    return computeDisplay(id);
+  }
+
+  function updateAllDisplays() {
+    const active = document.activeElement;
+    for (const c of COLS) {
+      for (const r of ROWS) {
+        const id = cellId(c, r);
+        const input = inputs[id];
+        if (!input) continue;
+        if (input === active) continue;
+        input.value = getDisplay(id);
+      }
+    }
+  }
+
+  function commitCell(id) {
+    const input = inputs[id];
+    if (!input) return;
+    rawData[id] = input.value;
+    recalculateAll();
+    updateAllDisplays();
+  }
+
+  function buildGrid() {
+    const table = document.getElementById('grid');
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    const corner = document.createElement('th');
+    corner.className = 'corner';
+    headRow.appendChild(corner);
+    for (const c of COLS) {
+      const th = document.createElement('th');
+      th.textContent = c;
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    for (const r of ROWS) {
+      const tr = document.createElement('tr');
+      const rh = document.createElement('th');
+      rh.className = 'row-head';
+      rh.textContent = String(r);
+      tr.appendChild(rh);
+      for (const c of COLS) {
+        const id = cellId(c, r);
+        const td = document.createElement('td');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.id = 'cell-' + id;
+        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('spellcheck', 'false');
+        inputs[id] = input;
+        rawData[id] = '';
+
+        input.addEventListener('focus', function () {
+          input.value = rawData[id] != null ? String(rawData[id]) : '';
+          input.select();
+        });
+        input.addEventListener('blur', function () {
+          commitCell(id);
+        });
+        input.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            input.blur();
+          }
+        });
+
+        td.appendChild(input);
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+  }
+
+  function exportCsv() {
+    recalculateAll();
+    const lines = [];
+    for (const r of ROWS) {
+      const cells = [];
+      for (const c of COLS) {
+        cells.push(getDisplay(cellId(c, r)));
+      }
+      lines.push(cells.join(','));
+    }
+    document.getElementById('csv').value = lines.join('\n');
+  }
+
+  buildGrid();
+  recalculateAll();
+  updateAllDisplays();
+
+  document.getElementById('export').addEventListener('click', exportCsv);
+
+  window.sheet = {
+    set: function (cell, value) {
+      const id = String(cell).toUpperCase();
+      if (!isValidRef(id)) return;
+      rawData[id] = value == null ? '' : String(value);
+      recalculateAll();
+      updateAllDisplays();
+      const input = inputs[id];
+      if (input && document.activeElement === input) {
+        input.value = rawData[id];
+      }
+    },
+    get: function (cell) {
+      const id = String(cell).toUpperCase();
+      if (!isValidRef(id)) return '';
+      return getDisplay(id);
+    },
+    raw: function (cell) {
+      const id = String(cell).toUpperCase();
+      if (!isValidRef(id)) return '';
+      return rawData[id] != null ? String(rawData[id]) : '';
+    }
+  };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Maze Explorer</title>
+    <style>
+        body {
+            background: #222;
+            color: #eee;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            margin: 0;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #maze {
+            position: relative;
+            border: 4px solid #555;
+            background: #fff;
+            line-height: 0;
+        }
+        canvas {
+            display: block;
+        }
+        .controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            font-size: 1.2rem;
+        }
+        button {
+            padding: 8px 16px;
+            font-size: 1rem;
+            cursor: pointer;
+            background: #444;
+            color: white;
+            border: 1px solid #777;
+            border-radius: 4px;
+        }
+        button:hover {
+            background: #666;
+        }
+        #timer, #completed {
+            font-weight: bold;
+            color: #0f0;
+        }
+    </style>
+</head>
+<body>
+
+<div id="maze">
+    <canvas id="mazeCanvas" width="400" height="400"></canvas>
+</div>
+
+<div class="controls">
+    <div>Timer: <span id="timer">0</span></div>
+    <div>Completed: <span id="completed">0</span>/24</div>
+    <button id="reset">Reset Maze</button>
+</div>
+
+<script>
+(function() {
+    const canvas = document.getElementById('mazeCanvas');
+    const ctx = canvas.getContext('2d');
+    const timerEl = document.getElementById('timer');
+    const completedEl = document.getElementById('completed');
+    const resetBtn = document.getElementById('reset');
+
+    const ROWS = 20;
+    const COLS = 20;
+    const CELL_SIZE = 400 / ROWS;
+
+    class LCG {
+        constructor(seed) { this.state = seed >>> 0; }
+        next() {
+            this.state = (Math.imul(this.state, 1664525) + 1013904223) >>> 0;
+            return this.state / 4294967296;
+        }
+    }
+
+    let lcg = new LCG(Date.now());
+    let grid = [];
+    let bots = [];
+    let spawn = { r: 0, c: 0 };
+    let exit = { r: 0, c: 0 };
+    let currentTick = 0;
+    let interpolationFactor = 1;
+
+    function generateMaze(rows, cols, rng) {
+        const g = Array.from({ length: rows }, () =>
+            Array.from({ length: cols }, () => ({ n: true, e: true, s: true, w: true }))
+        );
+        const visited = new Set();
+        const stack = [{ r: 0, c: 0 }];
+        visited.add("0,0");
+
+        while (stack.length > 0) {
+            const curr = stack[stack.length - 1];
+            const neighbors = [];
+            const dirs = [
+                { dr: -1, dc: 0, wall: 'n', opp: 's' },
+                { dr: 0, dc: 1, wall: 'e', opp: 'w' },
+                { dr: 1, dc: 0, wall: 's', opp: 'n' },
+                { dr: 0, dc: -1, wall: 'w', opp: 'e' }
+            ];
+
+            for (const d of dirs) {
+                const nr = curr.r + d.dr;
+                const nc = curr.c + d.dc;
+                if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited.has(`${nr},${nc}`)) {
+                    neighbors.push({ nr, nc, wall: d.wall, opp: d.opp });
+                }
+            }
+
+            if (neighbors.length > 0) {
+                for (let i = neighbors.length - 1; i > 0; i--) {
+                    const j = Math.floor(rng.next() * (i + 1));
+                    [neighbors[i], neighbors[j]] = [neighbors[j], neighbors[i]];
+                }
+                const next = neighbors[0];
+                g[curr.r][curr.c][next.wall] = false;
+                g[next.nr][next.nc][next.opp] = false;
+                visited.add(`${next.nr},${next.nc}`);
+                stack.push({ r: next.nr, c: next.nc });
+            } else {
+                stack.pop();
+            }
+        }
+        return g;
+    }
+
+    function reset(seed) {
+        if (seed !== undefined) lcg = new LCG(seed);
+        else lcg = new LCG(Math.floor(lcg.next() * 0xFFFFFFFF));
+
+        grid = generateMaze(ROWS, COLS, lcg);
+        spawn = { r: 0, c: 0 };
+        exit = { 
+            r: Math.floor(lcg.next() * ROWS), 
+            c: Math.floor(lcg.next() * COLS) 
+        };
+        if (exit.r === spawn.r && exit.c === spawn.c) exit.r = 1;
+
+        bots = [];
+        const colors = ['#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff', '#9a6324', '#fffac8', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075', '#808080', '#ffffff', '#00ffff', '#ff00ff', '#ff1493'];
+        
+        for (let i = 0; i < 24; i++) {
+            const prefs = [0, 1, 2, 3]; // N, E, S, W
+            for (let j = prefs.length - 1; j > 0; j--) {
+                const k = Math.floor(lcg.next() * (j + 1));
+                [prefs[j], prefs[k]] = [prefs[k], prefs[j]];
+            }
+
+            bots.push({
+                r: spawn.r, c: spawn.c,
+                prevR: spawn.r, prevC: spawn.c,
+                renderR: spawn.r, renderC: spawn.c,
+                path: [{ r: spawn.r, c: spawn.c }],
+                deadEnds: [],
+                finishTick: null,
+                finished: false,
+                stack: [{ r: spawn.r, c: spawn.c }],
+                visited: new Set([`${spawn.r},${spawn.c}`]),
+                prefs: prefs,
+                color: colors[i % colors.length]
+            });
+        }
+
+        currentTick = 0;
+        interpolationFactor = 1;
+        timerEl.innerText = "0";
+        completedEl.innerText = "0";
+    }
+
+    function tick(n) {
+        for (let i = 0; i < n; i++) {
+            const allDone = bots.every(b => b.finished);
+            if (allDone) break;
+
+            currentTick++;
+            interpolationFactor = 0;
+
+            for (let bot of bots) {
+                if (bot.finished) continue;
+
+                // Check if current cell is exit
+                if (bot.r === exit.r && bot.c === exit.c) {
+                    bot.finished = true;
+                    bot.finishTick = currentTick;
+                    continue;
+                }
+
+                const neighbors = [];
+                const dirs = [
+                    { dr: -1, dc: 0, wall: 'n', opp: 's' },
+                    { dr: 0, dc: 1, wall: 'e', opp: 'w' },
+                    { dr: 1, dc: 0, wall: 's', opp: 'n' },
+                    { dr: 0, dc: -1, wall: 'w', opp: 'e' }
+                ];
+
+                for (const d of dirs) {
+                    if (!grid[bot.r][bot.c][d.wall]) {
+                        const nr = bot.r + d.dr;
+                        const nc = bot.c + d.dc;
+                        if (!bot.visited.has(`${nr},${nc}`)) {
+                            neighbors.push({ r: nr, c: nc, dirIdx: dirs.indexOf(d) });
+                        }
+                    }
+                }
+
+                // Filter neighbors by preference
+                const validPrefs = neighbors.filter(nb => bot.prefs.includes(nb.dirIdx));
+
+                if (validPrefs.length > 0) {
+                    // Pick the first available neighbor based on preference order
+                    let nextMove = null;
+                    for (let p of bot.prefs) {
+                        const found = validPrefs.find(v => v.dirIdx === p);
+                        if (found) {
+                            nextMove = found;
+                            break;
+                        }
+                    }
+
+                    if (nextMove) {
+                        bot.prevR = bot.r;
+                        bot.prevC = bot.c;
+                        bot.r = nextMove.r;
+                        bot.c = nextMove.c;
+                        bot.path.push({ r: bot.r, c: bot.c });
+                        bot.stack.push({ r: bot.r, c: bot.c });
+                        bot.visited.add(`${bot.r},${bot.c}`);
+
+                        if (bot.r === exit.r && bot.c === exit.c) {
+                            bot.finished = true;
+                            bot.finishTick = currentTick;
+                        }
+                    }
+                } else {
+                    // Backtrack
+                    bot.deadEnds.push({ r: bot.r, c: bot.c });
+                    bot.stack.pop();
+                    if (bot.stack.length > 0) {
+                        const prev = bot.stack[bot.stack.length - 1];
+                        bot.prevR = bot.r;
+                        bot.prevC = bot.c;
+                        bot.r = prev.r;
+                        bot.c = prev.c;
+                    } else {
+                        // Stuck at start
+                    }
+                }
+            }
+        }
+        
+        const finishedCount = bots.filter(b => b.finished).length;
+        completedEl.innerText = finishedCount;
+        if (finishedCount === 24) timerEl.innerText = currentTick;
+        else timerEl.innerText = currentTick; // Timer keeps running until last arrival
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, 400, 400);
+        
+        // Draw Walls
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 2;
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+                const x = c * CELL_SIZE;
+                const y = r * CELL_SIZE;
+                if (grid[r][c].n) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + CELL_SIZE, y); ctx.stroke(); }
+                if (grid[r][c].e) { ctx.beginPath(); ctx.moveTo(x + CELL_SIZE, y); ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE); ctx.stroke(); }
+                if (grid[r][c].s) { ctx.beginPath(); ctx.moveTo(x, y + CELL_SIZE); ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE); ctx.stroke(); }
+                if (grid[r][c].w) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + CELL_SIZE); ctx.stroke(); }
+            }
+        }
+
+        // Draw Exit
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(exit.c * CELL_SIZE + 5, exit.r * CELL_SIZE + 5, CELL_SIZE - 10, CELL_SIZE - 10);
+
+        // Draw Bots
+        for (let bot of bots) {
+            const tx = bot.r * CELL_SIZE + CELL_SIZE / 2;
+            const ty = bot.r * CELL_SIZE + CELL_SIZE / 2; // Wait, typo in logic below
+            // Correct interpolation:
+            const bx = (bot.prevC + (bot.c - bot.prevC) * interpolationFactor) * CELL_SIZE + CELL_SIZE/2;
+            const by = (bot.prevR + (bot.r - bot.prevR) * interpolationFactor) * CELL_SIZE + CELL_SIZE/2;
+
+            ctx.fillStyle = bot.color;
+            ctx.beginPath();
+            ctx.arc(bx, by, CELL_SIZE / 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    function animate() {
+        // Smoothly interpolate the visual position towards the logical position
+        for (let bot of bots) {
+            bot.prevR = bot.r;
+            bot.prevC = bot.c;
+        }
+        // We use a trick: interpolationFactor is reset in tick(). 
+        // In the animation loop, we increment it.
+        if (interpolationFactor < 1) {
+            interpolationFactor += 0.15; // Speed of visual movement
+        }
+
+        draw();
+        requestAnimationFrame(animate);
+    }
+
+    // API setup
+    window.game = {
+        tick: tick,
+        reset: reset,
+        get elapsed() { return bots.every(b => b.finished) ? currentTick : currentTick; }, // Logic handled in tick()
+        get size() { return { rows: ROWS, cols: COLS }; },
+        get spawn() { return spawn; },
+        get exit() { return exit; },
+        walls: (r, c) => grid[r][c],
+        get bots() { return bots; }
+    };
+
+    // Override elapsed to be exactly as requested (stops at last arrival)
+    let finalElapsed = 0;
+    const originalTick = tick;
+    window.game.elapsed = 0; // Placeholder
+    // We'll use a getter for the real value
+    Object.defineProperty(window.game, 'elapsed', {
+        get: () => {
+            // The requirement says it stops at last arrival.
+            // In our tick function, we stop incrementing if allFinished is true.
+            return currentTick; 
+        }
+    });
+
+    resetBtn.addEventListener('click', () => reset());
+    
+    // Start simulation
+    reset();
+    animate();
+
+})();
+</script>
+</body>
+</html>

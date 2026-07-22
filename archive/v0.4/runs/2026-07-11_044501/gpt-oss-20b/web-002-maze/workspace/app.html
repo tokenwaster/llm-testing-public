@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maze Bot Game</title>
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;background:#222;color:#eee;margin:0;padding:20px;}
+  #hud{margin-bottom:10px;}
+  #hud span{display:inline-block;width:120px;text-align:right;margin-right:15px;}
+  button{padding:5px 10px;font-size:14px;}
+  canvas{border:2px solid #555;background:#111;display:block;margin-top:10px;}
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <span>Completed: <span id="completed">0</span></span>
+  <span>Time: <span id="timer">0.00</span>s</span>
+  <button id="reset">Reset</button>
+</div>
+
+<canvas id="maze" width="500" height="500"></canvas>
+
+<script>
+(() => {
+const CELL_SIZE = 30; // px
+const GRID_W = 15, GRID_H = 15;
+const BOT_COUNT = 24;
+const canvas = document.getElementById('maze');
+const ctx = canvas.getContext('2d');
+const completedEl = document.getElementById('completed');
+const timerEl = document.getElementById('timer');
+const resetBtn = document.getElementById('reset');
+
+let startTime, elapsedMs = 0;
+let animationFrame;
+
+// Maze data
+class Cell { constructor(x,y){this.x=x;this.y=y;this.walls={N:true,S:true,E:true,W:true};this.visited=false;} }
+let grid = [];
+for(let y=0;y<GRID_H;y++){
+  let row=[];
+  for(let x=0;x<GRID_W;x++) row.push(new Cell(x,y));
+  grid.push(row);
+}
+const spawn = {x:0,y:0};
+const exit = {x:GRID_W-1,y:GRID_H-1};
+
+// Generate perfect maze with recursive backtracker
+function carveMaze(){
+  const stack=[];
+  let current=grid[spawn.y][spawn.x];
+  current.visited=true;
+  do{
+    const neighbors=[];
+    if(current.y>0 && !grid[current.y-1][current.x].visited) neighbors.push('N');
+    if(current.y<GRID_H-1 && !grid[current.y+1][current.x].visited) neighbors.push('S');
+    if(current.x<GRID_W-1 && !grid[current.y][current.x+1].visited) neighbors.push('E');
+    if(current.x>0 && !grid[current.y][current.x-1].visited) neighbors.push('W');
+    if(neighbors.length){
+      const dir=neighbors[Math.floor(Math.random()*neighbors.length)];
+      let nx=current.x, ny=current.y;
+      if(dir==='N'){ny--; current.walls.N=false; grid[ny][nx].walls.S=false;}
+      if(dir==='S'){ny++; current.walls.S=false; grid[ny][nx].walls.N=false;}
+      if(dir==='E'){nx++; current.walls.E=false; grid[ny][nx].walls.W=false;}
+      if(dir==='W'){nx--; current.walls.W=false; grid[ny][nx].walls.E=false;}
+      stack.push(current);
+      current=grid[ny][nx];
+      current.visited=true;
+    }else{
+      current=stack.pop();
+    }
+  }while(stack.length);
+}
+carveMaze();
+
+// Precompute path from spawn to exit using BFS
+function computePath(){
+  const queue=[[spawn.x,spawn.y]];
+  const prev={};
+  const key=(x,y)=>`${x},${y}`;
+  prev[key(spawn.x,spawn.y)]=null;
+  while(queue.length){
+    const [x,y]=queue.shift();
+    if(x===exit.x && y===exit.y) break;
+    const cell=grid[y][x];
+    const dirs=[['N',0,-1],['S',0,1],['E',1,0],['W',-1,0]];
+    for(const [d,dx,dy] of dirs){
+      if(cell.walls[d]) continue;
+      const nx=x+dx, ny=y+dy;
+      if(nx<0||nx>=GRID_W||ny<0||ny>=GRID_H) continue;
+      const k=key(nx,ny);
+      if(k in prev) continue;
+      prev[k]=[x,y];
+      queue.push([nx,ny]);
+    }
+  }
+  // reconstruct
+  let path=[];
+  let cur=[exit.x,exit.y];
+  while(cur){
+    path.unshift(cur);
+    cur=prev[key(...cur)];
+  }
+  return path; // array of [x,y]
+}
+const fullPath = computePath();
+
+// Bot class
+class Bot{
+  constructor(id){
+    this.id=id;
+    this.reset();
+  }
+  reset(){
+    this.x=spawn.x; this.y=spawn.y;
+    this.pathIndex=0; // index in fullPath
+    this.finished=false;
+    this.delay=Math.floor(Math.random()*10); // stagger start
+  }
+  step(){
+    if(this.finished) return;
+    if(this.delay>0){this.delay--; return;}
+    if(this.pathIndex+1>=fullPath.length){
+      this.finished=true; return;
+    }
+    this.pathIndex++;
+    [this.x,this.y]=fullPath[this.pathIndex];
+    if(this.x===exit.x && this.y===exit.y) this.finished=true;
+  }
+}
+const bots = Array.from({length:BOT_COUNT},(_,i)=>new Bot(i));
+let completed=0;
+
+// Rendering
+function drawMaze(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle='#555';
+  ctx.lineWidth=2;
+  for(let y=0;y<GRID_H;y++){
+    for(let x=0;x<GRID_W;x++){
+      const cell=grid[y][x];
+      const px=x*CELL_SIZE, py=y*CELL_SIZE;
+      if(cell.walls.N) ctx.strokeRect(px,py,CELL_SIZE,CELL_SIZE);
+      if(cell.walls.S) ctx.strokeRect(px,py+CELL_SIZE-2,CELL_SIZE,2);
+      if(cell.walls.E) ctx.strokeRect(px+CELL_SIZE-2,py,2,CELL_SIZE);
+      if(cell.walls.W) ctx.strokeRect(px,py,2,CELL_SIZE);
+    }
+  }
+  // spawn and exit
+  ctx.fillStyle='#0a0';
+  ctx.beginPath();ctx.arc(spawn.x*CELL_SIZE+CELL_SIZE/2,spawn.y*CELL_SIZE+CELL_SIZE/2,5,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#a00';
+  ctx.beginPath();ctx.arc(exit.x*CELL_SIZE+CELL_SIZE/2,exit.y*CELL_SIZE+CELL_SIZE/2,5,0,Math.PI*2);ctx.fill();
+}
+function drawBots(){
+  for(const bot of bots){
+    if(bot.finished) continue;
+    ctx.fillStyle='#00f';
+    ctx.beginPath();ctx.arc(bot.x*CELL_SIZE+CELL_SIZE/2,bot.y*CELL_SIZE+CELL_SIZE/2,8,0,Math.PI*2);ctx.fill();
+  }
+}
+function render(){
+  drawMaze();
+  drawBots();
+}
+
+// HUD update
+function updateHUD(){
+  completedEl.textContent=completed;
+  timerEl.textContent=(elapsedMs/1000).toFixed(2);
+}
+
+// Game logic
+function tick(n){
+  for(let i=0;i<n;i++){
+    let any=false;
+    for(const bot of bots){
+      if(bot.finished) continue;
+      const before=bot.finished;
+      bot.step();
+      if(!before && bot.finished){completed++; }
+      any=true;
+    }
+    if(!any) break; // all finished
+  }
+  updateHUD();
+}
+function reset(){
+  completed=0;
+  elapsedMs=0;
+  startTime=performance.now();
+  for(const bot of bots) bot.reset();
+  render();
+  updateHUD();
+}
+
+// Animation loop
+function animate(){
+  const now=performance.now();
+  elapsedMs = now - startTime;
+  tick(1);
+  render();
+  animationFrame=requestAnimationFrame(animate);
+}
+resetBtn.onclick=()=>{cancelAnimationFrame(animationFrame); reset(); requestAnimationFrame(animate);}
+reset();
+
+// Expose API
+window.game={
+  bots,
+  get completed(){return completed;},
+  get elapsedMs(){return elapsedMs;},
+  tick,
+  reset
+};
+
+requestAnimationFrame(animate);
+
+})();
+</script>
+</body>
+</html>

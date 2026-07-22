@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Bots</title>
+<style>
+  body { margin: 0; background: #222; color: #eee; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+  #game-container { position: relative; width: 500px; height: 500px; background: #333; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); overflow: hidden; }
+  canvas { display: block; margin: 0 auto; }
+  #hud { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; pointer-events: none; font-weight: bold; text-shadow: 1px 1px 2px black; z-index: 10; }
+  #completed { color: #4caf50; font-size: 18px; }
+  #timer { color: #ff9800; font-size: 18px; }
+  #reset { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); padding: 10px 20px; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: background 0.2s; z-index: 10; }
+  #reset:hover { background: #d32f2f; }
+</style>
+</head>
+<body>
+
+<div id="game-container">
+  <div id="hud">
+    <span id="completed">Completed: 0/24</span>
+    <span id="timer">Time: 0.0s</span>
+  </div>
+  <canvas id="maze" width="500" height="500"></canvas>
+  <button id="reset">Reset Game</button>
+</div>
+
+<script>
+(function() {
+  // --- Configuration ---
+  const CELL_COUNT = 21; // Must be odd for standard maze algo
+  const CANVAS_SIZE = 500;
+  
+  // --- State ---
+  let canvas, ctx;
+  let mazeWalls = []; // Stores vertical and horizontal walls
+  let spawnPos = {x: 1, y: 1};
+  let exitPos = {x: CELL_COUNT - 2, y: CELL_COUNT - 2};
+  
+  // Game API State
+  let bots = [];
+  let completedCount = 0;
+  let elapsedMs = 0;
+  let lastTime = 0;
+
+  // --- Maze Generation (Recursive Backtracker) ---
+  function generateMaze() {
+    // Initialize walls: true means wall exists, false means open path
+    // We use a grid where we store walls between cells.
+    // vertical[y][x] is wall between (x,y) and (x+1, y)
+    // horizontal[y][x] is wall between (x,y) and (x, y+1)
+    
+    const v = [];
+    const h = [];
+    for(let y=0; y<CELL_COUNT; y++) {
+      v[y] = new Array(CELL_COUNT).fill(true);
+      h[y] = new Array(CELL_COUNT).fill(true);
+    }
+
+    // Stack for DFS
+    let stack = [{x: 1, y: 1}];
+    
+    // Mark start as visited (open)
+    // We'll use a separate 'visited' array or just check if we can carve.
+    // Actually, standard algo: Start at (1,1). Carve out passages.
+    // To simplify, let's treat the grid as cells that are either walls or open.
+    // But for drawing thin lines, we need the wall arrays.
+    
+    // Let's use a simpler representation for generation:
+    // A 2D array `grid[y][x]` where 1 is a wall block, 0 is empty space.
+    // We generate a maze of "rooms" and corridors.
+    // Then we convert to the line-based drawing format.
+    
+    // Re-doing generation for clarity:
+    // 1. Create grid of all walls (1).
+    // 2. Start at (1,1), set to 0.
+    // 3. Stack = [(1,1)].
+    // 4. While stack not empty:
+    //      Pop curr.
+    //      Neighbors are (x+2, y), (x-2, y)...
+    //      If neighbor is valid and grid[nx][ny] == 1:
+    //          Set grid[curr.x + dx][curr.y + dy] = 0.
+    //          Remove wall between curr and neighbor.
+    //          Push neighbor to stack.
+    
+    let grid = [];
+    for(let y=0; y<CELL_COUNT; y++) {
+      grid[y] = new Array(CELL_COUNT).fill(1);
+    }
+
+    // Start at (1,1)
+    grid[1][1] = 0;
+    stack.push({x: 1, y: 1});
+    
+    while(stack.length > 0) {
+      let curr = stack.pop();
+      
+      // Neighbors (step by 2 to maintain corridors)
+      let neighbors = [
+        {dx: 0, dy: -2}, {dx: 0, dy: 2}, 
+        {dx: -2, dy: 0}, {dx: 2, dy: 0}
+      ];
+      
+      // Shuffle neighbors
+      neighbors.sort(() => Math.random() - 0.5);
+      
+      for(let n of neighbors) {
+        let nx = curr.x + n.dx;
+        let ny = curr.y + n.dy;
+        
+        if(nx > 0 && nx < CELL_COUNT-1 && ny > 0 && ny < CELL_COUNT-1 && grid[ny][nx] === 1) {
+          // Carve path
+          grid[ny][nx] = 0;
+          
+          // Remove wall between curr and neighbor
+          if(n.dx !== 0) {
+            // Vertical wall at (curr.x + n.dx/2, curr.y)
+            let wx = curr.x + Math.sign(n.dx);
+            v[curr.y][wx] = false;
+          } else {
+            // Horizontal wall at (curr.x, curr.y + n.dy/2)
+            let wy = curr.y + Math.sign(n.dy);
+            h[wy][curr.x] = false;
+          }
+          
+          stack.push({x: nx, y: ny});
+        }
+      }
+    }
+
+    // Convert grid to wall arrays for drawing
+    mazeWalls = { v: [], h: [] };
+    for(let y=0; y<CELL_COUNT; y++) {
+      mazeWalls.v[y] = new Array(CELL_COUNT).fill(false);
+      mazeWalls.h[y] = new Array(CELL_COUNT).fill(false);
+    }
+
+    // Reconstruct walls from grid (walls are between 0s and 1s)
+    for(let y=0; y<CELL_COUNT; y++) {
+      for(let x=0; x<CELL_COUNT; x++) {
+        if(grid[y][x] === 1) continue; // Wall block
+        
+        // Check right neighbor
+        if(x + 1 < CELL_COUNT && grid[y][x+1] === 1) {
+          mazeWalls.v[y][x] = true;
+        }
+        // Check bottom neighbor
+        if(y + 1 < CELL_COUNT && grid[y+1][x] === 1) {
+          mazeWalls.h[y][x] = true;
+        }
+      }
+    }
+
+    spawnPos = {x: 1, y: 1};
+    exitPos = {x: CELL_COUNT - 2, y: CELL_COUNT - 2};
+    
+    // Ensure start and end are open
+    grid[spawnPos.y][spawnPos.x] = 0;
+    grid[exitPos.y][exitPos.x] = 0;
+  }
+
+  // --- Bot Logic ---
+  function findPath(start, end) {
+    // BFS to find shortest path
+    let queue = [{x: start.x, y: start.y, path: []}];
+    let visited = new Set();
+    visited.add(`${start.x},${start.y}`);
+    
+    while(queue.length > 0) {
+      let curr = queue.shift();
+      
+      if(curr.x === end.x && curr.y === end.y) {
+        return curr.path;
+      }
+      
+      // Directions: Up, Down, Left, Right
+      let dirs = [{dx:0, dy:-1}, {dx:0, dy:1}, {dx:-1, dy:0}, {dx:1, dy:0}];
+      
+      for(let d of dirs) {
+        let nx = curr.x + d.dx;
+        let ny = curr.y + d.dy;
+        
+        if(nx >= 0 && nx < CELL_COUNT && ny >= 0 && ny < CELL_COUNT) {
+          // Check walls
+          let hasWall = false;
+          if(d.dy !== 0) {
+            // Vertical move, check horizontal wall
+            let wy = Math.min(curr.y, ny);
+            if(mazeWalls.h[wy][curr.x]) hasWall = true;
+          } else {
+            // Horizontal move, check vertical wall
+            let wx = Math.min(curr.x, nx);
+            if(mazeWalls.v[curr.y][wx]) hasWall = true;
+          }
+          
+          if(!hasWall && !visited.has(`${nx},${ny}`)) {
+            visited.add(`${nx},${ny}`);
+            let newPath = [...curr.path, {x: nx, y: ny}];
+            queue.push({x: nx, y: ny, path: newPath});
+          }
+        }
+      }
+    }
+    return null; // Should not happen in perfect maze
+  }
+
+  function initGame() {
+    generateMaze();
+    
+    // Create Bots
+    bots = [];
+    for(let i=0; i<24; i++) {
+      let path = findPath(spawnPos, exitPos);
+      
+      // Stagger: Randomize speed (ticks per move)
+      // Speed 1-3. Lower is faster.
+      let speed = Math.floor(Math.random() * 3) + 1; 
+      
+      bots.push({
+        x: spawnPos.x,
+        y: spawnPos.y,
+        path: path,
+        stepIndex: -1, // Start before first move
+        speed: speed,
+        completed: false
+      });
+    }
+    
+    completedCount = 0;
+    elapsedMs = 0;
+    lastTime = performance.now();
+    
+    draw();
+    updateHUD();
+  }
+
+  function tick() {
+    // Advance all unfinished bots by one step (or multiple based on speed)
+    for(let bot of bots) {
+      if(bot.completed) continue;
+      
+      // Move logic: 
+      // If we want them to move every 'speed' ticks, we decrement a counter.
+      // But the prompt says "every unfinished bot advances one cell" in tick(n).
+      // This implies tick is atomic.
+      // To stagger, we can give each bot a random delay or just let them move at different rates?
+      // If I use `tick(1)` every frame, they all move at same speed unless I add logic.
+      
+      // Let's implement "Stagger" by giving each bot a random offset in their path index? 
+      // No, that breaks the "pathfinding" requirement (they must follow shortest path).
+      
+      // Best approach for "don't move as one blob":
+      // Give each bot a random `moveInterval`.
+      // If interval > 0, decrement. If <= 0, move and reset interval.
+      
+      if(bot.moveInterval === undefined) {
+        bot.moveInterval = Math.floor(Math.random() * 3) + 1; // 1 to 3 ticks delay
+      }
+      
+      bot.moveInterval--;
+      
+      if(bot.moveInterval <= 0) {
+        bot.moveInterval = Math.floor(Math.random() * 3) + 1; // Reset delay
+        
+        let nextStep = bot.stepIndex + 1;
+        if(nextStep < bot.path.length) {
+          bot.x = bot.path[nextStep].x;
+          bot.y = bot.path[nextStep].y;
+          bot.stepIndex = nextStep;
+        } else {
+          // Reached exit
+          bot.completed = true;
+          completedCount++;
+        }
+      }
+    }
+  }
+
+  function updateHUD() {
+    document.getElementById('completed').innerText = `Completed: ${completedCount}/24`;
+    let seconds = (elapsedMs / 1000).toFixed(1);
+    document.getElementById('timer').innerText = `Time: ${seconds}s`;
+  }
+
+  function draw() {
+    if(!ctx) return;
+    
+    // Clear
+    ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+    
+    let cellW = CANVAS_SIZE / CELL_COUNT;
+    let cellH = CANVAS_SIZE / CELL_COUNT;
+    
+    // Draw Walls
+    for(let y=0; y<CELL_COUNT; y++) {
+      for(let x=0; x<CELL_COUNT; x++) {
+        if(mazeWalls.v[y][x]) {
+          ctx.fillStyle = '#555';
+          ctx.fillRect(x * cellW + cellW - 1, y * cellH, 1, cellH); // Vertical line
+        }
+        if(mazeWalls.h[y][x]) {
+          ctx.fillStyle = '#555';
+          ctx.fillRect(x * cellW, y * cellH + cellH - 1, cellW, 1); // Horizontal line
+        }
+      }
+    }
+    
+    // Draw Spawn and Exit
+    let startRect = {x: spawnPos.x * cellW, y: spawnPos.y * cellH, w: cellW, h: cellH};
+    ctx.fillStyle = '#4caf50';
+    ctx.fillRect(startRect.x + 2, startRect.y + 2, cellW - 4, cellH - 4);
+    
+    let endRect = {x: exitPos.x * cellW, y: exitPos.y * cellH, w: cellW, h: cellH};
+    ctx.fillStyle = '#f44336';
+    ctx.fillRect(endRect.x + 2, endRect.y + 2, cellW - 4, cellH - 4);
+
+    // Draw Bots
+    for(let bot of bots) {
+      if(bot.completed) continue;
+      
+      let bx = bot.x * cellW + cellW/2;
+      let by = bot.y * cellH + cellH/2;
+      
+      ctx.beginPath();
+      ctx.arc(bx, by, cellW/3, 0, Math.PI * 2);
+      ctx.fillStyle = '#2196f3';
+      ctx.fill();
+      
+      // Random color variation for bots
+      ctx.strokeStyle = `hsl(${Math.random()*360}, 70%, 50%)`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  function gameLoop(timestamp) {
+    if(!lastTime) lastTime = timestamp;
+    let delta = timestamp - lastTime;
+    lastTime = timestamp;
+    
+    // Update time
+    elapsedMs += delta;
+    
+    // Advance simulation (1 step per frame for smooth animation)
+    tick();
+    
+    draw();
+    updateHUD();
+    
+    requestAnimationFrame(gameLoop);
+  }
+
+  function reset() {
+    initGame();
+  }
+
+  // --- Initialization ---
+  window.onload = function() {
+    canvas = document.getElementById('maze');
+    ctx = canvas.getContext('2d');
+    
+    // Expose API
+    window.game = {
+      bots: [],
+      completed: () => completedCount,
+      elapsedMs: () => elapsedMs,
+      tick: (n) => {
+        for(let i=0; i<n; i++) tick();
+      },
+      reset: reset
+    };
+
+    // Bind Reset Button
+    document.getElementById('reset').addEventListener('click', reset);
+    
+    // Start
+    initGame();
+    requestAnimationFrame(gameLoop);
+  };
+
+})();
+</script>
+</body>
+</html>

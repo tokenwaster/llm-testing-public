@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Falling Sand Sandbox</title>
+<style>
+  :root {
+    --bg: #101318;
+    --panel: #1a1f27;
+    --panel2: #222936;
+    --text: #edf2f7;
+    --muted: #9da8b7;
+    --accent: #7c9cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    color: var(--text);
+    background:
+      radial-gradient(circle at 50% 15%, #202936 0, transparent 38%),
+      var(--bg);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  .app {
+    width: min(94vw, 760px);
+    padding: 24px 16px 28px;
+    text-align: center;
+  }
+  h1 {
+    margin: 0 0 6px;
+    font-size: clamp(1.45rem, 4vw, 2.15rem);
+    letter-spacing: .03em;
+  }
+  .subtitle {
+    margin: 0 0 18px;
+    color: var(--muted);
+    font-size: .92rem;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 9px;
+    margin-bottom: 17px;
+  }
+  button {
+    border: 0;
+    border-radius: 8px;
+    color: var(--text);
+    background: var(--panel2);
+    padding: 10px 15px;
+    font: 600 .9rem inherit;
+    cursor: pointer;
+    box-shadow: 0 3px 8px #0005, inset 0 1px #ffffff12;
+    transition: transform .12s, filter .12s, outline .12s;
+  }
+  button:hover { filter: brightness(1.18); transform: translateY(-1px); }
+  button:active { transform: translateY(1px); }
+  button.active {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    background: #303b59;
+  }
+  button[data-material="sand"] { border-left: 5px solid #e7c56d; }
+  button[data-material="water"] { border-left: 5px solid #4da5ed; }
+  button[data-material="wall"] { border-left: 5px solid #78818d; }
+  button[data-material="acid"] { border-left: 5px solid #8ee86b; }
+  button[data-material="empty"] { border-left: 5px solid #d8dce2; }
+  #clear { border-left: 5px solid #ef6d82; }
+  .canvas-wrap {
+    display: inline-block;
+    padding: 9px;
+    border-radius: 13px;
+    background: #080a0e;
+    box-shadow: 0 12px 35px #0009, 0 0 0 1px #ffffff12;
+  }
+  canvas {
+    display: block;
+    width: min(78vw, 620px);
+    height: min(78vw, 620px);
+    min-width: 400px;
+    min-height: 400px;
+    max-width: 620px;
+    max-height: 620px;
+    background: #0c1117;
+    image-rendering: pixelated;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .hint {
+    margin-top: 13px;
+    color: var(--muted);
+    font-size: .78rem;
+  }
+  @media (max-width: 470px) {
+    .app { padding-left: 4px; padding-right: 4px; }
+    canvas { width: 400px; height: 400px; }
+    .canvas-wrap { padding: 5px; }
+    button { padding: 9px 10px; }
+  }
+</style>
+</head>
+<body>
+<main class="app">
+  <h1>Falling Sand</h1>
+  <p class="subtitle">Paint a tiny world and watch it come alive.</p>
+
+  <div class="toolbar">
+    <button id="mat-sand" data-material="sand">Sand</button>
+    <button id="mat-water" data-material="water">Water</button>
+    <button id="mat-wall" data-material="wall">Wall</button>
+    <button id="mat-acid" data-material="acid">Acid</button>
+    <button id="mat-empty" data-material="empty">Eraser</button>
+    <button id="clear">Clear</button>
+  </div>
+
+  <div class="canvas-wrap">
+    <canvas id="sand" width="600" height="600" aria-label="Falling sand simulation"></canvas>
+  </div>
+  <div class="hint">Drag to paint · Sand sinks through liquids · Acid dissolves sand and walls</div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("sand");
+  const ctx = canvas.getContext("2d");
+  const w = 100, h = 100;
+  const EMPTY = "empty", SAND = "sand", WATER = "water", WALL = "wall", ACID = "acid";
+  const materials = new Set([EMPTY, SAND, WATER, WALL, ACID]);
+  const grid = new Array(w * h).fill(EMPTY);
+  const moved = new Uint32Array(w * h);
+  let stepId = 0;
+  let selected = SAND;
+  let seed = 0x6d2b79f5;
+  let drawing = false;
+
+  const colors = {
+    empty: "#0c1117",
+    sand: "#e6c56d",
+    water: "#459ee8",
+    wall: "#77818e",
+    acid: "#91e66e"
+  };
+
+  function index(x, y) { return y * w + x; }
+  function inside(x, y) { return x >= 0 && x < w && y >= 0 && y < h; }
+  function get(x, y) {
+    return inside(x, y) ? grid[index(x, y)] : WALL;
+  }
+  function setCell(x, y, material) {
+    if (inside(x, y) && materials.has(material)) grid[index(x, y)] = material;
+  }
+  function clearGrid() {
+    grid.fill(EMPTY);
+    render();
+  }
+
+  // Deterministic pseudo-randomness keeps tick() synchronous and reproducible.
+  function randomBit() {
+    seed |= 0;
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  function mark(x, y) {
+    if (inside(x, y)) moved[index(x, y)] = stepId;
+  }
+  function isEmpty(x, y) {
+    return inside(x, y) && grid[index(x, y)] === EMPTY;
+  }
+
+  // Put a liquid beside a descending sand grain rather than swapping it upward.
+  function sinkIntoLiquid(x, y, nx, ny) {
+    if (!inside(nx, ny)) return false;
+    const liquid = grid[index(nx, ny)];
+    if (liquid !== WATER && liquid !== ACID) return false;
+    const first = randomBit() < 0.5 ? -1 : 1;
+    for (const dx of [first, -first]) {
+      const sx = nx + dx;
+      if (isEmpty(sx, ny)) {
+        grid[index(sx, ny)] = liquid;
+        grid[index(nx, ny)] = SAND;
+        grid[index(x, y)] = EMPTY;
+        mark(sx, ny);
+        mark(nx, ny);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function trySandMove(x, y, nx, ny) {
+    if (!inside(nx, ny)) return false;
+    if (isEmpty(nx, ny)) {
+      grid[index(nx, ny)] = SAND;
+      grid[index(x, y)] = EMPTY;
+      mark(nx, ny);
+      return true;
+    }
+    return sinkIntoLiquid(x, y, nx, ny);
+  }
+
+  function dissolveAround(x, y) {
+    const neighbors = [[0, 1], [-1, 0], [1, 0]];
+    for (const [dx, dy] of neighbors) {
+      const nx = x + dx, ny = y + dy;
+      if (inside(nx, ny)) {
+        const v = grid[index(nx, ny)];
+        if (v === SAND || v === WALL) grid[index(nx, ny)] = EMPTY;
+      }
+    }
+  }
+
+  function simulateOne() {
+    stepId++;
+    // Bottom upward is essential: each particle can be acted on at most once.
+    for (let y = h - 2; y >= 0; y--) {
+      const leftToRight = randomBit() < 0.5;
+      for (let k = 0; k < w; k++) {
+        const x = leftToRight ? k : w - 1 - k;
+        const i = index(x, y);
+        if (moved[i] === stepId) continue;
+        const type = grid[i];
+        if (type === EMPTY || type === WALL) continue;
+
+        if (type === ACID) dissolveAround(x, y);
+
+        const below = y + 1;
+        if (isEmpty(x, below)) {
+          grid[index(x, below)] = type;
+          grid[i] = EMPTY;
+          mark(x, below);
+          continue;
+        }
+
+        if (type === SAND) {
+          const first = randomBit() < 0.5 ? -1 : 1;
+          if (trySandMove(x, y, x + first, y + 1) ||
+              trySandMove(x, y, x - first, y + 1)) continue;
+        } else if (type === WATER || type === ACID) {
+          const first = randomBit() < 0.5 ? -1 : 1;
+          if (isEmpty(x + first, below)) {
+            grid[index(x + first, below)] = type;
+            grid[i] = EMPTY;
+            mark(x + first, below);
+            continue;
+          }
+          if (isEmpty(x - first, below)) {
+            grid[index(x - first, below)] = type;
+            grid[i] = EMPTY;
+            mark(x - first, below);
+            continue;
+          }
+          const side = randomBit() < 0.5 ? -1 : 1;
+          if (isEmpty(x + side, y)) {
+            grid[index(x + side, y)] = type;
+            grid[i] = EMPTY;
+            mark(x + side, y);
+            continue;
+          }
+          if (isEmpty(x - side, y)) {
+            grid[index(x - side, y)] = type;
+            grid[i] = EMPTY;
+            mark(x - side, y);
+            continue;
+          }
+        }
+      }
+    }
+  }
+
+  function tick(n) {
+    n = Number.isFinite(Number(n)) ? Math.max(0, Math.floor(Number(n))) : 0;
+    for (let i = 0; i < n; i++) simulateOne();
+    render();
+  }
+
+  function render() {
+    const cw = canvas.width / w, ch = canvas.height / h;
+    ctx.fillStyle = colors.empty;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const type = grid[index(x, y)];
+        if (type !== EMPTY) {
+          ctx.fillStyle = colors[type];
+          ctx.fillRect(x * cw, y * ch, cw + .35, ch + .35);
+        }
+      }
+    }
+  }
+
+  function paint(e) {
+    const r = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - r.left) / r.width * w);
+    const y = Math.floor((e.clientY - r.top) / r.height * h);
+    if (!inside(x, y)) return;
+    // A small brush makes dragging feel smooth while still painting individual cells.
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx * dx + dy * dy <= 1.5) setCell(x + dx, y + dy, selected);
+      }
+    }
+    render();
+  }
+
+  document.querySelectorAll("[data-material]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      selected = btn.dataset.material;
+      document.querySelectorAll("[data-material]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+  document.getElementById("clear").addEventListener("click", clearGrid);
+
+  canvas.addEventListener("pointerdown", e => {
+    drawing = true;
+    canvas.setPointerCapture(e.pointerId);
+    paint(e);
+  });
+  canvas.addEventListener("pointermove", e => { if (drawing) paint(e); });
+  canvas.addEventListener("pointerup", () => drawing = false);
+  canvas.addEventListener("pointercancel", () => drawing = false);
+
+  document.getElementById("mat-sand").classList.add("active");
+
+  window.sim = {
+    w, h,
+    tick,
+    get,
+    set: setCell,
+    clear: clearGrid
+  };
+
+  let last = 0, accumulator = 0;
+  function animate(time) {
+    if (!last) last = time;
+    accumulator += Math.min(50, time - last);
+    last = time;
+    while (accumulator >= 28) {
+      simulateOne();
+      accumulator -= 28;
+    }
+    render();
+    requestAnimationFrame(animate);
+  }
+  render();
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Falling Sand Cellular Automata Sandbox</title>
+    <style>
+        :root {
+            --bg-dark: #1e272e;
+            --text-light: #ecf0f1;
+            --accent-blue: #3498db;
+            --sand-color: #ffc300;
+            --water-color: #3498db;
+            --wall-color: #2c3e50;
+            --acid-color: #e74c3c;
+            --empty-color: #1a242f;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 30px;
+            font-weight: 300;
+        }
+
+        #controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #2c3e5090;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Material Button Styling (Material Look) */
+        button {
+            padding: 10px 15px;
+            border: none;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: background-color 0.2s, box-shadow 0.2s;
+            font-weight: 600;
+            min-width: 100px;
+        }
+
+        /* Specific button styles */
+        #mat-sand { background-color: var(--sand-color); color: #333; }
+        #mat-water { background-color: var(--water-color); color: white; }
+        #mat-wall { background-color: var(--wall-color); color: white; }
+        #mat-acid { background-color: var(--acid-color); color: white; }
+        #mat-empty { background-color: #444; color: var(--text-light); }
+
+        button:hover:not(:disabled) {
+            box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
+            transform: translateY(-1px);
+        }
+
+        button:active:not(:disabled) {
+            box-shadow: none;
+            transform: translateY(1px);
+        }
+
+        #clear {
+            background-color: #c0392b;
+            color: white;
+            margin-left: 20px;
+        }
+
+        /* Canvas Styling */
+        #sand {
+            border: 4px solid var(--text-light);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.5);
+            cursor: crosshair;
+            background-color: #0d1217; /* Dark background for the grid */
+        }
+
+        #status {
+            margin-top: 15px;
+            font-size: 1.1em;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Falling Sand Sandbox</h1>
+
+    <div id="controls">
+        <!-- Material Selectors -->
+        <button id="mat-sand" data-material="sand">Sand</button>
+        <button id="mat-water" data-material="water">Water</button>
+        <button id="mat-wall" data-material="wall">Wall</button>
+        <button id="mat-acid" data-material="acid">Acid</button>
+        <button id="mat-empty" data-material="empty">Eraser (Empty)</button>
+
+        <!-- Clear Button -->
+        <button id="clear">Clear Grid</button>
+    </div>
+
+    <!-- Simulation Canvas -->
+    <canvas id="sand"></canvas>
+
+    <div id="status">Status: Ready. Painting with Sand.</div>
+
+    <script>
+        // --- CONSTANTS AND SETUP ---
+        const CANVAS_SIZE = 400; // CSS pixels
+        const GRID_W = 80;       // Cells wide
+        const GRID_H = 80;       // Cells high
+        const CELL_PIXEL_SIZE = CANVAS_SIZE / GRID_W;
+
+        const MATERIALS = {
+            EMPTY: "empty",
+            SAND: "sand",
+            WATER: "water",
+            WALL: "wall",
+            ACID: "acid"
+        };
+
+        // Color mapping for rendering (used in drawCell)
+        const COLORS = {
+            [MATERIALS.EMPTY]: '#1a242f',
+            [MATERIALS.SAND]: '#ffc300',
+            [MATERIALS.WATER]: '#3498db',
+            [MATERIALS.WALL]: '#2c3e50',
+            [MATERIALS.ACID]: '#e74c3c'
+        };
+
+        // --- GLOBAL STATE ---
+        let grid = [];
+        let currentMaterial = MATERIALS.SAND;
+        let isPainting = false;
+        let animationFrameId = null;
+
+        // --- DOM ELEMENTS ---
+        const canvas = document.getElementById('sand');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+
+        // Set up canvas dimensions (CSS and internal drawing buffer)
+        canvas.width = CANVAS_SIZE;
+        canvas.height = CANVAS_SIZE;
+
+        /**
+         * Initializes the grid state to all empty cells.
+         */
+        function initializeGrid() {
+            grid = Array(GRID_H).fill(0).map(() => 
+                Array(GRID_W).fill(MATERIALS.EMPTY)
+            );
+            drawGrid();
+        }
+
+        /**
+         * Draws the entire grid state onto the canvas based on current colors.
+         */
+        function drawGrid() {
+            ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+            for (let y = 0; y < GRID_H; y++) {
+                for (let x = 0; x < GRID_W; x++) {
+                    const material = grid[y][x];
+                    ctx.fillStyle = COLORS[material] || '#000';
+                    ctx.fillRect(x * CELL_PIXEL_SIZE, y * CELL_PIXEL_SIZE, CELL_PIXEL_SIZE, CELL_PIXEL_SIZE);
+                }
+            }
+        }
+
+        // --- SIMULATION CORE LOGIC ---
+
+        /**
+         * Helper function to check if coordinates are within bounds.
+         */
+        function isInBounds(x, y) {
+            return x >= 0 && x < GRID_W && y >= 0 && y < GRID_H;
+        }
+
+        /**
+         * Gets the material at (x, y). Returns EMPTY if out of bounds or uninitialized.
+         */
+        function getMaterial(x, y) {
+            if (!isInBounds(x, y)) return MATERIALS.EMPTY;
+            return grid[y][x];
+        }
+
+        /**
+         * Sets the material at (x, y). Handles boundary checks implicitly.
+     * Note: This function modifies the global 'grid' state directly.
+     */
+        function setMaterial(x, y, material) {
+            if (!isInBounds(x, y)) return false;
+            grid[y][x] = material;
+            return true;
+        }
+
+        /**
+         * Processes one step of the simulation (Bottom-up iteration).
+         * @returns {boolean} True if any movement occurred.
+         */
+        function simulateStep() {
+            let moved = false;
+            // Process bottom row up, ensuring particles move only one cell per tick.
+            for (let y = GRID_H - 2; y >= 0; y--) {
+                for (let x = 0; x < GRID_W; x++) {
+                    const currentMaterial = grid[y][x];
+
+                    if (currentMaterial === MATERIALS.EMPTY || currentMaterial === MATERIALS.WALL) {
+                        continue; // Walls don't move, empty space does nothing.
+                    }
+
+                    // We must check if the particle at (x, y) can move.
+                    let movedThisCell = false;
+
+                    if (currentMaterial === MATERIALS.SAND) {
+                        // 1. Try falling straight down
+                        const below = getMaterial(x, y + 1);
+                        if (below === MATERIALS.EMPTY) {
+                            setMaterial(x, y + 1, MATERIALS.SAND); // Move down
+                            setMaterial(x, y, MATERIALS.EMPTY);
+                            movedThisCell = true;
+                        } else if (below !== MATERIALS.WALL && below !== MATERIALS.ACID) {
+                            // 2. Try diagonal fall (randomized check order for determinism)
+                            const directions = [[-1, 1], [1, 1]]; // Down-Left, Down-Right
+                            
+                            // Check left/right diagonals first
+                            for (const [dx, dy] of directions) {
+                                const nx = x + dx;
+                                const ny = y + 1;
+
+                                if (isInBounds(nx, ny)) {
+                                    const targetMaterial = getMaterial(nx, ny);
+                                    if (targetMaterial === MATERIALS.EMPTY || targetMaterial === MATERIALS.WATER) {
+                                        // Move diagonally
+                                        setMaterial(nx, ny, MATERIALS.SAND); 
+                                        setMaterial(x, y, MATERIALS.EMPTY);
+                                        movedThisCell = true;
+                                        break; // Only move once per step
+                                    }
+                                }
+                            }
+                        }
+
+                    } else if (currentMaterial === MATERIALS.WATER) {
+                        // 1. Try falling straight down
+                        const below = getMaterial(x, y + 1);
+                        if (below === MATERIALS.EMPTY || below === MATERIALS.SAND) { // Water sinks into empty or sand
+                            setMaterial(x, y + 1, MATERIALS.WATER);
+                            setMaterial(x, y, MATERIALS.EMPTY);
+                            movedThisCell = true;
+                        } else if (below !== MATERIALS.WALL && below !== MATERIALS.ACID) {
+                             // If blocked by solid material, try spreading horizontally
+                            const directions = [[-1, 0], [1, 0]]; // Left, Right
+                            for (const [dx, dy] of directions) {
+                                const nx = x + dx;
+                                if (isInBounds(nx, y)) {
+                                    if (getMaterial(nx, y) === MATERIALS.EMPTY) {
+                                        setMaterial(nx, y, MATERIALS.WATER);
+                                        setMaterial(x, y, MATERIALS.EMPTY);
+                                        movedThisCell = true;
+                                        break; // Only spread once per step
+                                    }
+                                }
+                            }
+                        }
+
+                    } else if (currentMaterial === MATERIALS.ACID) {
+                        // 1. Try falling straight down
+                        const below = getMaterial(x, y + 1);
+                        if (below === MATERIALS.EMPTY || below === MATERIALS.WATER) { // Acid sinks into empty or water
+                            setMaterial(x, y + 1, MATERIALS.ACID);
+                            setMaterial(x, y, MATERIALS.EMPTY);
+                            movedThisCell = true;
+                        } else if (below !== MATERIALS.WALL && below !== MATERIALS.SAND) {
+                             // If blocked by solid material, try spreading horizontally
+                            const directions = [[-1, 0], [1, 0]]; // Left, Right
+                            for (const [dx, dy] of directions) {
+                                const nx = x + dx;
+                                if (isInBounds(nx, y)) {
+                                    if (getMaterial(nx, y) === MATERIALS.EMPTY || getMaterial(nx, y) === MATERIALS.WATER) {
+                                        setMaterial(nx, y, MATERIALS.ACID);
+                                        setMaterial(x, y, MATERIALS.EMPTY);
+                                        movedThisCell = true;
+                                        break; // Only spread once per step
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Dissolution Check (Must happen after movement attempt)
+                        if (!movedThisCell) {
+                            // Check below for dissolution targets (Sand or Wall)
+                            const targetBelow = getMaterial(x, y + 1);
+                            if ((targetBelow === MATERIALS.SAND || targetBelow === MATERIALS.WALL)) {
+                                // Acid dissolves the cell below, and the acid stays put if it can't move.
+                                setMaterial(x, y + 1, MATERIALS.EMPTY); 
+                                movedThisCell = true;
+                            }
+
+                            // Check sides for dissolution targets (Sand or Wall)
+                            const neighbors = [[-1, 0], [1, 0]];
+                            for (const [dx, dy] of neighbors) {
+                                const nx = x + dx;
+                                if (isInBounds(nx, y)) {
+                                    const targetSide = getMaterial(nx, y);
+                                    if ((targetSide === MATERIALS.SAND || targetSide === MATERIALS.WALL) && targetSide !== MATERIALS.ACID) {
+                                        // Acid dissolves the cell beside it
+                                        setMaterial(nx, y, MATERIALS.EMPTY); 
+                                        movedThisCell = true;
+                                        break; // Dissolve only one side per step for stability
+                                    }
+                                }
+                            }
+                        }
+
+                    }
+                    
+                    // If the particle moved or dissolved something, mark it.
+                    if (movedThisCell) {
+                         moved = true;
+                    }
+                }
+            }
+            return moved;
+        }
+
+
+        // --- API IMPLEMENTATION ---
+
+        window.sim = {
+            w: GRID_W, 
+            h: GRID_H,             
+            get: (x, y) => getMaterial(x, y),
+            set: (x, y, material) => setMaterial(x, y, material),
+            clear: () => {
+                initializeGrid();
+                statusDiv.textContent = "Status: Grid cleared.";
+            },
+            tick: function(n) {
+                let movedCount = 0;
+                for (let i = 0; i < n; i++) {
+                    if (!simulateStep()) {
+                        // Stop if nothing moves in a step
+                        break; 
+                    }
+                    movedCount++;
+                }
+                drawGrid();
+            }
+        };
+
+        // --- INTERACTION HANDLERS (Painting) ---
+
+        /**
+         * Converts mouse coordinates to grid cell coordinates.
+         */
+        function getCoordsFromEvent(e) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = CANVAS_SIZE / rect.width;
+            const scaleY = CANVAS_SIZE / rect.height;
+
+            const clientX = e.clientX - rect.left;
+            const clientY = e.clientY - rect.top;
+
+            const x = Math.floor((clientX * scaleX) / CELL_PIXEL_SIZE);
+            const y = Math.floor((clientY * scaleY) / CELL_PIXEL_SIZE);
+            return { x: Math.min(Math.max(0, x), GRID_W - 1), y: Math.min(Math.max(0, y), GRID_H - 1) };
+        }
+
+        /**
+         * Paints the selected material at the given coordinates.
+         */
+        function paintAt(e) {
+            const coords = getCoordsFromEvent(e);
+            if (coords) {
+                setMaterial(coords.x, coords.y, currentMaterial);
+                drawGrid();
+            }
+        }
+
+        // Event Listeners for Painting
+        canvas.addEventListener('mousedown', (e) => {
+            isPainting = true;
+            paintAt(e);
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (isPainting) {
+                paintAt(e);
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            isPainting = false;
+        });
+
+
+        // Material Selector Setup
+        const materialButtons = document.querySelectorAll('#controls button[data-material]');
+        materialButtons.forEach(button => {
+            button.addEventListener('click', (e) => {
+                currentMaterial = e.currentTarget.dataset.material;
+                statusDiv.textContent = `Status: Painting with ${currentMaterial}.`;
+            });
+        });
+
+        // Clear Button Setup
+        document.getElementById('clear').addEventListener('click', () => {
+            sim.clear();
+        });
+
+
+        // --- ANIMATION LOOP (Visual Feedback) ---
+
+        function animate() {
+            // Run one step of simulation per frame for smooth visual updates
+            if (window.sim && typeof window.sim.tick === 'function') {
+                window.sim.tick(1); 
+            }
+            animationFrameId = requestAnimationFrame(animate);
+        }
+
+        // --- INITIALIZATION CALLS ---
+        initializeGrid();
+        animate(); // Start the visual loop
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maze Bots</title>
+<style>
+  body{font-family:Arial,sans-serif;margin:0;padding:20px;background:#222;color:#eee;}
+  #hud{margin-bottom:10px;}
+  #hud span{display:inline-block;width:120px;text-align:right;margin-right:10px;}
+  button{padding:5px 10px;font-size:14px;}
+  canvas{border:2px solid #555;background:#111;display:block;margin-top:10px;}
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <span>Completed: <span id="completed">0</span></span>
+  <span>Time: <span id="timer">0.00</span>s</span>
+  <button id="reset">Reset</button>
+</div>
+<canvas id="maze" width="450" height="450"></canvas>
+
+<script>
+(() => {
+  const CELL_SIZE = 30;
+  const COLS = 15, ROWS = 15; // at least 15x15
+  const BOT_COUNT = 24;
+
+  const canvas = document.getElementById('maze');
+  const ctx = canvas.getContext('2d');
+
+  const completedEl = document.getElementById('completed');
+  const timerEl = document.getElementById('timer');
+  const resetBtn = document.getElementById('reset');
+
+  let maze, spawn, exitCell, paths;
+  let bots = [];
+  let startTime, elapsedMs = 0, timerReq;
+
+  // ---------- Maze generation (perfect maze) ----------
+  function generateMaze() {
+    const w = COLS, h = ROWS;
+    const grid = Array.from({length:h}, () => Array.from({length:w}, () => ({walls:{N:true,S:true,E:true,W:true}, visited:false})));
+    const stack = [];
+    let cx=0, cy=0;
+    grid[cy][cx].visited=true;
+
+    function neighbor(x,y) {
+      const dirs=[{dx:0,dy:-1,dir:'N',opp:'S'}, {dx:1,dy:0,dir:'E',opp:'W'},
+                  {dx:0,dy:1,dir:'S',opp:'N'}, {dx:-1,dy:0,dir:'W',opp:'E'}];
+      const list=dirs.filter(d=>{const nx=x+d.dx, ny=y+d.dy; return nx>=0&&nx<w&&ny>=0&&ny<h&&!grid[ny][nx].visited});
+      if(list.length===0)return null;
+      return list[Math.floor(Math.random()*list.length)];
+    }
+
+    while(true){
+      const n=neighbor(cx,cy);
+      if(n){
+        grid[cy][cx].walls[n.dir]=false;
+        cx+=n.dx; cy+=n.dy;
+        grid[cy][cx].walls[n.opp]=false;
+        grid[cy][cx].visited=true;
+        stack.push([cx- n.dx, cy- n.dy]);
+      } else if(stack.length){
+        const [px,py] = stack.pop();
+        cx=px; cy=py;
+      } else break;
+    }
+
+    // pick spawn and exit
+    spawn={x:0,y:0};
+    exitCell={x:w-1,y:h-1};
+
+    return grid;
+  }
+
+  // ---------- Pathfinding (BFS from each cell to exit) ----------
+  function computePaths() {
+    const w=COLS, h=ROWS;
+    const dist = Array.from({length:h},()=>Array(w).fill(-1));
+    const prev = Array.from({length:h},()=>Array(w).fill(null));
+
+    const queue=[exitCell];
+    dist[exitCell.y][exitCell.x]=0;
+
+    while(queue.length){
+      const {x,y}=queue.shift();
+      const cell=maze[y][x];
+      const dirs=[{dx:0,dy:-1,dir:'N'}, {dx:1,dy:0,dir:'E'},
+                  {dx:0,dy:1,dir:'S'}, {dx:-1,dy:0,dir:'W'}];
+      for(const d of dirs){
+        if(!cell.walls[d.dir]){
+          const nx=x+d.dx, ny=y+d.dy;
+          if(nx>=0&&nx<w&&ny>=0&&ny<h && dist[ny][nx]==-1){
+            dist[ny][nx]=dist[y][x]+1;
+            prev[ny][nx]={x,y};
+            queue.push({x:nx,y:ny});
+          }
+        }
+      }
+    }
+
+    // build path from spawn to exit
+    const path=[];
+    let cx=spawn.x, cy=spawn.y;
+    while(!(cx===exitCell.x && cy===exitCell.y)){
+      path.push({x:cx,y:cy});
+      const p=prev[cy][cx];
+      if(!p)break; // should not happen
+      cx=p.x; cy=p.y;
+    }
+    path.push({x:exitCell.x,y:exitCell.y}); // include exit
+
+    return path;
+  }
+
+  // ---------- Bot initialization ----------
+  function initBots() {
+    bots=[];
+    for(let i=0;i<BOT_COUNT;i++){
+      const bot={
+        x:spawn.x,
+        y:spawn.y,
+        idx:-Math.floor(i*2), // stagger start
+        finished:false
+      };
+      bots.push(bot);
+    }
+  }
+
+  // ---------- Rendering ----------
+  function drawMaze() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.strokeStyle='#555';
+    ctx.lineWidth=2;
+    for(let y=0;y<ROWS;y++){
+      for(let x=0;x<COLS;x++){
+        const cell=maze[y][x];
+        const px=x*CELL_SIZE, py=y*CELL_SIZE;
+        if(cell.walls.N)ctx.strokeRect(px,py,CELL_SIZE,0);
+        if(cell.walls.S)ctx.strokeRect(px,py+CELL_SIZE-2,CELL_SIZE,0);
+        if(cell.walls.W)ctx.strokeRect(px,py,CELL_SIZE,0);
+        if(cell.walls.E)ctx.strokeRect(px+CELL_SIZE-2,py,CELL_SIZE,0);
+      }
+    }
+  }
+
+  function drawBots() {
+    for(const bot of bots){
+      const px=bot.x*CELL_SIZE + CELL_SIZE/4;
+      const py=bot.y*CELL_SIZE + CELL_SIZE/4;
+      ctx.fillStyle=bot.finished?'#0f0':'#ff0';
+      ctx.beginPath();
+      ctx.arc(px+CELL_SIZE/4,py+CELL_SIZE/4,CELL_SIZE/6,0,Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  function render() {
+    drawMaze();
+    drawBots();
+  }
+
+  // ---------- Game logic ----------
+  let completed=0;
+  function updateHUD(){
+    completedEl.textContent=completed;
+    timerEl.textContent=(elapsedMs/1000).toFixed(2);
+  }
+
+  function tick(n){
+    for(let step=0;step<n;step++){
+      for(const bot of bots){
+        if(bot.finished)continue;
+        if(bot.idx<paths.length-1){
+          bot.idx++;
+          const next=paths[bot.idx];
+          bot.x=next.x;
+          bot.y=next.y;
+          if(bot.x===exitCell.x && bot.y===exitCell.y){
+            bot.finished=true;
+            completed++;
+          }
+        }
+      }
+    }
+    updateHUD();
+  }
+
+  function reset(){
+    maze=generateMaze();
+    paths=computePaths();
+    initBots();
+    completed=0;
+    startTime=performance.now();
+    elapsedMs=0;
+    updateHUD();
+    render();
+  }
+
+  // ---------- Timer ----------
+  function loop(){
+    const now=performance.now();
+    elapsedMs+=now-startTime;
+    startTime=now;
+    updateHUD();
+    render();
+    timerReq=requestAnimationFrame(loop);
+  }
+
+  resetBtn.addEventListener('click',()=>{
+    cancelAnimationFrame(timerReq);
+    reset();
+    timerReq=requestAnimationFrame(loop);
+  });
+
+  // ---------- Expose API ----------
+  window.game={
+    get bots(){return bots.map(b=>({x:b.x,y:b.y}));},
+    get completed(){return completed;},
+    get elapsedMs(){return elapsedMs;},
+    tick,
+    reset
+  };
+
+  // start game
+  reset();
+  timerReq=requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

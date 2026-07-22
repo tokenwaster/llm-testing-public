@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f4f4f4;
+    padding: 16px;
+  }
+  #app {
+    display: inline-block;
+    min-width: 600px;
+    min-height: 400px;
+    background: #fff;
+    padding: 12px;
+    border: 1px solid #ccc;
+  }
+  #grid {
+    display: grid;
+    grid-template-columns: 40px repeat(10, 56px);
+    grid-template-rows: 28px repeat(10, 28px);
+    gap: 2px;
+  }
+  .hdr {
+    background: #e0e0e0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 12px;
+    border: 1px solid #bbb;
+  }
+  .cell {
+    width: 54px;
+    height: 26px;
+    box-sizing: border-box;
+    border: 1px solid #ccc;
+    text-align: right;
+    font-size: 12px;
+    padding: 2px 4px;
+  }
+  .cell:focus {
+    outline: 2px solid #4a90d9;
+    text-align: left;
+  }
+  #toolbar {
+    margin-bottom: 10px;
+  }
+  #export {
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  #csv {
+    display: block;
+    margin-top: 10px;
+    width: 580px;
+    height: 140px;
+    font-family: monospace;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <button id="export">Export CSV</button>
+  </div>
+  <div id="grid"></div>
+  <textarea id="csv" placeholder="CSV export appears here"></textarea>
+</div>
+
+<script>
+(function () {
+  const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  const ROWS = [1,2,3,4,5,6,7,8,9,10];
+  const allCellIds = [];
+  ROWS.forEach(r => COLS.forEach(c => allCellIds.push(c + r)));
+
+  const cellsData = {};   // raw text per cell
+  let computedMemo = {};  // last computed results
+  let editingCell = null;
+
+  // ---------- Build DOM ----------
+  const grid = document.getElementById('grid');
+
+  // top-left corner
+  const corner = document.createElement('div');
+  corner.className = 'hdr';
+  grid.appendChild(corner);
+
+  COLS.forEach(c => {
+    const h = document.createElement('div');
+    h.className = 'hdr';
+    h.textContent = c;
+    grid.appendChild(h);
+  });
+
+  const inputs = {};
+
+  ROWS.forEach(r => {
+    const rh = document.createElement('div');
+    rh.className = 'hdr';
+    rh.textContent = r;
+    grid.appendChild(rh);
+
+    COLS.forEach(c => {
+      const id = c + r;
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'cell';
+      inp.id = 'cell-' + id;
+      inp.addEventListener('focus', () => {
+        editingCell = id;
+        inp.value = cellsData[id] || '';
+      });
+      inp.addEventListener('blur', () => {
+        commitCell(id, inp.value);
+        editingCell = null;
+      });
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          inp.blur();
+        }
+      });
+      grid.appendChild(inp);
+      inputs[id] = inp;
+    });
+  });
+
+  function commitCell(id, text) {
+    cellsData[id] = text;
+    recomputeAndRender();
+  }
+
+  // ---------- Tokenizer / Parser ----------
+  function tokenize(s) {
+    const tokens = [];
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (/[0-9.]/.test(c)) {
+        let j = i;
+        while (j < s.length && /[0-9.]/.test(s[j])) j++;
+        const numStr = s.slice(i, j);
+        if (!/^\d+(\.\d+)?$|^\.\d+$/.test(numStr)) throw new Error('bad number');
+        tokens.push({ type: 'num', value: parseFloat(numStr) });
+        i = j;
+        continue;
+      }
+      if (/[A-Za-z]/.test(c)) {
+        let j = i;
+        while (j < s.length && /[A-Za-z0-9]/.test(s[j])) j++;
+        const ref = s.slice(i, j).toUpperCase();
+        const m = /^([A-J])([1-9]|10)$/.exec(ref);
+        if (!m) throw new Error('bad ref');
+        tokens.push({ type: 'ref', value: ref });
+        i = j;
+        continue;
+      }
+      if ('+-*/()'.includes(c)) {
+        tokens.push({ type: c });
+        i++;
+        continue;
+      }
+      throw new Error('bad char');
+    }
+    return tokens;
+  }
+
+  function parseExpr(tokens) {
+    let pos = 0;
+    function peek() { return tokens[pos]; }
+    function next() { return tokens[pos++]; }
+
+    function parseE() {
+      let node = parseT();
+      while (peek() && (peek().type === '+' || peek().type === '-')) {
+        const op = next().type;
+        const right = parseT();
+        node = { type: 'bin', op, left: node, right };
+      }
+      return node;
+    }
+    function parseT() {
+      let node = parseF();
+      while (peek() && (peek().type === '*' || peek().type === '/')) {
+        const op = next().type;
+        const right = parseF();
+        node = { type: 'bin', op, left: node, right };
+      }
+      return node;
+    }
+    function parseF() {
+      const t = peek();
+      if (!t) throw new Error('unexpected end');
+      if (t.type === '-') { next(); return { type: 'neg', node: parseF() }; }
+      if (t.type === '+') { next(); return parseF(); }
+      if (t.type === 'num') { next(); return { type: 'num', value: t.value }; }
+      if (t.type === 'ref') { next(); return { type: 'ref', value: t.value }; }
+      if (t.type === '(') {
+        next();
+        const e = parseE();
+        if (!peek() || peek().type !== ')') throw new Error('expected )');
+        next();
+        return e;
+      }
+      throw new Error('unexpected token');
+    }
+
+    if (tokens.length === 0) throw new Error('empty formula');
+    const result = parseE();
+    if (pos !== tokens.length) throw new Error('trailing tokens');
+    return result;
+  }
+
+  function getRefsFromText(text) {
+    if (!text || text[0] !== '=') return [];
+    try {
+      const tokens = tokenize(text.slice(1));
+      const ast = parseExpr(tokens);
+      const refs = [];
+      (function walk(n) {
+        if (n.type === 'ref') refs.push(n.value);
+        else if (n.type === 'bin') { walk(n.left); walk(n.right); }
+        else if (n.type === 'neg') walk(n.node);
+      })(ast);
+      return refs;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // ---------- Cycle detection ----------
+  function findCycles() {
+    const WHITE = 0, GRAY = 1, BLACK = 2;
+    const state = {};
+    const inCycle = new Set();
+    const stack = [];
+
+    function dfs(cell) {
+      state[cell] = GRAY;
+      stack.push(cell);
+      const refs = getRefsFromText(cellsData[cell] || '');
+      for (const r of refs) {
+        if (!state[r] || state[r] === WHITE) {
+          dfs(r);
+        } else if (state[r] === GRAY) {
+          const idx = stack.indexOf(r);
+          for (let k = idx; k < stack.length; k++) inCycle.add(stack[k]);
+        }
+      }
+      stack.pop();
+      state[cell] = BLACK;
+    }
+
+    for (const cell of allCellIds) {
+      if (!state[cell] || state[cell] === 0) dfs(cell);
+    }
+    return inCycle;
+  }
+
+  // ---------- Formatting ----------
+  function formatNum(n) {
+    if (!isFinite(n)) throw new Error('non-finite');
+    const r = Math.round(n * 1e10) / 1e10;
+    return String(r);
+  }
+
+  // ---------- Compute all ----------
+  function computeAll() {
+    const inCycle = findCycles();
+    const memo = {};
+
+    function computeValue(cell) {
+      if (memo.hasOwnProperty(cell)) return memo[cell];
+      if (inCycle.has(cell)) {
+        memo[cell] = { value: 0, display: '#CYCLE' };
+        return memo[cell];
+      }
+      const text = cellsData[cell] || '';
+      if (!text || text[0] !== '=') {
+        if (text.trim() === '') {
+          memo[cell] = { value: 0, display: '' };
+        } else {
+          const num = Number(text.trim());
+          if (!isNaN(num)) {
+            memo[cell] = { value: num, display: text };
+          } else {
+            memo[cell] = { value: 0, display: text };
+          }
+        }
+        return memo[cell];
+      }
+      // formula cell
+      try {
+        const tokens = tokenize(text.slice(1));
+        const ast = parseExpr(tokens);
+        const val = evalNode(ast);
+        memo[cell] = { value: val, display: formatNum(val) };
+      } catch (e) {
+        memo[cell] = { value: 0, display: '#ERR' };
+      }
+      return memo[cell];
+    }
+
+    function evalNode(n) {
+      if (n.type === 'num') return n.value;
+      if (n.type === 'neg') return -evalNode(n.node);
+      if (n.type === 'ref') {
+        const v = computeValue(n.value);
+        if (v.display === '#CYCLE' || v.display === '#ERR') throw new Error('propagate');
+        return v.value;
+      }
+      if (n.type === 'bin') {
+        const l = evalNode(n.left), r = evalNode(n.right);
+        let res;
+        switch (n.op) {
+          case '+': res = l + r; break;
+          case '-': res = l - r; break;
+          case '*': res = l * r; break;
+          case '/': res = l / r; break;
+        }
+        if (!isFinite(res)) throw new Error('non-finite result');
+        return res;
+      }
+      throw new Error('bad node');
+    }
+
+    for (const cell of allCellIds) computeValue(cell);
+    return memo;
+  }
+
+  function recomputeAndRender() {
+    computedMemo = computeAll();
+    for (const id of allCellIds) {
+      if (id === editingCell) continue;
+      inputs[id].value = computedMemo[id].display;
+    }
+  }
+
+  // ---------- Export CSV ----------
+  document.getElementById('export').addEventListener('click', () => {
+    const lines = [];
+    ROWS.forEach(r => {
+      const rowVals = COLS.map(c => computedMemo[c + r].display);
+      lines.push(rowVals.join(','));
+    });
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  // ---------- Public API ----------
+  window.sheet = {
+    set(id, text) {
+      cellsData[id] = text;
+      recomputeAndRender();
+      if (id === editingCell && inputs[id]) {
+        inputs[id].value = text;
+      }
+    },
+    get(id) {
+      if (!computedMemo[id]) recomputeAndRender();
+      return computedMemo[id] ? computedMemo[id].display : '';
+    },
+    raw(id) {
+      return cellsData[id] || '';
+    }
+  };
+
+  // initial render
+  recomputeAndRender();
+})();
+</script>
+</body>
+</html>

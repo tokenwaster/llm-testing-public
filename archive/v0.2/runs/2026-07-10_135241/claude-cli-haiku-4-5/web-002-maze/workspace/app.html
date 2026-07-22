@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maze Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin: 0;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            font-size: 16px;
+            font-weight: bold;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        
+        .hud-item {
+            background: #f0f0f0;
+            padding: 12px 20px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            white-space: nowrap;
+        }
+        
+        #timer {
+            min-width: 120px;
+            font-family: monospace;
+        }
+        
+        #completed {
+            min-width: 60px;
+            text-align: center;
+            font-family: monospace;
+        }
+        
+        #reset {
+            padding: 12px 30px;
+            font-size: 16px;
+            font-weight: bold;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: transform 0.1s, box-shadow 0.2s;
+        }
+        
+        #reset:hover {
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        
+        #reset:active {
+            transform: scale(0.98);
+        }
+        
+        #maze {
+            display: block;
+            border: 3px solid #333;
+            background: white;
+            border-radius: 6px;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+            width: 600px;
+            height: 600px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎮 Maze Runner</h1>
+        <div class="controls">
+            <div class="hud-item">⏱️ Time: <span id="timer">0.0s</span></div>
+            <div class="hud-item">✓ Completed: <span id="completed">0</span>/24</div>
+            <button id="reset">↻ Reset</button>
+        </div>
+        <canvas id="maze" width="600" height="600"></canvas>
+    </div>
+
+    <script>
+        const MAZE_SIZE = 20;
+        const CELL_SIZE = 30;
+        const NUM_BOTS = 24;
+        const CANVAS_SIZE = MAZE_SIZE * CELL_SIZE;
+
+        class MazeGame {
+            constructor() {
+                this.maze = [];
+                this.spawn = null;
+                this.exit = null;
+                this.bots = [];
+                this.completed = 0;
+                this.elapsedMs = 0;
+                this.startTime = 0;
+                this.animationFrameId = null;
+                this.totalSteps = 0;
+                
+                this.setupElements();
+                this.init();
+            }
+
+            setupElements() {
+                this.canvas = document.getElementById('maze');
+                this.ctx = this.canvas.getContext('2d');
+                this.timerEl = document.getElementById('timer');
+                this.completedEl = document.getElementById('completed');
+                document.getElementById('reset').addEventListener('click', () => this.reset());
+            }
+
+            init() {
+                this.generateMaze();
+                this.createBots();
+                this.completed = 0;
+                this.elapsedMs = 0;
+                this.startTime = Date.now();
+                this.totalSteps = 0;
+                this.render();
+                this.startAnimation();
+            }
+
+            generateMaze() {
+                this.maze = Array(MAZE_SIZE).fill(null).map(() => Array(MAZE_SIZE).fill(1));
+                
+                const visited = Array(MAZE_SIZE).fill(null).map(() => Array(MAZE_SIZE).fill(false));
+                
+                const carve = (x, y) => {
+                    visited[y][x] = true;
+                    this.maze[y][x] = 0;
+                    
+                    const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+                    dirs.sort(() => Math.random() - 0.5);
+                    
+                    for (const [dx, dy] of dirs) {
+                        const nx = x + dx * 2;
+                        const ny = y + dy * 2;
+                        
+                        if (nx > 0 && nx < MAZE_SIZE - 1 && ny > 0 && ny < MAZE_SIZE - 1 && !visited[ny][nx]) {
+                            this.maze[y + dy][x + dx] = 0;
+                            carve(nx, ny);
+                        }
+                    }
+                };
+                
+                carve(1, 1);
+                
+                this.spawn = { x: 1, y: 1 };
+                this.exit = { x: MAZE_SIZE - 3, y: MAZE_SIZE - 3 };
+                this.maze[this.exit.y][this.exit.x] = 0;
+            }
+
+            findPath(start, end) {
+                const queue = [[start.x, start.y, []]];
+                const visited = new Set();
+                visited.add(`${start.x},${start.y}`);
+                
+                while (queue.length > 0) {
+                    const [x, y, path] = queue.shift();
+                    
+                    if (x === end.x && y === end.y) {
+                        return path;
+                    }
+                    
+                    const dirs = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+                    for (const [dx, dy] of dirs) {
+                        const nx = x + dx;
+                        const ny = y + dy;
+                        const key = `${nx},${ny}`;
+                        
+                        if (nx >= 0 && nx < MAZE_SIZE && ny >= 0 && ny < MAZE_SIZE &&
+                            !visited.has(key) && this.maze[ny][nx] === 0) {
+                            visited.add(key);
+                            queue.push([nx, ny, [...path, { x: nx, y: ny }]]);
+                        }
+                    }
+                }
+                
+                return [];
+            }
+
+            createBots() {
+                this.bots = Array(NUM_BOTS).fill(null).map((_, i) => {
+                    const path = this.findPath(this.spawn, this.exit);
+                    return {
+                        x: this.spawn.x,
+                        y: this.spawn.y,
+                        path: path,
+                        pathIndex: 0,
+                        completed: false,
+                        startStep: Math.floor(i * 2),
+                        color: `hsl(${(i * 360 / NUM_BOTS) % 360}, 75%, 50%)`
+                    };
+                });
+            }
+
+            tick(n) {
+                for (let step = 0; step < n; step++) {
+                    const currentStep = this.totalSteps + step;
+                    
+                    for (const bot of this.bots) {
+                        if (!bot.completed && currentStep >= bot.startStep) {
+                            if (bot.pathIndex < bot.path.length) {
+                                const next = bot.path[bot.pathIndex];
+                                bot.x = next.x;
+                                bot.y = next.y;
+                                bot.pathIndex++;
+                                
+                                if (bot.pathIndex >= bot.path.length) {
+                                    bot.completed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                this.totalSteps += n;
+                this.completed = this.bots.filter(b => b.completed).length;
+            }
+
+            updateHUD() {
+                const elapsed = Date.now() - this.startTime;
+                this.elapsedMs = elapsed;
+                this.timerEl.textContent = (elapsed / 1000).toFixed(1) + 's';
+                this.completedEl.textContent = this.completed;
+            }
+
+            render() {
+                const ctx = this.ctx;
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+                
+                ctx.fillStyle = '#1a1a1a';
+                for (let y = 0; y < MAZE_SIZE; y++) {
+                    for (let x = 0; x < MAZE_SIZE; x++) {
+                        if (this.maze[y][x] === 1) {
+                            ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                        }
+                    }
+                }
+                
+                ctx.fillStyle = '#4CAF50';
+                const ex = this.exit.x * CELL_SIZE;
+                const ey = this.exit.y * CELL_SIZE;
+                ctx.fillRect(ex, ey, CELL_SIZE, CELL_SIZE);
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('✓', ex + CELL_SIZE / 2, ey + CELL_SIZE / 2);
+                
+                for (const bot of this.bots) {
+                    const bx = bot.x * CELL_SIZE + CELL_SIZE / 2;
+                    const by = bot.y * CELL_SIZE + CELL_SIZE / 2;
+                    const radius = CELL_SIZE / 2.5;
+                    
+                    ctx.fillStyle = bot.color;
+                    ctx.beginPath();
+                    ctx.arc(bx, by, radius, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    if (bot.completed) {
+                        ctx.strokeStyle = '#FFD700';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.arc(bx, by, radius + 4, 0, Math.PI * 2);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            startAnimation() {
+                let lastAnimationStep = 0;
+                
+                const animate = () => {
+                    const elapsed = Date.now() - this.startTime;
+                    const stepsSinceStart = Math.floor(elapsed / 100);
+                    
+                    if (stepsSinceStart > lastAnimationStep) {
+                        const newSteps = stepsSinceStart - lastAnimationStep;
+                        this.tick(newSteps);
+                        lastAnimationStep = stepsSinceStart;
+                    }
+                    
+                    this.updateHUD();
+                    this.render();
+                    
+                    this.animationFrameId = requestAnimationFrame(animate);
+                };
+                
+                this.animationFrameId = requestAnimationFrame(animate);
+            }
+
+            reset() {
+                if (this.animationFrameId) {
+                    cancelAnimationFrame(this.animationFrameId);
+                    this.animationFrameId = null;
+                }
+                this.init();
+            }
+        }
+
+        const game = new MazeGame();
+
+        window.game = {
+            get bots() { return game.bots; },
+            get completed() { return game.completed; },
+            get elapsedMs() { return game.elapsedMs; },
+            tick: (n) => game.tick(n),
+            reset: () => game.reset()
+        };
+    </script>
+</body>
+</html>

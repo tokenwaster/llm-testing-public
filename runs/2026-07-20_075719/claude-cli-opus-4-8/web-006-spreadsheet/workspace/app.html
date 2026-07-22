@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  html, body { margin: 0; padding: 0; font-family: Arial, Helvetica, sans-serif; }
+  #app {
+    min-width: 620px;
+    min-height: 420px;
+    width: 640px;
+    padding: 12px;
+    box-sizing: border-box;
+  }
+  h1 { font-size: 18px; margin: 0 0 10px; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #bbb; padding: 0; }
+  th {
+    background: #eef1f5;
+    width: 58px;
+    height: 24px;
+    font-size: 12px;
+    font-weight: bold;
+    text-align: center;
+    color: #333;
+  }
+  th.corner { background: #dfe3e8; }
+  td input {
+    width: 58px;
+    height: 24px;
+    border: none;
+    outline: none;
+    box-sizing: border-box;
+    padding: 0 4px;
+    font-size: 12px;
+    background: #fff;
+  }
+  td input:focus { background: #fff6d5; box-shadow: inset 0 0 0 2px #4a90d9; }
+  .controls { margin-top: 12px; }
+  button {
+    font-size: 13px;
+    padding: 6px 14px;
+    cursor: pointer;
+  }
+  #csv {
+    display: block;
+    margin-top: 10px;
+    width: 600px;
+    height: 120px;
+    font-family: monospace;
+    font-size: 12px;
+    box-sizing: border-box;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <table id="grid"></table>
+  <div class="controls">
+    <button id="export">Export CSV</button>
+  </div>
+  <textarea id="csv" readonly placeholder="Computed values appear here after Export CSV"></textarea>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var COLS = [];
+  for (var c = 0; c < 10; c++) COLS.push(String.fromCharCode(65 + c));
+  var ROWS = [];
+  for (var r = 1; r <= 10; r++) ROWS.push(r);
+
+  function allCells() {
+    var out = [];
+    for (var ri = 0; ri < ROWS.length; ri++)
+      for (var ci = 0; ci < COLS.length; ci++)
+        out.push(COLS[ci] + ROWS[ri]);
+    return out;
+  }
+
+  // ---- state ----
+  var rawData = {};      // cell -> raw text
+  var results = {};      // cell -> value object (current recompute)
+  var displays = {};     // cell -> displayed string (current recompute)
+
+  var ERR = {};          // thrown sentinel for parse/eval errors
+
+  // ---- number formatting ----
+  function fmtNum(n) {
+    var r = Math.round(n * 1e10) / 1e10;
+    if (Object.is(r, -0)) r = 0;
+    return String(r);
+  }
+  function isNumericText(t) {
+    return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(t);
+  }
+
+  // ---- tokenizer ----
+  function tokenize(s) {
+    var toks = [], i = 0;
+    while (i < s.length) {
+      var ch = s[i];
+      if (ch === ' ' || ch === '\t') { i++; continue; }
+      if (/[0-9.]/.test(ch)) {
+        var j = i;
+        while (j < s.length && /[0-9.]/.test(s[j])) j++;
+        var num = s.slice(i, j);
+        if (!/^(\d+\.?\d*|\.\d+)$/.test(num)) throw ERR;
+        toks.push({ t: 'num', v: parseFloat(num) });
+        i = j; continue;
+      }
+      if (/[A-Za-z]/.test(ch)) {
+        var a = i;
+        while (a < s.length && /[A-Za-z]/.test(s[a])) a++;
+        var letters = s.slice(i, a);
+        var b = a;
+        while (b < s.length && /[0-9]/.test(s[b])) b++;
+        if (b === a) throw ERR;                 // letters without digits
+        var digits = s.slice(a, b);
+        if (letters.length !== 1) throw ERR;     // not a valid single-col ref
+        var col = letters.toUpperCase();
+        if (col < 'A' || col > 'J') throw ERR;
+        var row = parseInt(digits, 10);
+        if (row < 1 || row > 10) throw ERR;
+        toks.push({ t: 'ref', v: col + row });
+        i = b; continue;
+      }
+      if ('+-*/()'.indexOf(ch) !== -1) { toks.push({ t: 'op', v: ch }); i++; continue; }
+      throw ERR;
+    }
+    return toks;
+  }
+
+  // ---- recursive-descent parser / evaluator ----
+  var _toks, _pos;
+  function peek() { return _toks[_pos]; }
+  function nextTok() { return _toks[_pos++]; }
+
+  function parseExpr() {
+    var v = parseTerm();
+    while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
+      var op = nextTok().v, r = parseTerm();
+      v = op === '+' ? v + r : v - r;
+    }
+    return v;
+  }
+  function parseTerm() {
+    var v = parseFactor();
+    while (peek() && peek().t === 'op' && (peek().v === '*' || peek().v === '/')) {
+      var op = nextTok().v, r = parseFactor();
+      v = op === '*' ? v * r : v / r;
+    }
+    return v;
+  }
+  function parseFactor() {
+    var tk = peek();
+    if (!tk) throw ERR;
+    if (tk.t === 'op' && (tk.v === '+' || tk.v === '-')) {
+      nextTok();
+      var f = parseFactor();
+      return tk.v === '-' ? -f : f;
+    }
+    if (tk.t === 'op' && tk.v === '(') {
+      nextTok();
+      var e = parseExpr();
+      var cl = nextTok();
+      if (!cl || cl.v !== ')') throw ERR;
+      return e;
+    }
+    if (tk.t === 'num') { nextTok(); return tk.v; }
+    if (tk.t === 'ref') { nextTok(); return resolveRef(tk.v); }
+    throw ERR;
+  }
+
+  function resolveRef(ref) {
+    var rv = evalCell(ref);
+    if (rv.t === 'num') return rv.n;
+    if (rv.t === 'empty') return 0;
+    throw ERR; // text / err / cycle cannot be used numerically
+  }
+
+  function evalFormula(str) {
+    _toks = tokenize(str);
+    _pos = 0;
+    var v = parseExpr();
+    if (_pos !== _toks.length) throw ERR;
+    return v;
+  }
+
+  // ---- per-cell evaluation with cycle detection ----
+  var inProg, path;
+
+  function computeCell(cell) {
+    var raw = (rawData[cell] || '');
+    var t = raw.trim();
+    if (t === '') return { t: 'empty' };
+    if (t.charAt(0) === '=') {
+      try {
+        var val = evalFormula(t.slice(1));
+        if (typeof val !== 'number' || !isFinite(val)) return { t: 'err' };
+        return { t: 'num', n: val };
+      } catch (e) {
+        return { t: 'err' };
+      }
+    }
+    if (isNumericText(t)) return { t: 'num', n: parseFloat(t) };
+    return { t: 'text', s: raw };
+  }
+
+  function evalCell(cell) {
+    if (Object.prototype.hasOwnProperty.call(results, cell)) return results[cell];
+    if (inProg.has(cell)) {
+      // cycle: mark every cell along the cycle
+      var idx = path.indexOf(cell);
+      for (var i = idx; i < path.length; i++) results[path[i]] = { t: 'cycle' };
+      return { t: 'cycle' };
+    }
+    inProg.add(cell);
+    path.push(cell);
+    var res = computeCell(cell);
+    inProg.delete(cell);
+    path.pop();
+    if (!Object.prototype.hasOwnProperty.call(results, cell)) results[cell] = res;
+    return results[cell];
+  }
+
+  function toDisplay(v) {
+    if (!v) return '';
+    switch (v.t) {
+      case 'empty': return '';
+      case 'num': return fmtNum(v.n);
+      case 'text': return v.s;
+      case 'err': return '#ERR';
+      case 'cycle': return '#CYCLE';
+    }
+    return '';
+  }
+
+  function recompute() {
+    results = {};
+    inProg = new Set();
+    path = [];
+    var cells = allCells();
+    for (var i = 0; i < cells.length; i++) evalCell(cells[i]);
+    displays = {};
+    for (var k = 0; k < cells.length; k++) displays[cells[k]] = toDisplay(results[cells[k]]);
+  }
+
+  // ---- DOM ----
+  function inputFor(cell) { return document.getElementById('cell-' + cell); }
+
+  function refresh() {
+    var cells = allCells();
+    for (var i = 0; i < cells.length; i++) {
+      var el = inputFor(cells[i]);
+      if (!el) continue;
+      if (el === document.activeElement) continue; // keep raw text while editing
+      el.value = displays[cells[i]];
+    }
+  }
+
+  function buildGrid() {
+    var table = document.getElementById('grid');
+    var thead = document.createElement('tr');
+    var corner = document.createElement('th');
+    corner.className = 'corner';
+    thead.appendChild(corner);
+    for (var c = 0; c < COLS.length; c++) {
+      var th = document.createElement('th');
+      th.textContent = COLS[c];
+      thead.appendChild(th);
+    }
+    table.appendChild(thead);
+
+    for (var r = 0; r < ROWS.length; r++) {
+      var tr = document.createElement('tr');
+      var rh = document.createElement('th');
+      rh.textContent = ROWS[r];
+      tr.appendChild(rh);
+      for (var cc = 0; cc < COLS.length; cc++) {
+        var cell = COLS[cc] + ROWS[r];
+        var td = document.createElement('td');
+        var inp = document.createElement('input');
+        inp.type = 'text';
+        inp.id = 'cell-' + cell;
+        inp.setAttribute('data-cell', cell);
+        attachHandlers(inp, cell);
+        td.appendChild(inp);
+        tr.appendChild(td);
+      }
+      table.appendChild(tr);
+    }
+  }
+
+  function attachHandlers(inp, cell) {
+    inp.addEventListener('focus', function () {
+      inp.value = rawData[cell] || '';
+      inp.select();
+    });
+    inp.addEventListener('blur', function () {
+      commit(cell, inp.value);
+    });
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        inp.blur();
+      }
+    });
+  }
+
+  function commit(cell, text) {
+    rawData[cell] = text;
+    recompute();
+    refresh();
+  }
+
+  function exportCSV() {
+    var lines = [];
+    for (var r = 0; r < ROWS.length; r++) {
+      var row = [];
+      for (var c = 0; c < COLS.length; c++) {
+        row.push(displays[COLS[c] + ROWS[r]]);
+      }
+      lines.push(row.join(','));
+    }
+    document.getElementById('csv').value = lines.join('\n');
+  }
+
+  // ---- scripting API ----
+  function normRef(ref) { return String(ref).toUpperCase(); }
+
+  window.sheet = {
+    set: function (ref, text) {
+      ref = normRef(ref);
+      rawData[ref] = String(text);
+      recompute();
+      refresh();
+      return displays[ref];
+    },
+    get: function (ref) {
+      ref = normRef(ref);
+      return displays[ref] !== undefined ? displays[ref] : '';
+    },
+    raw: function (ref) {
+      ref = normRef(ref);
+      return rawData[ref] || '';
+    }
+  };
+
+  // ---- init ----
+  document.addEventListener('DOMContentLoaded', function () {
+    buildGrid();
+    document.getElementById('export').addEventListener('click', exportCSV);
+    recompute();
+    refresh();
+  });
+})();
+</script>
+</body>
+</html>

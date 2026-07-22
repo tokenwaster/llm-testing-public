@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #eef1f5; padding: 20px; display: flex; justify-content: center; }
+#app { min-width: 680px; min-height: 500px; background: #fff; border: 1px solid #bbb; padding: 18px; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+h1 { margin-bottom: 10px; font-size: 17px; color: #333; }
+.toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+#export { padding: 6px 18px; cursor: pointer; background: #4a90d9; color: #fff; border: none; border-radius: 3px; font-size: 13px; font-family: monospace; }
+#export:hover { background: #357abd; }
+.csv-area { margin-bottom: 12px; }
+#csv { width: 100%; height: 80px; font-family: monospace; font-size: 12px; padding: 4px; border: 1px solid #ccc; resize: vertical; background: #fafafa; }
+.grid-container { overflow: auto; max-height: 520px; }
+table.grid { border-collapse: collapse; }
+table.grid th, table.grid td { border: 1px solid #bbb; text-align: center; height: 28px; padding: 0; }
+table.grid th.header-col { background: #e4e8ee; font-weight: normal; color: #555; width: 32px; min-width: 32px; font-size: 12px; user-select: none; }
+table.grid th.header-row { background: #e4e8ee; font-weight: normal; color: #555; height: 28px; width: 32px; min-width: 32px; font-size: 12px; user-select: none; }
+table.grid td { width: 72px; min-width: 72px; background: #fff; }
+.grid input { width: 100%; height: 100%; border: none; outline: none; text-align: center; font-family: monospace; font-size: 13px; padding: 2px 4px; background: transparent; color: #222; }
+.grid input:focus { background: #e8f0fe; }
+.grid input.editing { background: #fffde7; border: 2px solid #4a90d9; }
+</style>
+</head>
+<body>
+<div id="app">
+    <h1>Mini Spreadsheet (10 &times; 10)</h1>
+    <div class="toolbar">
+        <button id="export">Export CSV</button>
+    </div>
+    <div class="csv-area">
+        <textarea id="csv" readonly></textarea>
+    </div>
+    <div class="grid-container">
+        <table class="grid" id="spreadsheet"></table>
+    </div>
+</div>
+
+<script>
+(function() {
+    "use strict";
+
+    var COLS = 10; // A-J
+    var ROWS = 10; // 1-10
+
+    var CYCLE_SENT = "\x01CYCLE\x01";
+    var ERR_SENT   = "\x01ERR\x01";
+
+    // Raw values: key (e.g. "A1") -> raw text typed by user
+    var rawValues = {};
+
+    // Set of cells currently being computed (cycle detection)
+    var computingSet = new Set();
+
+    /* ---- helpers ---- */
+    function colLetter(c) { return String.fromCharCode(65 + c); }
+    function rowLabel(r)   { return String(r + 1); }
+    function cellKey(c, r){ return colLetter(c) + rowLabel(r); }
+
+    /* ---- Tokenizer ---- */
+    var TOKEN_RE = /([A-J](?:[1-9]|10)|\d+\.?\d*|[+\-*/()])/g;
+
+    function tokenize(formula) {
+        var text = formula.substring(1).replace(/\s+/g, ""); // strip '=' and whitespace
+        var tokens = [];
+        var m;
+        TOKEN_RE.lastIndex = 0;
+        while ((m = TOKEN_RE.exec(text)) !== null) {
+            tokens.push(m[0]);
+        }
+        return tokens;
+    }
+
+    /* ---- Recursive-descent parser ---- */
+    function parseExpr(tokens, pos) {
+        var left, p1, right, op;
+        p1 = 0;
+        if (pos === undefined) pos = 0;
+        // expr → term (('+' | '-') term)*
+        left = parseTerm(tokens, pos);
+        while (left[1] < tokens.length &&
+               (tokens[left[1]] === '+' || tokens[left[1]] === '-')) {
+            op = tokens[left[1]];
+            right = parseTerm(tokens, left[1] + 1);
+            if (op === '+') left[0] = left[0] + right[0];
+            else             left[0] = left[0] - right[0];
+            left[1] = right[1];
+        }
+        return left;
+    }
+
+    function parseTerm(tokens, pos) {
+        var left, p1, right, op;
+        // term → factor (('*' | '/') factor)*
+        left = parseFactor(tokens, pos);
+        while (left[1] < tokens.length &&
+               (tokens[left[1]] === '*' || tokens[left[1]] === '/')) {
+            op = tokens[left[1]];
+            right = parseFactor(tokens, left[1] + 1);
+            if (op === '*') left[0] = left[0] * right[0];
+            else {
+                if (right[0] === 0) throw new Error("DIV0");
+                left[0] = left[0] / right[0];
+            }
+            left[1] = right[1];
+        }
+        return left;
+    }
+
+    function parseFactor(tokens, pos) {
+        if (pos >= tokens.length) throw new Error("SYNTAX");
+        var token = tokens[pos];
+
+        // Unary +/-
+        if (token === '-' || token === '+') {
+            var sub = parseFactor(tokens, pos + 1);
+            return [token === '-' ? -sub[0] : sub[0], sub[1]];
+        }
+
+        // Parenthesised expression
+        if (token === '(') {
+            var inner = parseExpr(tokens, pos + 1);
+            if (inner[1] >= tokens.length || tokens[inner[1]] !== ')')
+                throw new Error("SYNTAX");
+            return [inner[0], inner[1] + 1];
+        }
+
+        // Number literal
+        if (/^\d+\.?\d*$/.test(token)) {
+            return [parseFloat(token), pos + 1];
+        }
+
+        // Cell reference (valid grid cell only)
+        if (/^[A-J](?:[1-9]|10)$/.test(token)) {
+            var ref = token;
+            if (computingSet.has(ref)) throw new Error(CYCLE_SENT);
+
+            computingSet.add(ref);
+            var val = computeCell(ref);
+            computingSet.delete(ref);
+
+            // Propagate error / cycle sentinels
+            if (val === CYCLE_SENT || val === ERR_SENT) {
+                throw new Error(val);
+            }
+            return [val, pos + 1];
+        }
+
+        // Anything else → syntax error
+        throw new Error("SYNTAX");
+    }
+
+    /* ---- Cell computation ---- */
+    function computeCell(key) {
+        var raw = rawValues[key] || "";
+
+        if (!raw.startsWith("=")) {
+            // Plain value (not a formula)
+            if (raw === "") return 0;                       // empty → 0 in formulas
+            var num = parseFloat(raw);
+            return isNaN(num) ? raw : num;                  // text stays as text
+        }
+
+        try {
+            computingSet.add(key);
+            var tokens = tokenize(raw);
+            if (tokens.length === 0) throw new Error("SYNTAX");
+            var result = parseExpr(tokens, 0);
+            if (result[1] !== tokens.length) throw new Error("SYNTAX");
+            computingSet.delete(key);
+
+            // If the computed value is a sentinel, propagate it
+            if (typeof result[0] === "string" &&
+                (result[0] === CYCLE_SENT || result[0] === ERR_SENT)) {
+                return result[0];
+            }
+            // NaN / Infinity → error
+            if (typeof result[0] === "number" && !isFinite(result[0])) {
+                return ERR_SENT;
+            }
+            return result[0];
+        } catch (e) {
+            computingSet.delete(key);
+            if (e.message === CYCLE_SENT) return CYCLE_SENT;
+            if (e.message === ERR_SENT)   return ERR_SENT;
+            return ERR_SENT; // syntax / div-by-zero → #ERR
+        }
+    }
+
+    /* ---- Display formatting ---- */
+    function formatDisplayValue(val) {
+        if (val === CYCLE_SENT) return "#CYCLE";
+        if (val === ERR_SENT)   return "#ERR";
+        if (typeof val === "number") {
+            if (Number.isInteger(val)) return String(val);
+            var s = parseFloat(val.toPrecision(12)).toString();
+            return s;
+        }
+        return String(val);
+    }
+
+    /* ---- Build the grid UI ---- */
+    var table = document.getElementById("spreadsheet");
+
+    // Column-header row
+    var hdrRow = document.createElement("tr");
+    var cornerTh = document.createElement("th");
+    cornerTh.className = "header-col";
+    hdrRow.appendChild(cornerTh);
+    for (var c = 0; c < COLS; c++) {
+        var th = document.createElement("th");
+        th.className = "header-row";
+        th.textContent = colLetter(c);
+        hdrRow.appendChild(th);
+    }
+    table.appendChild(hdrRow);
+
+    // Data rows + inputs
+    var cells = {};   // key → <input> element
+
+    for (var r = 0; r < ROWS; r++) {
+        var tr = document.createElement("tr");
+
+        var rh = document.createElement("th");
+        rh.className = "header-col";
+        rh.textContent = rowLabel(r);
+        tr.appendChild(rh);
+
+        for (var ci = 0; ci < COLS; ci++) {
+            var key = cellKey(ci, r);
+            var td = document.createElement("td");
+            var inp = document.createElement("input");
+            inp.type = "text";
+            inp.id   = "cell-" + key;
+            inp.dataset.cell = key;
+
+            // Focus → show raw text for editing
+            inp.addEventListener("focus", function () {
+                if (this.value !== (rawValues[this.dataset.cell] || "")) {
+                    this.value = rawValues[this.dataset.cell] || "";
+                    this.classList.add("editing");
+                }
+            });
+
+            // Blur / Enter → commit and recompute
+            inp.addEventListener("blur", function () {
+                commitCell(this.dataset.cell);
+            });
+            inp.addEventListener("keydown", function (e) {
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitCell(this.dataset.cell);
+                    this.blur();
+                }
+            });
+
+            td.appendChild(inp);
+            tr.appendChild(td);
+            cells[key] = inp;
+        }
+        table.appendChild(tr);
+    }
+
+    /* ---- Commit a cell change ---- */
+    function commitCell(key) {
+        var input = cells[key];
+        if (!input) return;
+        rawValues[key] = (input.value || "").trim();
+        refreshAllDisplays();
+    }
+
+    /* ---- Refresh display for every cell ---- */
+    function updateCellDisplay(key) {
+        var input = cells[key];
+        if (!input) return;
+        // Don't overwrite while the user is editing this cell
+        if (document.activeElement === input && input.classList.contains("editing")) return;
+
+        var raw = rawValues[key] || "";
+        if (raw === "") { input.value = ""; return; }
+
+        var computed = computeCell(key);
+        input.value = formatDisplayValue(computed);
+    }
+
+    function refreshAllDisplays() {
+        for (var r = 0; r < ROWS; r++) {
+            for (var c = 0; c < COLS; c++) {
+                updateCellDisplay(cellKey(c, r));
+            }
+        }
+    }
+
+    /* ---- Export CSV ---- */
+    document.getElementById("export").addEventListener("click", function () {
+        var lines = [];
+        for (var r = 0; r < ROWS; r++) {
+            var rowVals = [];
+            for (var c = 0; c < COLS; c++) {
+                var key = cellKey(c, r);
+                var val = computeCell(key);
+                var s = formatDisplayValue(val);
+                // Quote if it contains comma, quote, or newline
+                if (s.indexOf(",") >= 0 || s.indexOf('"') >= 0 || s.indexOf("\n") >= 0) {
+                    s = '"' + s.replace(/"/g, '""') + '"';
+                }
+                rowVals.push(s);
+            }
+            lines.push(rowVals.join(","));
+        }
+        document.getElementById("csv").value = lines.join("\n");
+    });
+
+    /* ---- Initial display ---- */
+    refreshAllDisplays();
+
+    /* ---- Public API ---- */
+    window.sheet = {
+        set: function (key, value) {
+            rawValues[key] = (value !== undefined && value !== null) ? String(value) : "";
+            refreshAllDisplays();
+        },
+        get: function (key) {
+            return formatDisplayValue(computeCell(key));
+        },
+        raw: function (key) {
+            return rawValues[key] || "";
+        }
+    };
+})();
+</script>
+</body>
+</html>

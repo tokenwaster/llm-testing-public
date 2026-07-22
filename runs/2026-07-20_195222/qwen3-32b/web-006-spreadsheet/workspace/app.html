@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Mini Spreadsheet</title>
+  <style>
+    #spreadsheet {
+      border-collapse: collapse;
+      font-family: sans-serif;
+      margin-bottom: 20px;
+      min-width: 600px;
+    }
+    #spreadsheet th, #spreadsheet td {
+      padding: 4px;
+      text-align: center;
+    }
+    .cell {
+      width: 58px;
+      height: 24px;
+      text-align: right;
+      border: 1px solid #ccc;
+      box-sizing: border-box;
+    }
+    #export {
+      margin-bottom: 10px;
+    }
+    #csv {
+      width: 600px;
+      height: 100px;
+      font-family: monospace;
+    }
+    body {
+      padding: 20px;
+      font-family: sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <table id="spreadsheet"></table>
+    <button id="export">Export CSV</button>
+    <textarea id="csv" readonly></textarea>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const spreadsheet = document.getElementById('spreadsheet');
+      const cols = 'ABCDEFGHIJ';
+      
+      // Create table headers for columns A-J
+      const headerRow = document.createElement('tr');
+      const emptyHeader = document.createElement('th');
+      headerRow.appendChild(emptyHeader);
+      for (let col of cols) {
+        const th = document.createElement('th');
+        th.textContent = col;
+        headerRow.appendChild(th);
+      }
+      spreadsheet.appendChild(headerRow);
+
+      // Create rows and cells
+      for (let row = 1; row <= 10; row++) {
+        const tr = document.createElement('tr');
+        const thRow = document.createElement('th');
+        thRow.textContent = row;
+        tr.appendChild(thRow);
+        
+        for (let col of cols) {
+          const td = document.createElement('td');
+          const input = document.createElement('input');
+          input.id = `cell-${col}${row}`;
+          input.className = 'cell';
+          td.appendChild(input);
+          tr.appendChild(td);
+        }
+        spreadsheet.appendChild(tr);
+      }
+
+      // Data structures
+      const cells = {};
+      const dependencies = {};  // cellId -> Set of referenced cellIds
+      const dependents = {};    // cellId -> Set of dependent cellIds
+
+      function parseValue(text) {
+        if (text === '') return 0;
+        const num = Number(text);
+        return isNaN(num) ? text : num;
+      }
+
+      function parseReferences(formula) {
+        const regex = /([A-J][1-9]|$[A-J]10)/g;
+        let matches = [];
+        let match;
+        while ((match = regex.exec(formula)) !== null) {
+          matches.push(match[1]);
+        }
+        return matches.map(ref => `cell-${ref}`);
+      }
+
+      function evaluateFormula(cellId, formula) {
+        try {
+          const visited = new Set();
+          const expr = formula.substring(1);
+          let result;
+          
+          function evalExpr(exprStr, currentCellId, visitedSet) {
+            if (visitedSet.has(currentCellId)) return '#CYCLE';
+            visitedSet.add(currentCellId);
+
+            // Replace each cell reference in expr with its value
+            const regex = /([A-J][1-9]|$[A-J]10)/g;
+            let replacedExpr = exprStr.replace(regex, (match) => {
+              const refCellId = `cell-${match}`;
+              if (!cells.hasOwnProperty(refCellId)) return '#ERR';
+              
+              // Check for cycles
+              if (visitedSet.has(refCellId)) return '#CYCLE';
+
+              const refRaw = cells[refCellId].raw;
+              let value;
+
+              if (!refRaw.startsWith('=')) {
+                value = parseValue(refRaw);
+                if (typeof value === 'number') return value;
+                else return '#ERR';
+              } else {
+                try {
+                  const newVisitedSet = new Set(visitedSet);
+                  value = evalExpr(cells[refCellId].raw.substring(1), refCellId, newVisitedSet);
+                } catch (e) {
+                  return '#ERR';
+                }
+              }
+
+              if (value === '#CYCLE' || value === '#ERR') return value;
+              if (typeof value !== 'number') return 0;
+              return value;
+            });
+
+            try {
+              result = eval(replacedExpr);
+              if (isNaN(result)) return '#ERR';
+              return result;
+            } catch (e) {
+              return '#ERR';
+            } finally {
+              visitedSet.delete(currentCellId);
+            }
+          }
+
+          const initialVisited = new Set();
+          result = evalExpr(expr, cellId, initialVisited);
+          return result;
+        } catch (e) {
+          return '#ERR';
+        }
+      }
+
+      function addDependencies(cellId, refs) {
+        dependencies[cellId] = new Set(refs);
+        for (const ref of refs) {
+          if (!dependents[ref]) dependents[ref] = new Set();
+          dependents[ref].add(cellId);
+        }
+      }
+
+      function removeDependencies(cellId) {
+        const oldRefs = dependencies[cellId];
+        if (oldRefs) {
+          for (const ref of oldRefs) {
+            dependents[ref].delete(cellId);
+          }
+          delete dependencies[cellId];
+        }
+      }
+
+      function updateCell(cellId) {
+        const cell = cells[cellId];
+        if (!cell) return;
+
+        let newValue;
+        if (cell.raw.startsWith('=')) {
+          newValue = evaluateFormula(cellId, cell.raw);
+        } else {
+          newValue = parseValue(cell.raw);
+        }
+
+        cell.computedValue = newValue;
+
+        // Trigger recalculation of dependents
+        const dependentCells = dependents[cellId] || [];
+        for (const dependentCell of dependentCells) {
+          updateCell(dependentCell);
+        }
+      }
+
+      document.querySelectorAll('.cell').forEach(input => {
+        const cellId = input.id;
+        cells[cellId] = { raw: '', computedValue: '' };
+
+        input.addEventListener('focus', () => {
+          if (cells[cellId].raw.startsWith('=')) {
+            input.value = cells[cellId].raw;
+          } else {
+            input.value = cells[cellId].raw || '';
+          }
+        });
+
+        input.addEventListener('blur', () => {
+          const newValue = input.value.trim();
+          if (cells[cellId].raw !== newValue) {
+            // Remove previous dependencies
+            if (cells[cellId].raw.startsWith('=')) {
+              removeDependencies(cellId);
+            }
+
+            cells[cellId].raw = newValue;
+
+            // Add new dependencies if it's a formula
+            if (newValue.startsWith('=')) {
+              const refs = parseReferences(newValue.substring(1));
+              addDependencies(cellId, refs);
+            } else {
+              removeDependencies(cellId);
+            }
+
+            updateCell(cellId);
+
+            // Update displayed value to computedValue
+            input.value = typeof cell.computedValue === 'number' && !isNaN(cell.computedValue) 
+                          ? cell.computedValue : cell.computedValue;
+          }
+        });
+
+        input.addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const newValue = input.value.trim();
+            if (cells[cellId].raw !== newValue) {
+              // Remove previous dependencies
+              if (cells[cellId].raw.startsWith('=')) {
+                removeDependencies(cellId);
+              }
+
+              cells[cellId].raw = newValue;
+
+              // Add new dependencies if it's a formula
+              if (newValue.startsWith('=')) {
+                const refs = parseReferences(newValue.substring(1));
+                addDependencies(cellId, refs);
+              } else {
+                removeDependencies(cellId);
+              }
+
+              updateCell(cellId);
+
+              // Update displayed value to computedValue
+              input.value = typeof cell.computedValue === 'number' && !isNaN(cell.computedValue) 
+                            ? cell.computedValue : cell.computedValue;
+            }
+            input.blur();
+          }
+        });
+
+        // Set initial display value (0)
+        input.value = 0;
+      });
+
+      document.getElementById('export').addEventListener('click', () => {
+        let csv = '';
+        for (let row = 1; row <= 10; row++) {
+          const rowData = [];
+          for (let col of cols) {
+            const cellId = `cell-${col}${row}`;
+            const value = cells[cellId].computedValue;
+            // Convert to string
+            let strVal;
+            if (typeof value === 'number' && !isNaN(value)) {
+              strVal = value.toString();
+            } else {
+              strVal = value; // could be '#CYCLE', '#ERR', or text
+            }
+            rowData.push(strVal);
+          }
+          csv += rowData.join(',') + '\n';
+        }
+        document.getElementById('csv').value = csv;
+      });
+
+      window.sheet = {
+        set: function(cellId, raw) {
+          const input = document.getElementById(cellId);
+          if (!input) return;
+          const currentRaw = cells[cellId].raw;
+
+          // Remove previous dependencies
+          if (currentRaw.startsWith('=')) {
+            removeDependencies(cellId);
+          }
+
+          cells[cellId].raw = raw;
+
+          // Add new dependencies if it's a formula
+          if (raw.startsWith('=')) {
+            const refs = parseReferences(raw.substring(1));
+            addDependencies(cellId, refs);
+          } else {
+            removeDependencies(cellId);
+          }
+
+          updateCell(cellId);
+
+          // Update the displayed value in input element
+          const newValue = cells[cellId].computedValue;
+          if (input) {
+            input.value = typeof newValue === 'number' && !isNaN(newValue) 
+                          ? newValue : newValue;
+          }
+        },
+        get: function(cellId) {
+          return cells[cellId] ? cells[cellId].computedValue : '';
+        },
+        raw: function(cellId) {
+          return cells[cellId] ? cells[cellId].raw : '';
+        }
+      };
+    });
+  </script>
+</body>
+</html>

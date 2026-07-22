@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Spreadsheet</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background-color: #f4f4f9;
+        }
+
+        #spreadsheet-container {
+            display: grid;
+            /* Grid structure for headers and cells */
+            grid-template-columns: 50px repeat(10, 1fr); /* Column A (Header) + J columns */
+            grid-auto-rows: 30px; /* Row height */
+            border: 1px solid #ccc;
+            box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+            background-color: white;
+        }
+
+        /* Corner cell (empty) */
+        #spreadsheet-container > :first-child {
+            background-color: #eee;
+            border: none;
+            z-index: 0;
+        }
+
+        /* Column Headers (A, B, C...) */
+        .col-header {
+            grid-column: span 1;
+            text-align: center;
+            font-weight: bold;
+            background-color: #e9ecef;
+            border-right: 1px solid #ccc;
+            cursor: default;
+            padding: 5px 0;
+        }
+
+        /* Row Headers (1, 2, 3...) */
+        .row-header {
+            grid-row: span 1;
+            text-align: center;
+            font-weight: bold;
+            background-color: #e9ecef;
+            border-bottom: 1px solid #ccc;
+            cursor: default;
+            padding: 5px 0;
+        }
+
+        /* Cell Input Styling */
+        .cell-input {
+            grid-column: span 1;
+            grid-row: span 1;
+            border: 1px solid #ccc;
+            box-sizing: border-box;
+            padding: 0 5px;
+            font-size: 14px;
+            outline: none;
+            transition: background-color 0.1s;
+        }
+
+        /* Styling for the active/focused cell */
+        .cell-input:focus {
+            border-color: #007bff;
+            box-shadow: 0 0 3px rgba(0, 123, 255, 0.5);
+            background-color: #fff;
+        }
+
+        /* Controls Area */
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        #csv {
+            width: 95%;
+            min-height: 80px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            box-sizing: border-box;
+            font-family: monospace;
+        }
+
+        button {
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+    </style>
+</head>
+<body>
+
+    <h1>Mini Spreadsheet</h1>
+
+    <div id="spreadsheet-container">
+        <!-- Corner Placeholder (A/1) -->
+        <div></div> 
+        
+        <!-- Column Headers A-J -->
+        <div class="col-header" id="col-A">A</div>
+        <div class="col-header" id="col-B">B</div>
+        <div class="col-header" id="col-C">C</div>
+        <div class="col-header" id="col-D">D</div>
+        <div class="col-header" id="col-E">E</div>
+        <div class="col-header" id="col-F">F</div>
+        <div class="col-header" id="col-G">G</div>
+        <div class="col-header" id="col-H">H</div>
+        <div class="col-header" id="col-I">I</div>
+        <div class="col-header" id="col-J">J</div>
+
+        <!-- Grid Cells will be injected here -->
+    </div>
+
+    <div id="controls">
+        <button id="export">Export CSV</button>
+    </div>
+
+    <textarea id="csv" placeholder="CSV output will appear here..."></textarea>
+
+
+<script>
+/**
+ * Spreadsheet Core Logic
+ */
+const Sheet = (function() {
+    // State storage: raw value for every cell (e.g., "A1": "=2+3")
+    const RAW_VALUES = {}; 
+    // Computed values cache (for quick lookups)
+    const COMPUTED_VALUES = {}; 
+    // Dependency tracking: dependents[cell] = [list of cells that use 'cell']
+    const DEPENDENTS = {};
+
+    const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+    const ROWS = 10;
+
+    // --- Utility Functions ---
+
+    /** Converts column index (0-9) to letter ('A'-'J') */
+    function colIndexToLetter(index) {
+        return COLS[index];
+    }
+
+    /** Converts cell coordinates (e.g., 'A1', 'B5') to internal indices/objects */
+    function parseCoord(coord) {
+        if (!coord || typeof coord !== 'string' || !/[A-Z]\d+/.test(coord)) return null;
+        const match = coord.match(/([A-Z]+)(\d+)/);
+        if (!match) return null;
+
+        let colStr = match[1];
+        let rowNum = parseInt(match[2]);
+
+        let colIndex = 0;
+        for (let i = 0; i < colStr.length(); i++) {
+            colIndex = colIndex * 26 + (colStr.charCodeAt(i) - 'A'.charCodeAt(i));
+        }
+        // Since we only use A-J, simple index calculation is fine:
+        const colLetter = colStr[0];
+        const colIdx = COLS.indexOf(colLetter);
+
+        return { 
+            coord: coord, 
+            row: rowNum - 1, // 0-indexed
+            col: colIdx      // 0-indexed
+        };
+    }
+
+    /** Generates the unique cell ID (e.g., 'A1') */
+    function getCoord(r, c) {
+        return COLS[c] + (r + 1);
+    }
+
+    /** Gets all coordinates for the grid */
+    function getAllCoords() {
+        const coords = [];
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS.length; c++) {
+                coords.push(getCoord(r, c));
+            }
+        }
+        return coords;
+    }
+
+    /** Finds all cell references (e.g., A1, B2) in a formula string */
+    function findReferencesInFormula(formula) {
+        const regex = /([A-Z]+[0-9]+)/g;
+        let matches = [...formula.matchAll(regex)];
+        // Filter out references that are not valid coordinates (e.g., 'AA1' if we only support A-J)
+        return matches.map(m => m[0]); 
+    }
+
+    /** Clears and rebuilds the dependency graph */
+    function buildDependencyGraph() {
+        // Reset global state
+        Object.keys(DEPENDENTS).forEach(key => delete DEPENDENTS[key]);
+        const allCoords = getAllCoords();
+
+        for (const coord of allCoords) {
+            if (!RAW_VALUES[coord] || !String(RAW_VALUES[coord]).startsWith('=')) {
+                continue; // Only formulas create dependencies
+            }
+
+            const formula = RAW_VALUES[coord];
+            const references = findReferencesInFormula(formula);
+
+            for (const ref of references) {
+                // Check if the reference is a valid cell within our 10x10 grid
+                if (ref.length === 2 && COLS.includes(ref[0]) && parseInt(ref[1]) >= 1 && parseInt(ref[1]) <= ROWS) {
+                    // Add 'coord' to the list of cells dependent on 'ref'
+                    if (!DEPENDENTS[ref]) {
+                        DEPENDENTS[ref] = [];
+                    }
+                    DEPENDENTS[ref].push(coord);
+                }
+            }
+        }
+    }
+
+    /** 
+     * Calculates the value for a single cell. 
+     * Handles recursion, cycles, and evaluation.
+     * @param {string} coord - The coordinate (e.g., 'A1').
+     * @param {Set<string>} calculatingStack - Coordinates currently in the calculation path.
+     * @returns {{value: number|string, error: string}} Result object.
+     */
+    function calculateCell(coord, calculatingStack) {
+        if (calculatingStack.has(coord)) {
+            return { value: null, error: '#CYCLE' }; // Cycle detected
+        }
+
+        const rawFormula = RAW_VALUES[coord];
+        if (!rawFormula || !String(rawFormula).startsWith('=')) {
+            // Plain text or empty cell
+            return { value: isNaN(parseFloat(rawFormula) || 0) ? (rawFormula === "" ? 0 : rawFormula) : parseFloat(rawFormula), error: null };
+        }
+
+        const formula = rawFormula.substring(1); // Remove '='
+        
+        // --- Dependency Resolution and Cycle Check ---
+        
+        calculatingStack.add(coord);
+        let currentDependencies = {};
+        let needsRecalc = false;
+
+        try {
+            // 1. Find all unique cell references needed for this formula
+            const requiredRefs = [...new Set(findReferencesInFormula(formula))];
+            
+            // 2. Recursively calculate values for dependencies
+            for (const ref of requiredRefs) {
+                if (!DEPENDENTS[ref] || !DEPENDENTS[ref].includes(coord)) continue; // Optimization: only check relevant refs
+
+                let depValue = null;
+                let depError = null;
+                
+                // Check if the dependency value is already cached and valid (and not part of the current cycle)
+                if (!calculatingStack.has(ref)) {
+                    const cachedResult = COMPUTED_VALUES[ref];
+                    if (cachedResult && !['#CYCLE', '#ERR'].includes(cachedResult)) {
+                        depValue = parseFloat(cachedResult);
+                    } else {
+                        // Must recalculate dependency
+                        const result = calculateCell(ref, calculatingStack);
+                        depValue = result.value;
+                        depError = result.error;
+                    }
+                } else {
+                     // Dependency is currently being calculated -> Cycle detected (handled by the recursive call)
+                     depValue = null; 
+                     depError = '#CYCLE';
+                }
+
+                if (depError === '#CYCLE') {
+                    return { value: null, error: '#CYCLE' };
+                } else if (typeof depValue !== 'number') {
+                    // If dependency is text or invalid number for calculation
+                    depValue = 0; // Treat non-numeric dependencies as 0 in the formula context
+                }
+
+                currentDependencies[ref] = depValue;
+            }
+
+            // 3. Substitute values into the formula string
+            let substitutedFormula = formula;
+            for (const ref in currentDependencies) {
+                substitutedFormula = substitutedFormula.replace(new RegExp(`\\b${ref}\\b`, 'g'), currentDependencies[ref]);
+            }
+
+            // 4. Evaluate the resulting pure math expression
+            if (!substitutedFormula) {
+                 return { value: null, error: '#ERR' }; // Should not happen if formula starts with =
+            }
+            
+            const resultValue = eval(substitutedFormula);
+            
+            // Handle potential NaN results from bad math operations (e.g., division by zero handled by JS)
+            if (isNaN(resultValue)) {
+                return { value: null, error: '#ERR' };
+            }
+
+            // Success
+            const finalValue = parseFloat(resultValue);
+            COMPUTED_VALUES[coord] = finalValue;
+            return { value: finalValue, error: null };
+
+        } catch (e) {
+            console.error(`Calculation error for ${coord}:`, e);
+            // Syntax or runtime error during evaluation
+            COMPUTED_VALUES[coord] = null; // Clear cache on failure
+            return { value: null, error: '#ERR' };
+        } finally {
+            calculatingStack.delete(coord);
+        }
+    }
+
+    /** 
+     * Main public function to update a cell and trigger recalculations. 
+     * @param {string} coord - The coordinate being set (e.g., 'A1').
+     * @param {string} rawText - The new raw text content.
+     */
+    function set(coord, rawText) {
+        if (!COLS.includes(coord[0]) || !/^\d+$/.test(coord.substring(1))) return;
+
+        // 1. Update state
+        RAW_VALUES[coord] = String(rawText);
+        COMPUTED_VALUES[coord] = null; // Invalidate cache for this cell
+
+        // 2. Rebuild dependency graph (expensive, but necessary after any change)
+        buildDependencyGraph();
+
+        // 3. Recalculate the changed cell and all its dependents
+        recalculate(coord);
+    }
+
+    /** 
+     * Forces recalculation for a specific coordinate. 
+     * This is used internally by set() or when initializing.
+     */
+    function recalculate(startCoord) {
+        const queue = [startCoord];
+        const processed = new Set();
+        const cycleStack = new Set();
+
+        // Use BFS/DFS approach to ensure all dependents are updated, respecting dependencies order
+        let iterationCount = 0;
+        const maxIterations = Object.keys(RAW_VALUES).length * 2; // Safety break
+
+        while (queue.length > 0 && iterationCount < maxIterations) {
+            const currentCoord = queue.shift();
+            if (!currentCoord || processed.has(currentCoord)) continue;
+
+            // Calculate the value for the current cell
+            const result = calculateCell(currentCoord, cycleStack);
+            
+            // Update UI and cache
+            updateUIForCell(currentCoord, result);
+            processed.add(currentCoord);
+
+            // Add all cells that depend on this one to the queue for next iteration
+            if (DEPENDENTS[currentCoord]) {
+                for (const dependent of DEPENDENTS[currentCoord]) {
+                    if (!processed.has(dependent)) {
+                        queue.push(dependent);
+                    }
+                }
+            }
+            iterationCount++;
+        }
+    }
+
+    /** 
+     * Updates the visual representation and internal cache for a cell. 
+     */
+    function updateUIForCell(coord, result) {
+        const inputElement = document.getElementById(`cell-${coord}`);
+        if (!inputElement) return;
+
+        // Update computed value display
+        let displayedValue;
+        if (result && result.error === '#CYCLE') {
+            displayedValue = '#CYCLE';
+        } else if (result && result.error === null) {
+             // Format numbers nicely, but keep text as is
+            const val = parseFloat(result.value);
+            displayedValue = isNaN(val) ? String(result.value) : val.toString();
+        } else {
+            displayedValue = result.error || ''; // #ERR or empty
+        }
+
+        // Update the input element's display value and raw content
+        inputElement.value = displayedValue;
+        COMPUTED_VALUES[coord] = parseFloat(displayedValue) || (isNaN(parseFloat(displayedValue)) ? null : parseFloat(displayedValue));
+    }
+
+
+    // --- Public API Methods ---
+
+    /** 
+     * Sets the raw text content of a cell. Used by set() and window.sheet.set().
+     */
+    function internalSetRaw(coord, rawText) {
+        if (!RAW_VALUES[coord] && !String(rawText).startsWith('=')) {
+             // If setting empty/text initially, ensure it's recorded
+            RAW_VALUES[coord] = String(rawText);
+        } else if (typeof rawText === 'string') {
+            RAW_VALUES[coord] = rawText;
+        }
+
+        const result = calculateCell(coord, new Set());
+        updateUIForCell(coord, result);
+    }
+
+    /** 
+     * Gets the displayed computed value of a cell. Used by window.sheet.get().
+     */
+    function getComputedValue(coord) {
+        // Force recalculation if necessary to ensure cache is fresh
+        if (!COMPUTED_VALUES[coord]) {
+            recalculate(coord); 
+        }
+        const inputElement = document.getElementById(`cell-${coord}`);
+        return inputElement ? inputElement.value : '';
+    }
+
+    /** 
+     * Gets the raw formula/text of a cell. Used by window.sheet.raw().
+     */
+    function getRawValue(coord) {
+        return RAW_VALUES[coord] || "";
+    }
+
+
+    // --- Initialization and Event Handling ---
+
+    function initializeGrid() {
+        const container = document.getElementById('spreadsheet-container');
+        let rowCounter = 1;
+
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS.length; c++) {
+                const coord = getCoord(r, c);
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'cell-input';
+                input.id = `cell-${coord}`;
+                input.setAttribute('data-coord', coord);
+
+                // Add to the grid structure (A1 is at index 1, 0)
+                container.appendChild(input);
+            }
+        }
+
+        // Attach event listeners to all cells
+        document.querySelectorAll('.cell-input').forEach(input => {
+            const coord = input.getAttribute('data-coord');
+
+            // Handle blur (commit change)
+            input.addEventListener('blur', function() {
+                let rawText = this.value;
+                internalSetRaw(coord, rawText);
+            });
+
+            // Handle Enter key press (commit change)
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault(); // Prevent default form submission behavior
+                    let rawText = this.value;
+                    internalSetRaw(coord, rawText);
+
+                    // Optional: Move focus down one cell or to the next row/column
+                    const currentRow = r + 1;
+                    const currentCol = c + 1;
+                    if (currentRow < ROWS) {
+                        const nextCoord = getCoord(r + 1, c);
+                        document.getElementById(`cell-${nextCoord}`).focus();
+                    } else if (currentCol < COLS.length - 1) {
+                         const nextCoord = getCoord(r, c + 1);
+                         document.getElementById(`cell-${nextCoord}`).focus();
+                    }
+                }
+            });
+
+             // Handle click/focus to ensure the raw value is visible if it's a formula
+            input.addEventListener('focus', function() {
+                 const coord = this.getAttribute('data-coord');
+                 if (RAW_VALUES[coord] && String(RAW_VALUES[coord]).startsWith('=') && !this.value.startsWith('=')) {
+                     // If the raw value is a formula, ensure it's displayed when focused
+                    this.value = RAW_VALUES[coord];
+                 } else if (!RAW_VALUES[coord] && this.value !== '') {
+                      // If no raw value exists but user typed something, keep it simple for now.
+                 }
+            });
+
+        });
+    }
+
+
+    // --- Public API Implementation (for grading harness) ---
+
+    /** 
+     * Simulates setting a cell's content via the external API.
+     */
+    function setAPI(coord, rawText) {
+        internalSetRaw(coord, rawText);
+    }
+
+    /** 
+     * Retrieves the displayed value of a cell via the external API.
+     */
+    function getAPI(coord) {
+        return getComputedValue(coord);
+    }
+
+    /** 
+     * Retrieves the raw formula/text of a cell via the external API.
+     */
+    function rawAPI(coord) {
+        return getRawValue(coord);
+    }
+
+
+    // --- Export Functionality ---
+    function exportCSV() {
+        const coords = getAllCoords();
+        let csvData = [];
+
+        for (const coord of coords) {
+            // Get the computed value for CSV output
+            const result = calculateCell(coord, new Set()); 
+            let displayValue;
+            if (result.error === '#CYCLE') {
+                displayValue = '#CYCLE';
+            } else if (typeof result.value !== 'number' && result.value !== null) {
+                 // Handle plain text that might not be numeric
+                displayValue = String(result.value);
+            } else {
+                displayValue = parseFloat(result.value).toString();
+            }
+            csvData.push(displayValue);
+        }
+
+        document.getElementById('csv').value = csvData.join(',');
+    }
+
+
+    // --- Initialization Call ---
+    initializeGrid();
+    
+    // Expose the API and internal functions globally for testing/grading
+    window.sheet = {
+        set: setAPI,
+        get: getAPI,
+        raw: rawAPI
+    };
+
+    return { 
+        exportCSV: exportCSV 
+    };
+
+})();
+
+
+// --- Event Listeners Setup ---
+
+document.getElementById('export').addEventListener('click', () => {
+    Sheet.exportCSV();
+});
+
+</script>
+</body>
+</html>

@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Snake Game</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background-color: #1e1e2f; /* Dark background */
+            color: #e0e0ff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        h1 {
+            color: #6a89cc;
+            margin-bottom: 10px;
+        }
+
+        #game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            padding: 20px;
+            background-color: #2a2a40;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        }
+
+        #score {
+            font-size: 1.8em;
+            margin-bottom: 10px;
+            color: #ffcc66; /* Gold/Yellow for score */
+        }
+
+        /* Canvas styling */
+        #snake {
+            border: 5px solid #4a4e7c;
+            background-color: #121220;
+            box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.5);
+        }
+
+        /* Button layout */
+        #controls {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 1em;
+            cursor: pointer;
+            border: none;
+            border-radius: 8px;
+            transition: background-color 0.2s, transform 0.1s;
+            box-shadow: 0 3px #1a1a25;
+        }
+
+        button:active {
+            transform: translateY(2px);
+            box-shadow: none;
+        }
+
+        #start {
+            background-color: #4CAF50; /* Green */
+            color: white;
+        }
+
+        #pause {
+            background-color: #ff9800; /* Orange */
+            color: white;
+        }
+
+        #reset {
+            background-color: #f44336; /* Red */
+            color: white;
+        }
+
+        /* Game Over Overlay */
+        .game-over-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            font-size: 2em;
+            color: #ff6b6b;
+            text-align: center;
+        }
+
+    </style>
+</head>
+<body>
+
+    <h1>The Snake Game</h1>
+
+    <div id="game-container">
+        <div id="score">Score: 0</div>
+        <canvas id="snake" width="400" height="400"></canvas>
+        <div id="controls">
+            <button id="start">Start Game</button>
+            <button id="pause">Pause</button>
+            <button id="reset">Reset</button>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration Constants ---
+        const CANVAS_SIZE = 400; // CSS pixels
+        const GRID_SIZE = 20;    // Cells (must be >= 10)
+        const CELL_PIXEL_SIZE = CANVAS_SIZE / GRID_SIZE;
+
+        // Directions mapping for easier handling
+        const DIRECTIONS = {
+            'up': { x: 0, y: -1 },
+            'down': { x: 0, y: 1 },
+            'left': { x: -1, y: 0 },
+            'right': { x: 1, y: 0 }
+        };
+
+        // --- Game State Variables (Private Scope) ---
+        let gameInterval = null;
+        let isPaused = true;
+        let isRunning = false;
+
+        let snakeBody = []; // Array of [x, y] coordinates
+        let currentDirection = 'right';
+        let nextDirection = 'right'; // Buffer for input handling (prevents instant reversal)
+        let foodPosition = null;
+        let scoreValue = 0;
+
+        // --- DOM Elements and Canvas Setup ---
+        const canvas = document.getElementById('snake');
+        const ctx = canvas.getContext('2d');
+        const scoreElement = document.getElementById('score');
+
+        // Set the actual dimensions (though CSS handles display, we use JS for drawing context)
+        canvas.width = CANVAS_SIZE;
+        canvas.height = CANVAS_SIZE;
+
+
+        /**
+         * @typedef {Object} GameAPI
+         * @property {number} w - Board width in cells.
+         * @property {number} h - Board height in cells.
+         * @property {function(): void} reset - Initializes a new game state.
+         * @property {function(): void} tick - Advances the game by one step.
+         * @property {function(string): void} setDir - Queues a turn direction ('up'|'down'|'left'|'right').
+         * @property {[number, number]} setFood - Places food at (x, y).
+         * @property {Array<[number, number]>} snake - Returns the current snake body.
+         * @property {[number, number]} food - Returns the food position.
+         * @property {function(): boolean} alive - Checks if the game is currently running and valid.
+         * @property {function(): number} score - Returns the current score.
+         */
+
+        /**
+         * The public API object exposed on window.game.
+         * This encapsulates all game logic and state access for grading purposes.
+         */
+        window.game = {
+            w: GRID_SIZE,
+            h: GRID_SIZE,
+
+            reset: function() {
+                // Stop any running interval
+                if (gameInterval) clearInterval(gameInterval);
+                gameInterval = null;
+                isRunning = false;
+                isPaused = true;
+
+                // Initial State Setup
+                scoreValue = 0;
+                snakeBody = [
+                    [10, 10], // Head
+                    [9, 10],  // Body segment 2
+                    [8, 10]   // Body segment 3 (Length >= 3)
+                ];
+                currentDirection = 'right';
+                nextDirection = 'right';
+
+                this.setFood(Math.floor(Math.random() * GRID_SIZE), Math.floor(Math.random() * GRID_SIZE));
+                this.updateScoreDisplay();
+                this.drawGame(); // Initial draw
+            },
+
+            tick: function() {
+                if (!this.alive()) return;
+
+                // 1. Determine the actual direction to use (respecting reversal rules)
+                const newDir = this.getEffectiveDirection(nextDirection);
+                currentDirection = newDir;
+                nextDirection = currentDirection; // Update buffer for next input
+
+                // 2. Calculate new head position
+                const head = snakeBody[0];
+                const dirVector = DIRECTIONS[newDir];
+                let newHeadX = head[0] + dirVector.x;
+                let newHeadY = head[1] + dirVector.y;
+
+                // 3. Collision Detection
+                if (this.checkCollision(newHeadX, newHeadY)) {
+                    this.gameOver();
+                    return;
+                }
+
+                // 4. Movement Logic
+                const ateFood = (newHeadX === foodPosition[0] && newHeadY === foodPosition[1]);
+
+                // Add the new head position
+                snakeBody.unshift([newHeadX, newHeadY]);
+
+                if (!ateFood) {
+                    // If no food was eaten, remove the tail segment
+                    snakeBody.pop();
+                } else {
+                    // Food eaten: Grow snake and generate new food
+                    scoreValue += 10;
+                    this.setFood(Math.floor(Math.random() * GRID_SIZE), Math.floor(Math.random() * GRID_SIZE));
+                    this.updateScoreDisplay();
+                }
+
+                // 5. Redraw and Advance
+                this.drawGame();
+            },
+
+            /**
+             * Queues a turn direction, ignoring immediate 180° reversals.
+             * @param {string} dir - 'up', 'down', 'left', or 'right'.
+             */
+            setDir: function(dir) {
+                if (!this.alive() || isPaused) return;
+
+                const currentVec = DIRECTIONS[currentDirection];
+                const newVec = DIRECTIONS[dir];
+
+                // Check for 180 degree reversal (e.g., moving right, trying to set left)
+                // This happens if the sum of directional vectors is zero.
+                if (Math.abs(currentVec.x + newVec.x) === Math.abs(newVec.x) &&
+                    Math.abs(currentVec.y + newVec.y) === Math.abs(newVec.y)) {
+                    // This check is slightly complex, simpler: if the proposed move vector 
+                    // exactly opposes the current direction vector, ignore it.
+                    if (currentVec.x !== 0 && newVec.x * currentVec.x < 0) return;
+                    if (currentVec.y !== 0 && newVec.y * currentVec.y < 0) return;
+                }
+
+                // Update the buffered direction
+                nextDirection = dir;
+            },
+
+            /**
+             * Places food at a random, unoccupied cell.
+             * @param {number} x - X coordinate (cell index).
+             * @param {number} y - Y coordinate (cell index).
+             */
+            setFood: function(x, y) {
+                // Ensure the new food spot is not on the snake body
+                let validSpot = false;
+                for (const segment of snakeBody) {
+                    if (segment[0] === x && segment[1] === y) {
+                        validSpot = true;
+                        break;
+                    }
+                }
+
+                // If it lands on the snake, recursively find a new spot
+                while (validSpot) {
+                    x = Math.floor(Math.random() * GRID_SIZE);
+                    y = Math.floor(Math.random() * GRID_SIZE);
+                    validSpot = false;
+                    for (const segment of snakeBody) {
+                        if (segment[0] === x && segment[1] === y) {
+                            validSpot = true;
+                            break;
+                        }
+                    }
+                }
+
+                foodPosition = [x, y];
+            },
+
+            /**
+             * Returns the current snake body coordinates.
+             * @returns {Array<[number, number]>} Head first array of [x,y].
+             */
+            snake: function() {
+                return [...snakeBody]; // Return a copy
+            },
+
+            /**
+             * Returns the food position.
+             * @returns {[number, number]} [x, y] coordinates.
+             */
+            food: function() {
+                return foodPosition ? [...foodPosition] : null;
+            },
+
+            /**
+             * Checks if the game is currently running and valid (not Game Over).
+             * @returns {boolean} True if alive, false otherwise.
+             */
+            alive: function() {
+                // If we have a game interval running, it means we are actively playing.
+                return !!gameInterval && !isGameOver;
+            },
+
+            /**
+             * Returns the current score.
+             * @returns {number} The accumulated score.
+             */
+            score: function() {
+                return scoreValue;
+            },
+
+            // --- Internal Helper Methods (Used by API) ---
+
+            getEffectiveDirection: function(bufferedDir) {
+                if (!bufferedDir) return currentDirection; // Should not happen if called correctly
+
+                const proposedVec = DIRECTIONS[bufferedDir];
+                const currentVec = DIRECTIONS[currentDirection];
+
+                // Check for 180 degree reversal (e.g., moving right, trying to set left)
+                // If the new move vector is exactly opposite of the current direction, ignore it.
+                if ((proposedVec.x === -currentVec.x && proposedVec.y === -currentVec.y)) {
+                    return currentDirection; // Keep heading
+                }
+
+                return bufferedDir;
+            },
+
+            checkCollision: function(newX, newY) {
+                // 1. Wall Collision Check (Boundary check)
+                if (newX < 0 || newX >= GRID_SIZE || newY < 0 || newY >= GRID_SIZE) {
+                    return true; // Hit wall
+                }
+
+                // 2. Self-Collision Check (Check against all body segments except the potential tail segment)
+                for (let i = 1; i < snakeBody.length; i++) {
+                    const segment = snakeBody[i];
+                    if (segment[0] === newX && segment[1] === newY) {
+                        return true; // Hit self
+                    }
+                }
+
+                return false;
+            },
+
+            updateScoreDisplay: function() {
+                scoreElement.textContent = `Score: ${this.scoreValue}`;
+            },
+
+            gameOver: function() {
+                clearInterval(gameInterval);
+                gameInterval = null;
+                isRunning = false;
+                isPaused = true;
+                console.log("Game Over!");
+                this.drawGameOver();
+            }
+        };
+
+
+        // --- Game Loop and Event Handlers ---
+
+        /**
+         * Draws the entire game state (background, food, snake).
+         */
+        function drawGame() {
+            const cellSize = CANVAS_SIZE / GRID_SIZE;
+
+            // 1. Clear Canvas (Background)
+            ctx.fillStyle = '#121220'; // Dark background color matching grid
+            ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+            // 2. Draw Food
+            if (foodPosition) {
+                const [fx, fy] = foodPosition;
+                ctx.fillStyle = '#ff6b6b'; // Red/Pink for food
+                ctx.fillRect(fx * cellSize, fy * cellSize, cellSize - 1, cellSize - 1);
+            }
+
+            // 3. Draw Snake
+            for (let i = 0; i < snakeBody.length; i++) {
+                const [sx, sy] = snakeBody[i];
+                if (i === 0) {
+                    // Head color
+                    ctx.fillStyle = '#6a89cc'; // Blue/Purple for head
+                } else if (i < snakeBody.length - 1) {
+                    // Body segment color
+                    ctx.fillStyle = '#4CAF50'; // Green for body
+                } else {
+                    // Tail color (optional, but good practice)
+                    ctx.fillStyle = '#387d42';
+                }
+
+                // Draw the cell, leaving a small gap for visual separation
+                ctx.fillRect(sx * cellSize, sy * cellSize, cellSize - 1, cellSize - 1);
+            }
+        }
+
+        /**
+         * Handles Game Over screen display.
+         */
+        function drawGameOver() {
+            const overlay = document.createElement('div');
+            overlay.className = 'game-over-overlay';
+            overlay.innerHTML = `
+                <h2>GAME OVER!</h2>
+                <p>Final Score: ${window.game.score()}</p>
+                <button id="restart-btn" style="margin-top: 20px; background-color: #6a89cc;">Play Again</button>
+            `;
+            document.getElementById('game-container').appendChild(overlay);
+
+            // Attach event listener to the dynamically created button
+            document.getElementById('restart-btn').onclick = () => {
+                window.game.reset();
+                startGameLoop();
+            };
+        }
+
+
+        /**
+         * Main game loop controller. Advances the state and redraws.
+         */
+        function gameTick() {
+            if (window.game.alive()) {
+                window.game.tick();
+            } else if (!isPaused && !window.game.alive()) {
+                 // If tick was called but collision happened, handle Game Over display
+                 drawGameOver();
+            }
+        }
+
+        /**
+         * Starts or resumes the game loop interval.
+         */
+        function startGameLoop() {
+            if (gameInterval) clearInterval(gameInterval);
+            // Set a reasonable speed (e.g., 100ms per tick)
+            gameInterval = setInterval(gameTick, 100);
+            isRunning = true;
+            isPaused = false;
+        }
+
+        /**
+         * Toggles the pause state and updates controls.
+         */
+        function togglePause() {
+            if (!window.game.alive()) return;
+
+            if (isPaused) {
+                startGameLoop();
+            } else {
+                clearInterval(gameInterval);
+                gameInterval = null;
+                isRunning = false;
+                isPaused = true;
+            }
+        }
+
+
+        // --- Initialization and Event Listeners ---
+
+        document.getElementById('start').addEventListener('click', () => {
+            window.game.reset(); // Ensure clean start first
+            startGameLoop();
+        });
+
+        document.getElementById('pause').addEventListener('click', togglePause);
+        document.getElementById('reset').addEventListener('click', () => {
+            if (gameInterval) clearInterval(gameInterval);
+            gameInterval = null;
+            window.game.reset();
+            isRunning = false;
+            isPaused = true;
+        });
+
+        // Keyboard Controls
+        document.addEventListener('keydown', (e) => {
+            let direction = null;
+            switch (e.key) {
+                case 'ArrowUp':
+                case 'w':
+                    direction = 'up';
+                    break;
+                case 'ArrowDown':
+                case 's':
+                    direction = 'down';
+                    break;
+                case 'ArrowLeft':
+                case 'a':
+                    direction = 'left';
+                    break;
+                case 'ArrowRight':
+                case 'd':
+                    direction = 'right';
+                    break;
+                case 'p': // Pause key
+                    togglePause();
+                    return;
+            }
+
+            if (direction) {
+                e.preventDefault();
+                window.game.setDir(direction);
+            }
+        });
+
+
+        // Initial Setup: Reset the game state when the page loads, but keep it paused until 'Start' is clicked.
+        window.onload = () => {
+            window.game.reset();
+        };
+
+    </script>
+</body>
+</html>

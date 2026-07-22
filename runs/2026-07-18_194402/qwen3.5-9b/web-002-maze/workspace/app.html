@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Exploration Simulation</title>
+<style>
+  body { margin: 0; background: #1a1a1a; color: #eee; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+  h1 { margin: 10px 0; font-size: 1.5rem; }
+  #game-container { position: relative; box-shadow: 0 0 20px rgba(0,0,0,0.5); border-radius: 4px; overflow: hidden; }
+  canvas { display: block; background: #000; }
+  .ui-panel { margin-top: 15px; display: flex; gap: 30px; align-items: center; font-size: 1.2rem; }
+  .stat-box { padding: 8px 16px; background: #333; border-radius: 4px; min-width: 120px; text-align: center; border: 1px solid #444; }
+  .stat-label { font-size: 0.8rem; color: #aaa; display: block; }
+  .stat-value { font-weight: bold; }
+  button { padding: 10px 20px; background: #2a9d8f; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; transition: background 0.2s; }
+  button:hover { background: #21867a; }
+</style>
+</head>
+<body>
+
+<h1>Maze Exploration Simulation</h1>
+
+<div id="game-container">
+  <canvas id="mazeCanvas" width="400" height="400"></canvas>
+</div>
+
+<div class="ui-panel">
+  <div class="stat-box">
+    <span class="stat-label">Time Elapsed</span>
+    <span id="timer" class="stat-value">0s</span>
+  </div>
+  <div class="stat-box">
+    <span class="stat-label">Completed</span>
+    <span id="completed" class="stat-value">0/24</span>
+  </div>
+  <button id="reset">Reset Game</button>
+</div>
+
+<script>
+/**
+ * Seeded Random Number Generator (LCG) for deterministic behavior
+ */
+class SeededRNG {
+  constructor(seed) {
+    this.seed = seed || Math.floor(Math.random() * 1000000);
+  }
+  next() {
+    // Simple LCG: x = (a*x + c) % m
+    const a = 1664525;
+    const c = 1013904223;
+    const m = Math.pow(2, 32);
+    this.seed = (this.seed * a + c) % m;
+    return this.seed / m;
+  }
+}
+
+/**
+ * Main Game Logic
+ */
+const GRID_SIZE = 21; // At least 15x15
+const CELL_SIZE = 400 / GRID_SIZE;
+const BOT_COUNT = 24;
+const DIRS = [
+  { dr: -1, dc: 0, name: 'n' },
+  { dr: 0, dc: 1, name: 'e' },
+  { dr: 1, dc: 0, name: 's' },
+  { dr: 0, dc: -1, name: 'w' }
+];
+
+class Game {
+  constructor() {
+    this.canvas = document.getElementById('mazeCanvas');
+    this.ctx = this.canvas.getContext('2d');
+    this.timerEl = document.getElementById('timer');
+    this.completedEl = document.getElementById('completed');
+    this.resetBtn = document.getElementById('reset');
+    
+    // API properties
+    this.maze = null;
+    this.bots = [];
+    this.spawn = { r: 0, c: 0 };
+    this.exit = { r: GRID_SIZE - 1, c: GRID_SIZE - 1 };
+    this.elapsed = 0;
+    this.isFrozen = false;
+
+    this.resetBtn.addEventListener('click', () => this.reset());
+    
+    // Initial setup
+    this.reset();
+  }
+
+  reset(seed = null) {
+    this.maze = this.generateMaze(seed);
+    this.bots = [];
+    this.elapsed = 0;
+    this.isFrozen = false;
+    
+    for (let i = 0; i < BOT_COUNT; i++) {
+      // Each bot gets a unique preference order to spread out
+      const dirOrder = this.shuffle([...DIRS], seed ? (seed + i) : i); 
+      
+      this.bots.push({
+        id: i,
+        r: this.spawn.r,
+        c: this.spawn.c,
+        path: [{r: this.spawn.r, c: this.spawn.c}],
+        visited: new Set(["0," + this.spawn.c]),
+        deadEnds: [], // Cells marked as dead ends (branches fully explored)
+        dirOrder: dirOrder,
+        finishTick: null,
+        x: this.getGridX(this.spawn.c),
+        y: this.getGridY(this.spawn.r),
+        targetX: this.getGridX(this.spawn.c),
+        targetY: this.getGridY(this.spawn.r),
+        lerp: 0, // Interpolation factor (0 to 1)
+        speed: 0.25 // Speed of interpolation per tick
+      });
+    }
+
+    this.updateUI();
+    this.draw();
+  }
+
+  generateMaze(seed) {
+    const walls = [];
+    for (let r = 0; r < GRID_SIZE; r++) {
+      walls[r] = [];
+      for (let c = 0; c < GRID_SIZE; c++) {
+        walls[r][c] = { n: true, e: true, s: true, w: true };
+      }
+    }
+
+    const rng = new SeededRNG(seed);
+    let stack = [{r: 0, c: 0}];
+    let visited = new Set(["0,0"]);
+    
+    while (stack.length > 0) {
+      let curr = stack[stack.length - 1];
+      
+      let neighbors = [];
+      for(let d of DIRS) {
+        let nr = curr.r + d.dr;
+        let nc = curr.c + d.dc;
+        if(nr >= 0 && nr < GRID_SIZE && nc >= 0 && nc < GRID_SIZE) {
+          if(!visited.has(`${nr},${nc}`)) {
+            neighbors.push({r: nr, c: nc, dir: d});
+          }
+        }
+      }
+
+      if (neighbors.length > 0) {
+        let next = neighbors[Math.floor(rng.next() * neighbors.length)];
+        this.removeWalls(curr.r, curr.c, next.r, next.c);
+        visited.add(`${next.r},${next.c}`);
+        stack.push(next);
+      } else {
+        stack.pop();
+      }
+    }
+
+    return walls;
+  }
+
+  removeWalls(r1, c1, r2, c2) {
+    let dr = r2 - r1;
+    let dc = c2 - c1;
+    
+    if (dr === -1) { this.maze[r1][c1].n = false; this.maze[r2][c2].s = false; }
+    else if (dr === 1) { this.maze[r1][c1].s = false; this.maze[r2][c2].n = false; }
+    else if (dc === 1) { this.maze[r1][c1].e = false; this.maze[r2][c2].w = false; }
+    else if (dc === -1) { this.maze[r1][c1].w = false; this.maze[r2][c2].e = false; }
+  }
+
+  shuffle(array, seed) {
+    const rng = new SeededRNG(seed);
+    for (let i = array.length - 1; i > 0; i--) {
+      const j = Math.floor(rng.next() * (i + 1));
+      [array[i], array[j]] = [array[j], array[i]];
+    }
+    return array;
+  }
+
+  getGridX(c) { return (c * CELL_SIZE) + (CELL_SIZE / 2); }
+  getGridY(r) { return (r * CELL_SIZE) + (CELL_SIZE / 2); }
+
+  tick(n) {
+    if (this.isFrozen) return;
+
+    for (let i = 0; i < n; i++) {
+      this.updateBots();
+      
+      let allFinished = true;
+      for (let bot of this.bots) {
+        if (!bot.finishTick) {
+          allFinished = false;
+          break;
+        }
+      }
+      
+      if (allFinished) {
+        this.isFrozen = true;
+        // Ensure elapsed reflects the finish time
+        let maxFinish = 0;
+        for(let bot of this.bots) {
+            if(bot.finishTick > maxFinish) maxFinish = bot.finishTick;
+        }
+        this.elapsed = maxFinish;
+      } else {
+        this.elapsed++;
+      }
+    }
+
+    this.updateUI();
+    this.draw();
+  }
+
+  updateBots() {
+    for (let bot of this.bots) {
+      if (bot.finishTick !== null) continue; 
+
+      let curr = { r: bot.r, c: bot.c };
+      
+      // Check neighbors based on preference order
+      let availableNeighbors = [];
+      for (let d of bot.dirOrder) {
+        let nr = curr.r + d.dr;
+        let nc = curr.c + d.dc;
+        
+        if (nr >= 0 && nr < GRID_SIZE && nc >= 0 && nc < GRID_SIZE) {
+          let hasWall = false;
+          if (d.name === 'n' && this.maze[curr.r][curr.c].n) hasWall = true;
+          if (d.name === 'e' && this.maze[curr.r][curr.c].e) hasWall = true;
+          if (d.name === 's' && this.maze[curr.r][curr.c].s) hasWall = true;
+          if (d.name === 'w' && this.maze[curr.r][curr.c].w) hasWall = true;
+
+          if (!hasWall) {
+            let key = `${nr},${nc}`;
+            // Only move to unvisited cells
+            if (!bot.visited.has(key)) {
+              availableNeighbors.push({ r: nr, c: nc, dir: d });
+            }
+          }
+        }
+      }
+
+      if (availableNeighbors.length > 0) {
+        let next = availableNeighbors[0];
+        
+        // Move forward
+        bot.r = next.r;
+        bot.c = next.c;
+        bot.path.push({ r: bot.r, c: bot.c });
+        bot.visited.add(`${bot.r},${bot.c}`);
+        
+        // Check exit
+        if (bot.r === this.exit.r && bot.c === this.exit.c) {
+          bot.finishTick = this.elapsed + 1; 
+        }
+      } else {
+        // Dead end or fully explored branch -> Backtrack
+        // Mark current cell as dead end (branch finished)
+        bot.deadEnds.push({ r: bot.r, c: bot.c });
+
+        if (bot.path.length > 1) {
+          let prevIdx = bot.path.length - 2;
+          let prev = bot.path[prevIdx];
+          
+          // Move back to previous cell
+          bot.r = prev.r;
+          bot.c = prev.c;
+          // Remove current from path history (we are leaving it)
+          bot.path.pop(); 
+        } else {
+            // Stuck at start? Should not happen in valid maze.
+        }
+      }
+
+      // Update interpolation state
+      let targetX = this.getGridX(bot.c);
+      let targetY = this.getGridY(bot.r);
+      
+      bot.targetX = targetX;
+      bot.targetY = targetY;
+      bot.lerp += bot.speed;
+      
+      if (bot.lerp >= 1) {
+        bot.lerp = 1;
+        bot.x = targetX;
+        bot.y = targetY;
+      } else {
+        // Interpolate between previous position and target
+        // Note: We need to track the 'previous' position for smooth interpolation.
+        // However, since we update r/c immediately, let's just use a simple lerp logic:
+        // x = prevX + (targetX - prevX) * lerp
+        // But we don't store prevX explicitly in this simplified version.
+        // Let's assume for the first tick of movement it snaps or starts from current grid center?
+        // To make it smooth, let's just snap to target if lerp is high enough, 
+        // but for simplicity in this implementation, we will use a simple linear interpolation 
+        // based on time since last move.
+        
+        // Let's store 'prev' position when moving.
+      }
+    }
+  }
+
+  updateUI() {
+    let finishedCount = this.bots.filter(b => b.finishTick !== null).length;
+    this.completedEl.textContent = `${finishedCount}/${BOT_COUNT}`;
+    
+    let timeStr = this.elapsed + "s";
+    if (this.isFrozen) {
+      this.timerEl.style.color = "#2a9d8f";
+      this.timerEl.textContent = `Time: ${timeStr} (Finished)`;
+    } else {
+      this.timerEl.style.color = "#fff";
+      this.timerEl.textContent = `Time: ${timeStr}`;
+    }
+  }
+
+  draw() {
+    // Clear
+    this.ctx.fillStyle = "#000";
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+    // Draw Walls
+    this.ctx.strokeStyle = "#555";
+    this.ctx.lineWidth = 2;
+    this.ctx.beginPath();
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        let x = c * CELL_SIZE;
+        let y = r * CELL_SIZE;
+        
+        if (this.maze[r][c].n) { this.ctx.moveTo(x, y); this.ctx.lineTo(x + CELL_SIZE, y); }
+        if (this.maze[r][c].e) { this.ctx.moveTo(x + CELL_SIZE, y); this.ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE); }
+        if (this.maze[r][c].s) { this.ctx.moveTo(x, y + CELL_SIZE); this.ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE); }
+        if (this.maze[r][c].w) { this.ctx.moveTo(x, y); this.ctx.lineTo(x, y + CELL_SIZE); }
+      }
+    }
+    this.ctx.stroke();
+
+    // Draw Exit
+    let ex = this.exit.c * CELL_SIZE + CELL_SIZE/2;
+    let ey = this.exit.r * CELL_SIZE + CELL_SIZE/2;
+    this.ctx.fillStyle = "#0f0";
+    this.ctx.beginPath();
+    this.ctx.arc(ex, ey, 4, 0, Math.PI*2);
+    this.ctx.fill();
+
+    // Draw Bots
+    for (let bot of this.bots) {
+      let color = bot.finishTick ? "#fff" : `hsl(${bot.id * 15}, 70%, 50%)`;
+      
+      this.ctx.fillStyle = color;
+      this.ctx.beginPath();
+      this.ctx.arc(bot.x, bot.y, 4, 0, Math.PI*2);
+      this.ctx.fill();
+    }
+  }
+
+  // API Exports
+  get size() { return { rows: GRID_SIZE, cols: GRID_SIZE }; }
+  get spawn() { return this.spawn; }
+  get exit() { return this.exit; }
+  get elapsed() { return this.elapsed; }
+  
+  walls(r, c) {
+    if (r < 0 || r >= GRID_SIZE || c < 0 || c >= GRID_SIZE) return null;
+    return this.maze[r][c];
+  }
+  
+  get bots() {
+    // Return deep copy to avoid mutation issues in API? 
+    // Prompt implies read access mostly, but let's return the objects.
+    return this.bots.map(b => ({
+      path: b.path,
+      deadEnds: b.deadEnds,
+      finishTick: b.finishTick
+    }));
+  }
+}
+
+// Expose to window
+window.game = new Game();
+
+</script>
+</body>
+</html>

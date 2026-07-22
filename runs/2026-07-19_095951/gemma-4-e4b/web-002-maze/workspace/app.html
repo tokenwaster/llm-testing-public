@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Bot Maze Explorer</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f4f4f9;
+            padding: 20px;
+        }
+        #game-container {
+            display: flex;
+            gap: 30px;
+            margin-top: 20px;
+        }
+        canvas {
+            border: 5px solid #333;
+            background-color: #fff;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        #controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            width: 300px;
+        }
+        .info-panel {
+            background: #e9e9ff;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+        h2 {
+            margin-top: 0;
+            color: #333;
+        }
+        button {
+            padding: 10px 15px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.2s;
+        }
+        #reset {
+            background-color: #4CAF50;
+            color: white;
+        }
+        #reset:hover {
+            background-color: #45a049;
+        }
+        .status-item {
+            margin-bottom: 10px;
+        }
+        .status-item strong {
+            display: inline-block;
+            width: 120px;
+            font-size: 1.1em;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Bot Maze Explorer</h1>
+    <div id="game-container">
+        <canvas id="maze" width="600" height="600"></canvas>
+        <div id="controls">
+            <div class="info-panel">
+                <h2>Game Status</h2>
+                <div class="status-item"><strong>Elapsed Ticks:</strong> <span id="timer">0</span></div>
+                <div class="status-item"><strong>Completed Bots:</strong> <span id="completed">0</span> / 24</div>
+            </div>
+
+            <button id="reset">Reset Simulation (Seed: Random)</button>
+        </div>
+    </div>
+
+    <script>
+        // ====================================================================
+        // GLOBAL GAME STATE AND CONSTANTS
+        // ====================================================================
+        const CANVAS_SIZE = 600;
+        const CELL_PIXEL_SIZE = 25; // Size of one cell block on the canvas
+        const BOT_RADIUS = 4;
+
+        let game = {
+            elapsed: 0,
+            size: null, // {rows, cols}
+            spawn: null, // {r, c}
+            exit: null,  // {r, c}
+            walls: null, // Array of walls(r, c)
+            bots: [],    // Array of bot objects
+            isRunning: false,
+            lastBotArrivalTick: 0,
+        };
+
+        const canvas = document.getElementById('maze');
+        canvas.width = CANVAS_SIZE;
+        canvas.height = CANVAS_SIZE;
+        const ctx = canvas.getContext('2d');
+
+        // Bot colors (must be distinct)
+        const BOT_COLORS = [
+            '#FF5733', '#33FF57', '#3357FF', '#FFC300', '#DAF7A6', 
+            '#9B59B6', '#E74C3C', '#1ABC9C', '#F39C12', '#D35400',
+            '#8E44AD', '#2ECC71', '#3498DB', '#E67E22', '#A9CCE3',
+            '#FFD166', '#F1C40F', '#16A085', '#2980B9', '#C0392B',
+            '#F39C12', '#95A52E', '#7F8C8D', '#E6E6FA' // 24 bots needed
+        ];
+
+        // ====================================================================
+        // UTILITY FUNCTIONS (Deterministic PRNG)
+        // ====================================================================
+
+        /** Simple deterministic Pseudo-Random Number Generator (LCG) */
+        function seededRandom(seed) {
+            let state = seed || Date.now();
+            return function() {
+                state = (state * 16807 + 24519) % 2**32;
+                return state / 2**32;
+            }
+        }
+
+        // ====================================================================
+        // CORE GAME LOGIC: MAZE GENERATION & BOT BEHAVIOR
+        // ====================================================================
+
+        /** Initializes the game state, generating a new maze and bots. */
+        function initializeGame(seed) {
+            const rng = seededRandom(seed);
+            const ROWS = 20; // Must be >= 15
+            const COLS = 30; // Must be >= 15
+
+            // 1. Generate Maze Structure (Walls/Passages)
+            let wallsData = generatePerfectMaze(rng, ROWS, COLS);
+
+            // 2. Set Game State Properties
+            game.size = { rows: ROWS, cols: COLS };
+            game.walls = wallsData;
+            game.elapsed = 0;
+            game.lastBotArrivalTick = 0;
+            game.isRunning = true;
+
+            // Determine Spawn and Exit (simple corner placement)
+            game.spawn = { r: 1, c: 1 };
+            game.exit = { r: ROWS - 2, c: COLS - 2 };
+
+            // 3. Initialize Bots
+            game.bots = [];
+            for (let i = 0; i < 24; i++) {
+                const bot = {
+                    id: i,
+                    color: BOT_COLORS[i],
+                    path: [{ r: game.spawn.r, c: game.spawn.c }], // History of visited cells
+                    deadEnds: new Set(), // Stores "r,c" strings of dead ends marked by the bot
+                    finishTick: null,
+                    // Bot-specific exploration preference (seeded direction order)
+                    directionOrder: getSeededDirectionOrder(rng, i), 
+                    currentPos: { r: game.spawn.r, c: game.spawn.c },
+                    traversalCount: new Map(), // Tracks how many times this bot crossed a passage (e.g., "1_2")
+                };
+                game.bots.push(bot);
+            }
+
+            drawGame();
+        }
+
+        /** Generates a perfect maze using Randomized DFS/Backtracking. */
+        function generatePerfectMaze(rng, R, C) {
+            // Initialize all walls to true (solid)
+            let walls = Array(R).fill(0).map(() => 
+                Array(C).fill(0).map(() => ({ n: true, e: true, s: true, w: true }))
+            );
+
+            const visited = Array(R).fill(0).map(() => Array(C).fill(false));
+            const stack = [];
+
+            // Start at (1, 1) to ensure border walls remain intact
+            let startR = 1;
+            let startC = 1;
+            stack.push({ r: startR, c: startC });
+            visited[startR][startC] = true;
+            walls[startR][startC] = { n: true, e: true, s: true, w: true }; // Mark initial cell
+
+            while (stack.length > 0) {
+                let current = stack[stack.length - 1];
+                let neighbors = [];
+
+                // Potential moves: [dr, dc, wall_to_break]
+                const potentialMoves = [
+                    { dr: -1, dc: 0, dir: 'n', oppositeDir: 's' }, // North
+                    { dr: 1, dc: 0, dir: 's', oppositeDir: 'n' },  // South
+                    { dr: 0, dc: -1, dir: 'w', oppositeDir: 'e' }, // West
+                    { dr: 0, dc: 1, dir: 'e', oppositeDir: 'w' }   // East
+                ];
+
+                for (const move of potentialMoves) {
+                    let nr = current.r + move.dr;
+                    let nc = current.c + move.dc;
+
+                    if (nr >= 0 && nr < R && nc >= 0 && nc < C && !visited[nr][nc]) {
+                        neighbors.push({ r: nr, c: nc, wall_dir: move.dir, opposite_wall_dir: move.oppositeDir });
+                    }
+                }
+
+                if (neighbors.length > 0) {
+                    // Deterministic selection of next neighbor based on RNG
+                    neighbors.sort((a, b) => rng() - 0.5); // Simple pseudo-random shuffle
+                    let next = neighbors[0];
+
+                    // Break walls and move
+                    walls[current.r][current.c][next.wall_dir] = false;
+                    walls[next.r][next.c][next.opposite_wall_dir] = false;
+
+                    visited[next.r][next.c] = true;
+                    stack.push({ r: next.r, c: next.c });
+                } else {
+                    // Backtrack
+                    stack.pop();
+                }
+            }
+            return walls;
+        }
+
+
+        /** Generates a seeded direction order for bot exploration preference. */
+        function getSeededDirectionOrder(rng, seedIndex) {
+            const directions = ['n', 'e', 's', 'w'];
+            let shuffled = [...directions];
+
+            // Use the RNG to shuffle deterministically based on the bot's index
+            for (let i = 0; i < shuffled.length; i++) {
+                let j = Math.floor(rng() * (i + 1));
+                [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+            return shuffled;
+        }
+
+
+        /**
+         * Core bot movement logic for one bot in one tick.
+         * @param {object} bot - The bot object to move.
+         * @returns {boolean} True if the bot moved, false otherwise (stuck/finished).
+         */
+        function moveBot(bot) {
+            if (bot.finishTick !== null) return false;
+
+            const current = bot.currentPos;
+            let nextMove = null;
+            let bestCandidate = null;
+
+            // 1. Determine potential moves based on walls and exploration rules
+            const possibleMoves = [];
+            const directions = ['n', 'e', 's', 'w'];
+
+            for (const dir of directions) {
+                if (!game.walls[current.r][current.c][dir]) continue; // Wall exists
+
+                let nr, nc;
+                switch(dir) {
+                    case 'n': nr = current.r - 1; nc = current.c; break;
+                    case 's': nr = current.r + 1; nc = current.c; break;
+                    case 'w': nr = current.r; nc = current.c - 1; break;
+                    case 'e': nr = current.r; nc = current.c + 1; break;
+                }
+
+                // Check bounds and if the target cell is valid (not a wall)
+                if (nr >= 0 && nr < game.size.rows && nc >= 0 && nc < game.size.cols) {
+                    possibleMoves.push({ r: nr, c: nc, dir: dir });
+                }
+            }
+
+            // Sort candidates based on bot's seeded preference order
+            const preferredCandidates = possibleMoves.sort((a, b) => {
+                return bot.directionOrder.indexOf(a.dir) - bot.directionOrder.indexOf(b.dir);
+            });
+
+
+            // 2. Select the next move (Prioritize unvisited/unexplored paths)
+            for (const candidate of preferredCandidates) {
+                const { r: nr, c: nc, dir } = candidate;
+
+                // Check if this passage has been traversed twice already by THIS bot
+                const key = `${current.r}_${current.c}-${dir}`; // Passage from current to neighbor
+                if (bot.traversalCount.get(key) >= 2) {
+                    continue; // Cannot traverse this path again
+                }
+
+                // Check if the target cell is already fully explored and marked dead end by bot
+                const targetKey = `${nr},${nc}`;
+                if (bot.deadEnds.has(targetKey)) {
+                    continue; 
+                }
+                
+                // Found a valid, unexplored move!
+                nextMove = candidate;
+                break;
+            }
+
+            if (!nextMove) {
+                // No unblocked, non-overtraversed path found -> Backtrack
+                return attemptBacktrack(bot);
+            } else {
+                // Move to the chosen neighbor
+                const { r: nr, c: nc } = nextMove;
+                
+                // Update state
+                bot.currentPos = { r: nr, c: nc };
+                bot.path.push({ r: nr, c: nc });
+
+                // Record traversal count (passage from current to neighbor)
+                const passageKey = `${current.r}_${current.c}-${nextMove.dir}`;
+                bot.traversalCount.set(passageKey, (bot.traversalCount.get(passageKey) || 0) + 1);
+
+                // Check for exit arrival
+                if (nr === game.exit.r && nc === game.exit.c) {
+                    bot.finishTick = game.elapsed;
+                    return false; // Stop movement, arrived at exit
+                }
+                return true; // Moved successfully
+            }
+        }
+
+        /** Attempts to backtrack along the path history if no forward move is possible. */
+        function attemptBacktrack(bot) {
+            // Start from the second-to-last position (the previous cell)
+            if (bot.path.length <= 1) return false; // Cannot backtrack further
+
+            let currentPathIndex = bot.path.length - 2;
+            const prevPos = bot.path[currentPathIndex];
+            const currentPos = bot.currentPos;
+
+            // Check if the passage from previous to current is still traversable (i.e., not marked dead)
+            // Note: For simplicity and robustness in this simulation, we assume backtracking is always possible 
+            // unless the entire path segment was explicitly blocked by a rule violation (which shouldn't happen here).
+
+            // Move back one step
+            bot.currentPos = prevPos;
+            
+            // Pop the current position from the path history
+            bot.path.pop(); 
+            
+            return true; // Successfully moved back
+        }
+
+
+        /** Main simulation tick function. Advances all bots and updates state. */
+        function runTick() {
+            if (!game.isRunning) return false;
+
+            const oldElapsed = game.elapsed;
+            game.elapsed++;
+
+            let lastArrivalThisTick = 0;
+            let activeBotsCount = 0;
+
+            // Process all bots sequentially (ensuring determinism)
+            for (const bot of game.bots) {
+                if (bot.finishTick === null) {
+                    moveBot(bot);
+                }
+                
+                if (bot.finishTick === null) {
+                    activeBotsCount++;
+                } else if (bot.finishTick === game.elapsed) {
+                    lastArrivalThisTick = Math.max(lastArrivalThisTick, game.elapsed);
+                }
+            }
+
+            // Update global state tracking the last arrival time
+            game.lastBotArrivalTick = Math.max(game.lastBotArrivalTick, lastArrivalThisTick);
+
+
+            // Check termination condition: If all bots have arrived, or if we passed the max tick limit (20000)
+            if (activeBotsCount === 0 || game.elapsed >= 20000) {
+                game.isRunning = false;
+            }
+
+            drawGame();
+        }
+
+
+        // ====================================================================
+        // RENDERING AND VISUALIZATION
+        // ====================================================================
+
+        /** Draws the entire game state: walls, paths, and bots. */
+        function drawGame() {
+            ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+            const R = game.size.rows;
+            const C = game.size.cols;
+
+            // 1. Draw Walls (Grid drawing)
+            for (let r = 0; r < R; r++) {
+                for (let c = 0; c < C; c++) {
+                    const walls = game.walls[r][c];
+                    const x = c * CELL_PIXEL_SIZE;
+                    const y = r * CELL_PIXEL_SIZE;
+
+                    // Draw the cell background/path
+                    ctx.fillStyle = '#f9f9f9';
+                    ctx.fillRect(x, y, CELL_PIXEL_SIZE, CELL_PIXEL_SIZE);
+
+                    // Draw walls (Black lines)
+                    if (walls.n) { // Wall above
+                        ctx.strokeStyle = '#333';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.moveTo(x, y);
+                        ctx.lineTo(x + CELL_PIXEL_SIZE, y);
+                        ctx.stroke();
+                    }
+                    if (walls.s) { // Wall below
+                        ctx.strokeStyle = '#333';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.moveTo(x, y + CELL_PIXEL_SIZE);
+                        ctx.lineTo(x + CELL_PIXEL_SIZE, y + CELL_PIXEL_SIZE);
+                        ctx.stroke();
+                    }
+                    if (walls.w) { // Wall left
+                        ctx.strokeStyle = '#333';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.moveTo(x, y);
+                        ctx.lineTo(x, y + CELL_PIXEL_SIZE);
+                        ctx.stroke();
+                    }
+                    if (walls.e) { // Wall right
+                        ctx.strokeStyle = '#333';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.moveTo(x + CELL_PIXEL_SIZE, y);
+                        ctx.lineTo(x + CELL_PIXEL_SIZE, y + CELL_PIXEL_SIZE);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // 2. Draw Paths/Visited Cells (Optional: show paths taken)
+            for (const bot of game.bots) {
+                if (bot.path.length > 0) {
+                    ctx.fillStyle = 'rgba(150, 150, 150, 0.2)'; // Faded path color
+                    // Draw the last few cells visited to show exploration trail
+                    for (let i = Math.max(0, bot.path.length - 30); i < bot.path.length; i++) {
+                        const p = bot.path[i];
+                        ctx.fillRect(p.c * CELL_PIXEL_SIZE + 2, p.r * CELL_PIXEL_SIZE + 2, 
+                                     CELL_PIXEL_SIZE - 4, CELL_PIXEL_SIZE - 4);
+                    }
+                }
+            }
+
+            // 3. Draw Bots (Smooth Interpolation)
+            for (const bot of game.bots) {
+                let current = bot.currentPos;
+                
+                // Calculate pixel position for smooth movement interpolation
+                const x = current.c * CELL_PIXEL_SIZE + CELL_PIXEL_SIZE / 2;
+                const y = current.r * CELL_PIXEL_SIZE + CELL_PIXEL_SIZE / 2;
+
+                ctx.fillStyle = bot.color;
+                ctx.beginPath();
+                ctx.arc(x, y, BOT_RADIUS, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Draw exit marker
+                if (bot.finishTick === null && current.r === game.exit.r && current.c === game.exit.c) {
+                    ctx.fillStyle = '#FFD700'; // Gold for arrival
+                    ctx.beginPath();
+                    ctx.arc(x, y, BOT_RADIUS + 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // 4. Draw Markers (Spawn/Exit)
+            drawMarker('green', game.spawn, 'Start');
+            drawMarker('red', game.exit, 'Exit');
+
+
+            // 5. Update UI Status
+            document.getElementById('timer').textContent = Math.floor(game.elapsed);
+            const completedCount = game.bots.filter(b => b.finishTick !== null).length;
+            document.getElementById('completed').textContent = `${completedCount} / 24`;
+
+            // Freeze timer if all bots have arrived
+            if (completedCount === 24 && !game.isRunning) {
+                document.getElementById('timer').style.backgroundColor = '#ffddaa';
+                document.getElementById('timer').textContent = Math.floor(game.lastBotArrivalTick);
+            } else if (!game.isRunning && completedCount < 24) {
+                 // If simulation stopped for other reasons (e.g., max ticks reached) but bots remain, freeze the timer at current elapsed time.
+                document.getElementById('timer').style.backgroundColor = '#ffddaa';
+            } else {
+                document.getElementById('timer').style.backgroundColor = 'transparent';
+            }
+        }
+
+        /** Helper to draw a colored marker on the canvas */
+        function drawMarker(color, pos, label) {
+            const x = pos.c * CELL_PIXEL_SIZE + CELL_PIXEL_SIZE / 2;
+            const y = pos.r * CELL_PIXEL_SIZE + CELL_PIXEL_SIZE / 2;
+
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(x, y, BOT_RADIUS + 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+
+        // ====================================================================
+        // PUBLIC API IMPLEMENTATION (window.game)
+        // ====================================================================
+
+        /** Advances the simulation by n ticks synchronously. */
+        window.game.tick = function(n) {
+            if (!game.isRunning && game.elapsed > 0) {
+                console.warn("Simulation is frozen at last arrival time.");
+                return;
+            }
+            for (let i = 0; i < n; i++) {
+                runTick();
+            }
+        };
+
+        /** Resets the simulation state and generates a new maze/bot run. */
+        window.game.reset = function(seed) {
+            // Use provided seed or generate a random one if null/undefined
+            const effectiveSeed = (typeof seed === 'number' && isFinite(seed)) ? seed : Math.floor(Math.random() * 10000);
+            initializeGame(effectiveSeed);
+        };
+
+        window.game.elapsed = function() {
+            return game.elapsed;
+        };
+
+        window.game.size = function() {
+            return game.size;
+        };
+
+        window.game.spawn = function() {
+            return game.spawn;
+        };
+
+        window.game.exit = function() {
+            return game.exit;
+        };
+
+        /** Returns wall status for a cell: {n, e, s, w} booleans. */
+        window.game.walls = function(r, c) {
+            if (r < 0 || r >= game.size.rows || c < 0 || c >= game.size.cols) return null;
+            return game.walls[r][c];
+        };
+
+        /** Returns the array of bot objects. */
+        window.game.bots = function() {
+            return game.bots;
+        };
+
+
+        // ====================================================================
+        // EVENT LISTENERS AND INITIALIZATION
+        // ====================================================================
+
+        document.getElementById('reset').addEventListener('click', () => {
+            // Reset with a new random seed every time the button is pressed
+            window.game.reset(); 
+        });
+
+
+        // Initial setup call (runs on page load)
+        window.onload = function() {
+             // Initialize game state immediately upon loading
+            window.game.reset(); 
+        };
+
+    </script>
+</body>
+</html>

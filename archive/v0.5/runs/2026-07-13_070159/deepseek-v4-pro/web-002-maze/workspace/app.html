@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>Maze · 24 bots · Tremaux exploration</title>
+  <style>
+    * {
+      margin: 0;
+      box-sizing: border-box;
+    }
+    body {
+      background: #1a1e2b;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+    }
+    .game-container {
+      background: #0f1219;
+      border-radius: 2rem;
+      padding: 1.5rem 2rem 2rem;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+    }
+    .stats {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      color: #e0e5f0;
+      font-weight: 500;
+      background: #232837;
+      padding: 0.6rem 1.8rem;
+      border-radius: 3rem;
+      gap: 2rem;
+      flex-wrap: wrap;
+    }
+    .stat-item {
+      display: flex;
+      align-items: baseline;
+      gap: 0.4rem;
+    }
+    .stat-label {
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #9aa4bf;
+    }
+    #timer, #completed {
+      font-size: 1.8rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      background: #0b0e14;
+      padding: 0.2rem 1rem;
+      border-radius: 2rem;
+      color: #f2c94c;
+      min-width: 4rem;
+      text-align: center;
+    }
+    #completed {
+      color: #6fcf97;
+    }
+    #reset {
+      background: #4f5b7a;
+      border: none;
+      color: white;
+      font-weight: bold;
+      font-size: 1rem;
+      padding: 0.5rem 1.8rem;
+      border-radius: 2rem;
+      cursor: pointer;
+      background: #3d4b6a;
+      transition: background 0.2s;
+      letter-spacing: 0.03em;
+      border: 1px solid #5f6b8a;
+      margin-left: auto;
+    }
+    #reset:hover {
+      background: #5b6b92;
+    }
+    #maze {
+      background: #1e2335;
+      border-radius: 1.5rem;
+      padding: 8px;
+      box-shadow: inset 0 0 10px #00000040;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    canvas {
+      display: block;
+      border-radius: 1rem;
+      background: #0b0e14;
+      width: 100%;
+      height: auto;
+      max-width: 600px;
+    }
+  </style>
+</head>
+<body>
+<div class="game-container">
+  <div class="stats">
+    <div class="stat-item"><span class="stat-label">⏱️ Timer</span> <span id="timer">0</span></div>
+    <div class="stat-item"><span class="stat-label">🏁 Completed</span> <span id="completed">0/24</span></div>
+    <button id="reset">↺ New Maze</button>
+  </div>
+  <div id="maze">
+    <canvas id="mazeCanvas" aria-label="Maze with exploring bots"></canvas>
+  </div>
+</div>
+
+<script>
+  (function() {
+    // ---------- Deterministic PRNG (mulberry32) ----------
+    function mulberry32(a) {
+      return function() {
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    // ---------- Maze generation (recursive backtracker, perfect maze) ----------
+    function generateMaze(rows, cols, rng) {
+      // grid of cells: each cell has walls N,E,S,W true = wall exists
+      const walls = Array.from({ length: rows }, () =>
+        Array.from({ length: cols }, () => ({ n: true, e: true, s: true, w: true }))
+      );
+      const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
+
+      function carve(r, c) {
+        visited[r][c] = true;
+        const dirs = [
+          { dr: -1, dc: 0, wall: 'n', opp: 's' },
+          { dr: 1, dc: 0, wall: 's', opp: 'n' },
+          { dr: 0, dc: 1, wall: 'e', opp: 'w' },
+          { dr: 0, dc: -1, wall: 'w', opp: 'e' }
+        ];
+        // shuffle directions using rng
+        for (let i = dirs.length - 1; i > 0; i--) {
+          const j = Math.floor(rng() * (i + 1));
+          [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
+        }
+        for (const { dr, dc, wall, opp } of dirs) {
+          const nr = r + dr, nc = c + dc;
+          if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) {
+            walls[r][c][wall] = false;
+            walls[nr][nc][opp] = false;
+            carve(nr, nc);
+          }
+        }
+      }
+
+      const startR = Math.floor(rng() * rows);
+      const startC = Math.floor(rng() * cols);
+      carve(startR, startC);
+      return { walls, rows, cols };
+    }
+
+    // ---------- Bot class with Tremaux-style exploration ----------
+    class Bot {
+      constructor(id, startR, startC, directionPreference) {
+        this.id = id;
+        this.start = { r: startR, c: startC };
+        this.pos = { r: startR, c: startC };
+        this.path = [{ r: startR, c: startC }];
+        this.deadEnds = [];            // cells marked as dead (fully explored)
+        this.finishTick = null;
+        // memory: for each visited cell, store which directions have been tried from that cell.
+        // key = "r,c" -> Set of directions tried ('n','e','s','w')
+        this.triedFrom = new Map();
+        // entry direction to current cell (null for start)
+        this.entryDir = null;
+        // preference order for this bot (shuffled per bot)
+        this.dirOrder = directionPreference;
+        // mark start cell as visited with empty tried set
+        this._ensureCell(this.pos.r, this.pos.c);
+      }
+
+      _ensureCell(r, c) {
+        const key = `${r},${c}`;
+        if (!this.triedFrom.has(key)) {
+          this.triedFrom.set(key, new Set());
+        }
+        return this.triedFrom.get(key);
+      }
+
+      // Get available moves from (r,c) considering walls and not going into dead-end cells
+      _getAvailableMoves(r, c, walls, rows, cols) {
+        const cellWalls = walls[r][c];
+        const moves = [];
+        const dirs = [
+          { dr: -1, dc: 0, dir: 'n', opp: 's' },
+          { dr: 1, dc: 0, dir: 's', opp: 'n' },
+          { dr: 0, dc: 1, dir: 'e', opp: 'w' },
+          { dr: 0, dc: -1, dir: 'w', opp: 'e' }
+        ];
+        for (const { dr, dc, dir } of dirs) {
+          if (!cellWalls[dir]) {
+            const nr = r + dr, nc = c + dc;
+            if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+              // Do not go into a cell that this bot has marked as dead end
+              if (!this.deadEnds.some(d => d.r === nr && d.c === nc)) {
+                moves.push({ r: nr, c: nc, dir });
+              }
+            }
+          }
+        }
+        return moves;
+      }
+
+      // Decide next move using Tremaux rules:
+      // 1. Prefer unvisited passages (cells not in triedFrom map).
+      // 2. If none, prefer passages that have not been tried from current cell.
+      // 3. If all available passages have been tried, backtrack (return the entry direction if possible).
+      // Returns { r, c, dir } or null if stuck (should not happen in perfect maze until exit reached)
+      _chooseMove(walls, rows, cols) {
+        const current = this.pos;
+        const tried = this._ensureCell(current.r, current.c);
+        const available = this._getAvailableMoves(current.r, current.c, walls, rows, cols);
+        if (available.length === 0) {
+          return null; // dead end with no exit (should be exit cell or isolated)
+        }
+
+        // Separate into unvisited (not in memory) and visited but untried from here
+        const unvisited = [];
+        const untried = [];
+        for (const move of available) {
+          const key = `${move.r},${move.c}`;
+          if (!this.triedFrom.has(key)) {
+            unvisited.push(move);
+          } else if (!tried.has(move.dir)) {
+            untried.push(move);
+          }
+        }
+
+        // Apply bot's personal direction preference order to pick among candidates
+        const preferenceOrder = this.dirOrder;
+        const sortByPreference = (moves) => {
+          if (moves.length <= 1) return moves;
+          return moves.sort((a, b) => {
+            const idxA = preferenceOrder.indexOf(a.dir);
+            const idxB = preferenceOrder.indexOf(b.dir);
+            return idxA - idxB;
+          });
+        };
+
+        if (unvisited.length > 0) {
+          return sortByPreference(unvisited)[0];
+        }
+        if (untried.length > 0) {
+          return sortByPreference(untried)[0];
+        }
+
+        // All available passages have been tried from this cell -> backtrack using entry direction
+        if (this.entryDir !== null) {
+          const backDir = { n: 's', s: 'n', e: 'w', w: 'e' }[this.entryDir];
+          const backMove = available.find(m => m.dir === backDir);
+          if (backMove) {
+            // Mark current cell as dead end because we are leaving it with no new paths
+            this._markDeadEnd(current.r, current.c);
+            return backMove;
+          }
+        }
+        // fallback (should not happen): pick first available
+        return available[0];
+      }
+
+      _markDeadEnd(r, c) {
+        if (!this.deadEnds.some(d => d.r === r && d.c === c)) {
+          this.deadEnds.push({ r, c });
+        }
+      }
+
+      // Execute one tick: move if not finished.
+      // Returns true if moved, false if already at exit or cannot move.
+      step(walls, rows, cols, exitR, exitC) {
+        if (this.finishTick !== null) return false;
+        // Check if currently at exit
+        if (this.pos.r === exitR && this.pos.c === exitC) {
+          return false; // already finished, handled externally
+        }
+
+        const move = this._chooseMove(walls, rows, cols);
+        if (!move) {
+          // No move possible: should only happen if at exit with no outgoing? Actually exit cell has walls.
+          // If stuck and not exit, mark dead end? But perfect maze: only exit stops.
+          return false;
+        }
+
+        // Record that we are trying this direction from current cell
+        const currentKey = `${this.pos.r},${this.pos.c}`;
+        const tried = this.triedFrom.get(currentKey);
+        tried.add(move.dir);
+
+        // Move
+        const prevR = this.pos.r, prevC = this.pos.c;
+        this.pos = { r: move.r, c: move.c };
+        this.entryDir = move.dir;
+        this.path.push({ r: move.r, c: move.c });
+
+        // Ensure new cell memory
+        this._ensureCell(move.r, move.c);
+
+        // Check if reached exit after moving
+        if (this.pos.r === exitR && this.pos.c === exitC) {
+          // finishTick will be set by game loop
+          return true;
+        }
+        return true;
+      }
+    }
+
+    // ---------- Game state ----------
+    const ROWS = 17;
+    const COLS = 17;
+    const BOT_COUNT = 24;
+
+    // Direction orders for bots (seeded variations)
+    const baseOrders = [
+      ['n','e','s','w'],
+      ['e','s','w','n'],
+      ['s','w','n','e'],
+      ['w','n','e','s'],
+      ['n','s','e','w'],
+      ['e','w','n','s'],
+      ['s','n','w','e'],
+      ['w','e','s','n']
+    ];
+
+    function createBotPreferences(rng) {
+      const prefs = [];
+      for (let i = 0; i < BOT_COUNT; i++) {
+        const base = baseOrders[i % baseOrders.length];
+        // shuffle copy using rng to add variation
+        const order = [...base];
+        for (let j = order.length - 1; j > 0; j--) {
+          const k = Math.floor(rng() * (j + 1));
+          [order[j], order[k]] = [order[k], order[j]];
+        }
+        prefs.push(order);
+      }
+      return prefs;
+    }
+
+    class MazeGame {
+      constructor(seed = null) {
+        this.size = { rows: ROWS, cols: COLS };
+        this.spawn = { r: 0, c: 0 };
+        this.exit = { r: ROWS-1, c: COLS-1 };
+        this.elapsed = 0;
+        this.bots = [];
+        this.wallsGrid = null;
+        this._finished = false;        // true when last bot arrived
+        this._lastFinishTick = 0;
+        this._rng = null;
+        this._seed = seed;
+        this._init(seed);
+      }
+
+      _init(seed) {
+        const useSeed = (seed != null) ? seed : Math.floor(Math.random() * 1000000);
+        this._seed = useSeed;
+        this._rng = mulberry32(useSeed);
+        
+        // Generate maze
+        const { walls, rows, cols } = generateMaze(ROWS, COLS, this._rng);
+        this.wallsGrid = walls;
+        this.size = { rows, cols };
+        
+        // Fixed spawn and exit (can be randomized but deterministic from seed)
+        // Use rng to pick spawn and exit ensuring they are different and not too close? 
+        // For reproducibility, use deterministic positions based on seed.
+        const rngForPos = mulberry32(useSeed + 9999);
+        let spawnR, spawnC, exitR, exitC;
+        do {
+          spawnR = Math.floor(rngForPos() * rows);
+          spawnC = Math.floor(rngForPos() * cols);
+          exitR = Math.floor(rngForPos() * rows);
+          exitC = Math.floor(rngForPos() * cols);
+        } while (spawnR === exitR && spawnC === exitC);
+        
+        this.spawn = { r: spawnR, c: spawnC };
+        this.exit = { r: exitR, c: exitC };
+        
+        // Create bots with preferences
+        const prefs = createBotPreferences(this._rng);
+        this.bots = [];
+        for (let i = 0; i < BOT_COUNT; i++) {
+          const bot = new Bot(i, spawnR, spawnC, prefs[i]);
+          this.bots.push(bot);
+        }
+        
+        this.elapsed = 0;
+        this._finished = false;
+        this._lastFinishTick = 0;
+        
+        // Check if spawn equals exit (extremely unlikely but handle)
+        if (spawnR === exitR && spawnC === exitC) {
+          // all bots already at exit
+          for (const bot of this.bots) {
+            bot.finishTick = 0;
+          }
+          this._finished = true;
+          this._lastFinishTick = 0;
+        }
+      }
+
+      // Advance simulation by n ticks synchronously
+      tick(n = 1) {
+        if (n <= 0) return;
+        const steps = Math.floor(n);
+        for (let i = 0; i < steps; i++) {
+          if (this._finished) break;
+          
+          let anyActive = false;
+          for (const bot of this.bots) {
+            if (bot.finishTick !== null) continue;
+            anyActive = true;
+            const moved = bot.step(this.wallsGrid, this.size.rows, this.size.cols, this.exit.r, this.exit.c);
+            // After step, check if bot reached exit (position equals exit)
+            if (bot.pos.r === this.exit.r && bot.pos.c === this.exit.c && bot.finishTick === null) {
+              bot.finishTick = this.elapsed + 1; // arrival tick is current tick+1? 
+              // Actually step increments position and then we are at tick+1.
+            }
+          }
+          
+          this.elapsed += 1;
+          
+          // Update finish ticks for bots that just arrived (position check after move)
+          for (const bot of this.bots) {
+            if (bot.finishTick === null && bot.pos.r === this.exit.r && bot.pos.c === this.exit.c) {
+              bot.finishTick = this.elapsed;
+            }
+          }
+          
+          // Check if all finished
+          const allFinished = this.bots.every(b => b.finishTick !== null);
+          if (allFinished) {
+            this._finished = true;
+            this._lastFinishTick = this.elapsed;
+            // freeze elapsed at this value
+            break;
+          }
+          
+          if (!anyActive) {
+            // no active bots but not all finished? should not happen
+            break;
+          }
+        }
+        // Ensure elapsed doesn't change after finish
+        if (this._finished) {
+          this.elapsed = this._lastFinishTick;
+        }
+      }
+
+      reset(seed) {
+        this._init(seed);
+      }
+
+      // API: walls(r,c) returns {n,e,s,w}
+      walls(r, c) {
+        if (!this.wallsGrid || r < 0 || r >= this.size.rows || c < 0 || c >= this.size.cols) return null;
+        const w = this.wallsGrid[r][c];
+        return { n: w.n, e: w.e, s: w.s, w: w.w };
+      }
+    }
+
+    // ---------- Global game instance ----------
+    window.game = new MazeGame();
+
+    // Expose API methods
+    window.game.tick = function(n) {
+      MazeGame.prototype.tick.call(window.game, n);
+    };
+    window.game.reset = function(seed) {
+      MazeGame.prototype.reset.call(window.game, seed);
+      renderMaze();
+      updateUI();
+    };
+
+    // ---------- Rendering ----------
+    const canvas = document.getElementById('mazeCanvas');
+    const ctx = canvas.getContext('2d');
+    const timerEl = document.getElementById('timer');
+    const completedEl = document.getElementById('completed');
+
+    // Cell size calculation
+    const CELL_SIZE = 28;
+    const WALL_WIDTH = 2.5;
+    const BOT_RADIUS = 8;
+
+    function resizeCanvas() {
+      const rows = window.game.size.rows;
+      const cols = window.game.size.cols;
+      const width = cols * CELL_SIZE + WALL_WIDTH;
+      const height = rows * CELL_SIZE + WALL_WIDTH;
+      canvas.width = width;
+      canvas.height = height;
+      canvas.style.width = Math.min(600, width) + 'px';
+      canvas.style.height = Math.min(600, height) + 'px';
+    }
+
+    function drawMaze() {
+      const game = window.game;
+      if (!game.wallsGrid) return;
+      const rows = game.size.rows;
+      const cols = game.size.cols;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw background
+      ctx.fillStyle = '#0b0e14';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw walls
+      ctx.strokeStyle = '#5f6b8a';
+      ctx.lineWidth = WALL_WIDTH;
+      ctx.lineCap = 'round';
+      
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const x = c * CELL_SIZE;
+          const y = r * CELL_SIZE;
+          const w = game.wallsGrid[r][c];
+          
+          if (w.n) {
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + CELL_SIZE, y);
+            ctx.stroke();
+          }
+          if (w.s) {
+            ctx.beginPath();
+            ctx.moveTo(x, y + CELL_SIZE);
+            ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE);
+            ctx.stroke();
+          }
+          if (w.w) {
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x, y + CELL_SIZE);
+            ctx.stroke();
+          }
+          if (w.e) {
+            ctx.beginPath();
+            ctx.moveTo(x + CELL_SIZE, y);
+            ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE);
+            ctx.stroke();
+          }
+        }
+      }
+      
+      // Draw spawn and exit markers
+      const spawn = game.spawn;
+      const exit = game.exit;
+      ctx.fillStyle = '#4f7a5c';
+      ctx.fillRect(spawn.c * CELL_SIZE + 4, spawn.r * CELL_SIZE + 4, CELL_SIZE - 8, CELL_SIZE - 8);
+      ctx.fillStyle = '#7a4f4f';
+      ctx.fillRect(exit.c * CELL_SIZE + 4, exit.r * CELL_SIZE + 4, CELL_SIZE - 8, CELL_SIZE - 8);
+      
+      // Label
+      ctx.font = 'bold 10px "Segoe UI"';
+      ctx.fillStyle = 'white';
+      ctx.textAlign = 'center';
+      ctx.fillText('S', spawn.c * CELL_SIZE + CELL_SIZE/2, spawn.r * CELL_SIZE + CELL_SIZE/2 + 4);
+      ctx.fillText('E', exit.c * CELL_SIZE + CELL_SIZE/2, exit.r * CELL_SIZE + CELL_SIZE/2 + 4);
+    }
+
+    // Bot colors palette
+    const BOT_COLORS = [
+      '#F94144','#F8961E','#F9C74F','#90BE6D','#577590','#4D908E','#F9844A','#43AA8B',
+      '#277DA1','#9B5DE5','#F15BB5','#FEE440','#00BBF9','#00F5D4','#F15BB5','#9B5DE5',
+      '#F94144','#F8961E','#F9C74F','#90BE6D','#577590','#4D908E','#F9844A','#43AA8B'
+    ];
+
+    function drawBots() {
+      const game = window.game;
+      if (!game.bots) return;
+      const rows = game.size.rows;
+      const cols = game.size.cols;
+      
+      for (let i = 0; i < game.bots.length; i++) {
+        const bot = game.bots[i];
+        if (!bot.path.length) continue;
+        
+        // Smooth interpolation: use last two path positions based on elapsed tick?
+        // We'll show current position (last in path). For smooth movement between ticks,
+        // we could interpolate between previous and current if we had animation frame.
+        // Since tick() is synchronous, we render static positions after ticks.
+        // To show smooth movement, we can store previous position and interpolate based on a fraction.
+        // But the spec says "move SMOOTHLY (interpolated between cells, not teleporting)".
+        // We'll implement a simple interpolation using a stored animation progress.
+        // For deterministic rendering after tick, we show exact cell center.
+        // However, to satisfy smooth movement, we can use requestAnimationFrame to interpolate
+        // between last and current cell based on a progress variable that resets on tick.
+        // We'll maintain a global animation time.
+        const pos = bot.pos;
+        const targetX = pos.c * CELL_SIZE + CELL_SIZE/2;
+        const targetY = pos.r * CELL_SIZE + CELL_SIZE/2;
+        
+        // For smooth interpolation, we need previous position. We'll store it on bot.
+        if (!bot._prevPos) {
+          bot._prevPos = { r: pos.r, c: pos.c };
+          bot._moveProgress = 1.0;
+        }
+        
+        // If position changed, update previous and reset progress
+        if (bot._prevPos.r !== pos.r || bot._prevPos.c !== pos.c) {
+          bot._prevPos = { r: pos.r, c: pos.c };
+          bot._moveProgress = 0.0;
+        }
+        
+        // We'll use a global animation loop to increment progress.
+        // For now, draw at current position (will be updated in animation).
+        const progress = Math.min(bot._moveProgress || 1.0, 1.0);
+        const prevR = bot._prevPos.r;
+        const prevC = bot._prevPos.c;
+        const currentX = prevC * CELL_SIZE + CELL_SIZE/2 + (pos.c - prevC) * CELL_SIZE * progress;
+        const currentY = prevR * CELL_SIZE + CELL_SIZE/2 + (pos.r - prevR) * CELL_SIZE * progress;
+        
+        ctx.beginPath();
+        ctx.arc(currentX, currentY, BOT_RADIUS, 0, 2 * Math.PI);
+        ctx.fillStyle = BOT_COLORS[i % BOT_COLORS.length];
+        ctx.fill();
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        
+        // tiny id
+        ctx.fillStyle = 'black';
+        ctx.font = 'bold 7px "Segoe UI"';
+        ctx.textAlign = 'center';
+        ctx.fillText(i+1, currentX, currentY + 2.5);
+      }
+    }
+
+    function updateUI() {
+      const game = window.game;
+      timerEl.textContent = game.elapsed;
+      const finishedCount = game.bots.filter(b => b.finishTick !== null).length;
+      completedEl.textContent = `${finishedCount}/${BOT_COUNT}`;
+    }
+
+    function renderMaze() {
+      resizeCanvas();
+      drawMaze();
+      drawBots();
+      updateUI();
+    }
+
+    // Animation loop for smooth bot movement
+    let animationId = null;
+    function animationLoop() {
+      if (!window.game) {
+        animationId = requestAnimationFrame(animationLoop);
+        return;
+      }
+      // Update move progress for all bots
+      for (const bot of window.game.bots) {
+        if (bot._moveProgress == null) bot._moveProgress = 1.0;
+        if (bot._moveProgress < 1.0) {
+          bot._moveProgress = Math.min(1.0, bot._moveProgress + 0.12); // smooth step
+        }
+      }
+      drawMaze();
+      drawBots();
+      updateUI();
+      animationId = requestAnimationFrame(animationLoop);
+    }
+
+    // Reset button
+    document.getElementById('reset').addEventListener('click', () => {
+      window.game.reset();
+      renderMaze();
+    });
+
+    // Initial render
+    window.game.reset(42); // deterministic seed for reproducibility
+    renderMaze();
+    animationLoop();
+
+    // Override tick to also reset progress for smooth animation
+    const originalTick = window.game.tick;
+    window.game.tick = function(n) {
+      // Before tick, store previous positions for interpolation
+      for (const bot of window.game.bots) {
+        if (!bot._prevPos) bot._prevPos = { ...bot.pos };
+        else if (bot._prevPos.r !== bot.pos.r || bot._prevPos.c !== bot.pos.c) {
+          bot._prevPos = { ...bot.pos };
+        }
+      }
+      originalTick.call(window.game, n);
+      // After tick, reset progress for bots that moved
+      for (const bot of window.game.bots) {
+        if (bot._prevPos.r !== bot.pos.r || bot._prevPos.c !== bot.pos.c) {
+          bot._moveProgress = 0.0;
+          bot._prevPos = { ...bot.pos }; // update previous to new
+        }
+      }
+      renderMaze();
+    };
+
+    // Ensure game object fully exposed
+    window.game.size = window.game.size;
+    window.game.spawn = window.game.spawn;
+    window.game.exit = window.game.exit;
+    window.game.walls = (r, c) => window.game.walls(r, c);
+    window.game.bots = window.game.bots;
+    window.game.elapsed = window.game.elapsed;
+    
+    // Override reset to maintain references
+    const originalReset = window.game.reset;
+    window.game.reset = function(seed) {
+      originalReset.call(window.game, seed);
+      // Re-expose bots array etc.
+      window.game.bots = window.game.bots;
+      window.game.elapsed = window.game.elapsed;
+      for (const bot of window.game.bots) {
+        bot._prevPos = { ...bot.pos };
+        bot._moveProgress = 1.0;
+      }
+      renderMaze();
+    };
+
+    console.log('Maze game ready. Use window.game.tick(n) to advance.');
+  })();
+</script>
+</body>
+</html>

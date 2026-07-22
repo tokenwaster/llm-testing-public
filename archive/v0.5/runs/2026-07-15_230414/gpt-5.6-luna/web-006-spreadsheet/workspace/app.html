@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px;
+    font-family: Arial, sans-serif;
+    background: #f3f5f7;
+    color: #222;
+  }
+  #app {
+    min-width: 600px;
+    min-height: 400px;
+    width: 820px;
+    margin: 0 auto;
+    padding: 16px;
+    background: white;
+    border: 1px solid #c8ced4;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+  }
+  h1 {
+    margin: 0 0 14px;
+    font-size: 21px;
+  }
+  #grid {
+    display: grid;
+    grid-template-columns: 48px repeat(10, minmax(55px, 1fr));
+    grid-template-rows: 30px repeat(10, 34px);
+    border-top: 1px solid #aeb7c1;
+    border-left: 1px solid #aeb7c1;
+    width: 100%;
+  }
+  .corner, .col-header, .row-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #e9edf1;
+    font-weight: bold;
+    color: #39434d;
+    border-right: 1px solid #aeb7c1;
+    border-bottom: 1px solid #aeb7c1;
+  }
+  .cell {
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    border: 0;
+    border-right: 1px solid #c8ced4;
+    border-bottom: 1px solid #c8ced4;
+    padding: 5px 7px;
+    outline: none;
+    font: 14px Arial, sans-serif;
+    color: #111;
+    background: #fff;
+  }
+  .cell:focus {
+    background: #fffdf0;
+    box-shadow: inset 0 0 0 2px #4b90e6;
+    position: relative;
+    z-index: 1;
+  }
+  .toolbar {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  button {
+    padding: 7px 13px;
+    border: 1px solid #8795a3;
+    border-radius: 4px;
+    background: #eef2f5;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  button:hover { background: #e1e7ec; }
+  #csv {
+    display: block;
+    width: 100%;
+    height: 120px;
+    margin-top: 10px;
+    padding: 8px;
+    resize: vertical;
+    font: 13px monospace;
+    border: 1px solid #b8c1ca;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <div id="grid"></div>
+  <div class="toolbar">
+    <button id="export" type="button">Export CSV</button>
+  </div>
+  <textarea id="csv" aria-label="CSV export"></textarea>
+</div>
+
+<script>
+(function () {
+  const cols = "ABCDEFGHIJ";
+  const rows = 10;
+  const raw = Array.from({length: rows}, () => Array(10).fill(""));
+  const display = Array.from({length: rows}, () => Array(10).fill(""));
+  const inputs = {};
+  const grid = document.getElementById("grid");
+
+  class FormulaError extends Error {}
+  class CycleError extends Error {}
+
+  function indexOfRef(ref) {
+    const m = /^([A-Ja-j])([1-9]|10)$/.exec(ref);
+    if (!m) throw new FormulaError();
+    return (parseInt(m[2], 10) - 1) * 10 + cols.indexOf(m[1].toUpperCase());
+  }
+
+  function cellName(index) {
+    return cols[index % 10] + (Math.floor(index / 10) + 1);
+  }
+
+  function tokenize(text) {
+    const tokens = [];
+    let i = 0;
+    while (i < text.length) {
+      if (/\s/.test(text[i])) {
+        i++;
+        continue;
+      }
+      const rest = text.slice(i);
+      const number = rest.match(/^(?:\d+(?:\.\d*)?|\.\d+)/);
+      if (number) {
+        tokens.push({type: "number", value: Number(number[0])});
+        i += number[0].length;
+        continue;
+      }
+      const ident = rest.match(/^[A-Za-z]+[0-9]+/);
+      if (ident) {
+        tokens.push({type: "ident", value: ident[0]});
+        i += ident[0].length;
+        continue;
+      }
+      if ("+-*/()".includes(text[i])) {
+        tokens.push({type: text[i], value: text[i]});
+        i++;
+        continue;
+      }
+      throw new FormulaError();
+    }
+    tokens.push({type: "eof"});
+    return tokens;
+  }
+
+  function recalculate() {
+    const state = Array(100).fill(0);
+    const result = Array(100);
+    const stack = [];
+    const cycleNodes = new Set();
+
+    function numericCell(index) {
+      const r = evaluate(index);
+      if (r.error === "cycle") throw new CycleError();
+      if (r.error) throw new FormulaError();
+      return r.number;
+    }
+
+    function evaluate(index) {
+      if (state[index] === 2) return result[index];
+      if (state[index] === 1) {
+        const start = stack.indexOf(index);
+        for (let i = start; i < stack.length; i++) {
+          cycleNodes.add(stack[i]);
+        }
+        return {error: "cycle"};
+      }
+
+      state[index] = 1;
+      stack.push(index);
+      const text = raw[Math.floor(index / 10)][index % 10];
+      let answer;
+
+      if (!text.startsWith("=")) {
+        if (text.trim() === "") {
+          answer = {text: "", number: 0};
+        } else {
+          const n = Number(text);
+          answer = Number.isFinite(n)
+            ? {text: text, number: n}
+            : {text: text, number: null};
+        }
+      } else {
+        try {
+          const tokens = tokenize(text.slice(1));
+          let pos = 0;
+
+          function primary() {
+            const t = tokens[pos];
+            if (t.type === "number") {
+              pos++;
+              return t.value;
+            }
+            if (t.type === "ident") {
+              pos++;
+              return numericCell(indexOfRef(t.value));
+            }
+            if (t.type === "(") {
+              pos++;
+              const v = expression();
+              if (tokens[pos].type !== ")") throw new FormulaError();
+              pos++;
+              return v;
+            }
+            throw new FormulaError();
+          }
+
+          function unary() {
+            if (tokens[pos].type === "+") {
+              pos++;
+              return unary();
+            }
+            if (tokens[pos].type === "-") {
+              pos++;
+              return -unary();
+            }
+            return primary();
+          }
+
+          function term() {
+            let value = unary();
+            while (tokens[pos].type === "*" || tokens[pos].type === "/") {
+              const op = tokens[pos++].type;
+              const rhs = unary();
+              value = op === "*" ? value * rhs : value / rhs;
+            }
+            return value;
+          }
+
+          function expression() {
+            let value = term();
+            while (tokens[pos].type === "+" || tokens[pos].type === "-") {
+              const op = tokens[pos++].type;
+              const rhs = term();
+              value = op === "+" ? value + rhs : value - rhs;
+            }
+            return value;
+          }
+
+          if (tokens[0].type === "eof") throw new FormulaError();
+          const value = expression();
+          if (tokens[pos].type !== "eof" || !Number.isFinite(value)) {
+            throw new FormulaError();
+          }
+          answer = {text: String(value), number: value};
+        } catch (e) {
+          if (e instanceof CycleError) {
+            answer = {error: "cycle"};
+          } else {
+            answer = {error: "err"};
+          }
+        }
+      }
+
+      stack.pop();
+      state[index] = 2;
+      result[index] = answer;
+      return answer;
+    }
+
+    for (let i = 0; i < 100; i++) evaluate(i);
+
+    cycleNodes.forEach(i => {
+      result[i] = {error: "cycle"};
+    });
+
+    for (let i = 0; i < 100; i++) {
+      const r = result[i];
+      display[Math.floor(i / 10)][i % 10] =
+        r.error === "cycle" ? "#CYCLE" :
+        r.error === "err" ? "#ERR" :
+        r.text;
+    }
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < 10; c++) {
+        const input = inputs[cols[c] + (r + 1)];
+        if (document.activeElement !== input) input.value = display[r][c];
+      }
+    }
+  }
+
+  function commit(name) {
+    const input = inputs[name];
+    const r = parseInt(name.slice(1), 10) - 1;
+    const c = cols.indexOf(name[0]);
+    raw[r][c] = input.value;
+    recalculate();
+  }
+
+  for (let r = 0; r < rows; r++) {
+    if (r === 0) {
+      const corner = document.createElement("div");
+      corner.className = "corner";
+      corner.textContent = "";
+      grid.appendChild(corner);
+
+      for (let c = 0; c < 10; c++) {
+        const header = document.createElement("div");
+        header.className = "col-header";
+        header.textContent = cols[c];
+        grid.appendChild(header);
+      }
+    }
+
+    const rowHeader = document.createElement("div");
+    rowHeader.className = "row-header";
+    rowHeader.textContent = String(r + 1);
+    grid.appendChild(rowHeader);
+
+    for (let c = 0; c < 10; c++) {
+      const name = cols[c] + (r + 1);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "cell";
+      input.id = "cell-" + name;
+      input.setAttribute("aria-label", name);
+      input.addEventListener("focus", () => {
+        input.value = raw[r][c];
+        input.select();
+      });
+      input.addEventListener("blur", () => commit(name));
+      input.addEventListener("keydown", e => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          input.blur();
+        }
+      });
+      inputs[name] = input;
+      grid.appendChild(input);
+    }
+  }
+
+  document.getElementById("export").addEventListener("click", () => {
+    recalculate();
+    document.getElementById("csv").value =
+      display.map(row => row.join(",")).join("\n");
+  });
+
+  window.sheet = {
+    set(name, value) {
+      if (!inputs[name]) throw new Error("Invalid cell");
+      const r = parseInt(name.slice(1), 10) - 1;
+      const c = cols.indexOf(name[0]);
+      raw[r][c] = String(value);
+      recalculate();
+    },
+    get(name) {
+      if (!inputs[name]) throw new Error("Invalid cell");
+      recalculate();
+      const r = parseInt(name.slice(1), 10) - 1;
+      const c = cols.indexOf(name[0]);
+      return display[r][c];
+    },
+    raw(name) {
+      if (!inputs[name]) throw new Error("Invalid cell");
+      const r = parseInt(name.slice(1), 10) - 1;
+      const c = cols.indexOf(name[0]);
+      return raw[r][c];
+    }
+  };
+
+  recalculate();
+})();
+</script>
+</body>
+</html>

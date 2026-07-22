@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body{font-family:sans-serif;margin:0;padding:10px;background:#f4f4f4;}
+  table{border-collapse:collapse;width:100%;max-width:800px;height:auto;min-height:400px;}
+  th,td{border:1px solid #999;text-align:center;padding:2px;}
+  th{background:#ddd;font-weight:bold;}
+  input{width:100%;box-sizing:border-box;border:none;background:none;padding:0;margin:0;text-align:right;}
+  input:focus{outline:1px solid blue;}
+  #controls{margin-top:10px;}
+</style>
+</head>
+<body>
+
+<table id="grid"></table>
+
+<div id="controls">
+  <button id="export">Export CSV</button><br/>
+  <textarea id="csv" rows="5" cols="80"></textarea>
+</div>
+
+<script>
+(() => {
+const COLS = 'ABCDEFGHIJ'.split('');
+const ROWS = Array.from({length:10},(_,i)=>i+1);
+const gridEl=document.getElementById('grid');
+const csvArea=document.getElementById('csv');
+
+function createGrid(){
+  const headerRow=document.createElement('tr');
+  headerRow.appendChild(document.createElement('th')); // top-left empty
+  COLS.forEach(c=>{let th=document.createElement('th');th.textContent=c;headerRow.appendChild(th);});
+  gridEl.appendChild(headerRow);
+  ROWS.forEach(r=>{
+    const tr=document.createElement('tr');
+    let th=document.createElement('th');th.textContent=r;tr.appendChild(th);
+    COLS.forEach(c=>{
+      const td=document.createElement('td');
+      const inp=document.createElement('input');
+      inp.id=`cell-${c}${r}`;
+      inp.dataset.raw=''; // raw text
+      inp.addEventListener('focus',()=>{inp.value=inp.dataset.raw;});
+      inp.addEventListener('blur',commit);
+      inp.addEventListener('keydown',(e)=>{if(e.key==='Enter'){e.preventDefault();inp.blur();}});
+      td.appendChild(inp);tr.appendChild(td);
+    });
+    gridEl.appendChild(tr);
+  });
+}
+createGrid();
+
+function getCellId(col,row){return `cell-${col}${row}`;}
+function getCell(col,row){return document.getElementById(getCellId(col,row));}
+
+const rawCache={}; // key: cell id -> raw text
+const valueCache={}; // computed values
+
+// API
+window.sheet={
+  set:(ref,txt)=>{
+    const {c,r}=parseRef(ref);
+    const inp=getCell(c,r);
+    inp.dataset.raw=txt;
+    inp.value=txt; // show raw immediately
+    recomputeAll();
+  },
+  get:(ref)=>{const {c,r}=parseRef(ref);return valueCache[getCellId(c,r)]||'';},
+  raw:(ref)=>{const {c,r}=parseRef(ref);return rawCache[getCellId(c,r)]||'';}
+};
+
+function parseRef(ref){
+  const m=ref.match(/^([A-J])([1-9]|10)$/);
+  if(!m)throw new Error('Invalid ref');
+  return {c:m[1],r:+m[2]};
+}
+
+function commit(e){
+  const inp=e.target;
+  rawCache[inp.id]=inp.value.trim();
+  recomputeAll();
+}
+
+const depGraph={}; // cell id -> Set of referenced ids
+function buildDeps(){
+  Object.keys(depGraph).forEach(k=>depGraph[k].clear());
+  COLS.forEach(c=>ROWS.forEach(r=>{
+    const id=getCellId(c,r);
+    const raw=rawCache[id]||'';
+    depGraph[id]=new Set();
+    if(raw.startsWith('=')){
+      const refs=raw.slice(1).match(/[A-J](?:10|[1-9])/g)||[];
+      refs.forEach(ref=>depGraph[id].add(getCellId(...ref.split(/(?=[0-9])/,2))));
+    }
+  }));
+}
+
+function recomputeAll(){
+  buildDeps();
+  const visited=new Set(), stack=new Set(), cycleNodes=new Set();
+
+  function dfs(node){
+    if(cycleNodes.has(node))return;
+    if(stack.has(node)){cycleNodes.add(...stack);return;}
+    if(visited.has(node))return;
+    stack.add(node);
+    depGraph[node].forEach(dfs);
+    stack.delete(node);
+    visited.add(node);
+  }
+  Object.keys(depGraph).forEach(dfs);
+
+  // compute values
+  const order=topoSort();
+  order.forEach(id=>{
+    const raw=rawCache[id]||'';
+    if(cycleNodes.has(id)){valueCache[id]='#CYCLE';return;}
+    if(!raw.startsWith('=')){
+      valueCache[id]=raw=== ''? '0': raw;
+      return;
+    }
+    try{
+      const expr=raw.slice(1).replace(/[A-J](?:10|[1-9])/g,match=>{
+        const val=valueCache[getCellId(match)]||'0';
+        if(val==='#ERR'||val==='#CYCLE')throw new Error('dep error');
+        return isNaN(Number(val))? '0': Number(val);
+      });
+      // eslint-disable-next-line no-new-func
+      const res=Function(`return ${expr}`)();
+      valueCache[id]=Number.isFinite(res)?String(res):'#ERR';
+    }catch(e){valueCache[id]='#ERR';}
+  });
+
+  // update display
+  COLS.forEach(c=>ROWS.forEach(r=>{
+    const id=getCellId(c,r);
+    const inp=getCell(id);
+    if(inp===document.activeElement) return; // keep raw while editing
+    inp.value=valueCache[id];
+  }));
+}
+
+function topoSort(){
+  const visited=new Set(), result=[];
+  function visit(node){
+    if(visited.has(node))return;
+    visited.add(node);
+    depGraph[node].forEach(visit);
+    result.push(node);
+  }
+  Object.keys(depGraph).forEach(visit);
+  return result.reverse();
+}
+
+document.getElementById('export').addEventListener('click',()=>{
+  const rows=[];
+  COLS.forEach(c=>ROWS.forEach(r=>{
+    const id=getCellId(c,r);
+    rows[r-1]=(rows[r-1]||'')+ (valueCache[id]==='#CYCLE'||valueCache[id]==='#ERR'? valueCache[id]: valueCache[id]) + (c===COLS[9]? '':',');
+  }));
+  csvArea.value=rows.join('\n');
+});
+
+recomputeAll();
+})();
+</script>
+</body>
+</html>

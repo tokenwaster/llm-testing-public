@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Bots — 24 Autonomous Pathfinders</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0f1117;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 1.6rem;
+    margin-bottom: 12px;
+    color: #7ecfff;
+    letter-spacing: 1px;
+  }
+  #hud {
+    display: flex;
+    gap: 32px;
+    align-items: center;
+    background: #1a1d2e;
+    border: 1px solid #2a2d42;
+    border-radius: 10px;
+    padding: 12px 28px;
+    margin-bottom: 16px;
+    font-size: 1.05rem;
+    box-shadow: 0 4px 20px rgba(0,0,0,.4);
+  }
+  #hud span { white-space: nowrap; }
+  #completed { color: #7eff91; font-weight: 600; }
+  #timer   { color: #ffd866; font-weight: 600; font-variant-numeric: tabular-nums; }
+  #reset {
+    background: #3a7bd5;
+    color: #fff;
+    border: none;
+    padding: 8px 22px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: .95rem;
+    font-weight: 600;
+    transition: background .15s;
+  }
+  #reset:hover { background: #5a9bf5; }
+  #maze {
+    border-radius: 8px;
+    box-shadow: 0 6px 32px rgba(0,0,0,.5);
+    display: block;
+  }
+</style>
+</head>
+<body>
+
+<h1>🤖 Maze Bots — 24 Pathfinders</h1>
+
+<div id="hud">
+  <span id="completed">0 / 24 completed</span>
+  <span id="timer">0.0s</span>
+  <button id="reset">Reset</button>
+</div>
+
+<canvas id="maze" width="630" height="630"></canvas>
+
+<script>
+"use strict";
+
+/* ================================================================
+   CONFIGURATION
+   ================================================================ */
+const MAZE_W = 21;          // logical width  (odd → walls on even indices)
+const MAZE_H = 21;          // logical height
+const CELL   = 30;          // px per cell
+const CANVAS_SIZE = MAZE_W * CELL;   // 630
+const NUM_BOTS = 24;
+
+/* ================================================================
+   MAZE GENERATION — Recursive Backtracker (DFS)
+   Grid cells: (r,c) where r,c ∈ [0, MAZE_H*2] × [0, MAZE_W*2]
+   A cell is "carved" (= floor) when visited.  Walls stay unvisited.
+   ================================================================ */
+function generateMaze() {
+  const W = MAZE_W * 2;
+  const H = MAZE_H * 2;
+  // 0 = wall, 1 = floor
+  const grid = Array.from({length: H + 1}, () => new Uint8Array(W + 1));
+
+  const visited = Array.from({length: H + 1}, () => new Uint8Array(W + 1));
+  const stack = [];
+
+  // Start from (1,1)
+  grid[1][1] = 1;
+  visited[1][1] = 1;
+  stack.push([1, 1]);
+
+  const dirs = [[0,-2],[0,2],[-2,0],[2,0]];
+
+  while (stack.length > 0) {
+    const [cr, cc] = stack[stack.length - 1];
+    // shuffle directions for randomness
+    const shuffled = dirs.slice().sort(() => Math.random() - .5);
+    let moved = false;
+    for (const [dr, dc] of shuffled) {
+      const nr = cr + dr, nc = cc + dc;
+      if (nr >= 0 && nr <= H && nc >= 0 && nc <= W && !visited[nr][nc]) {
+        visited[nr][nc] = 1;
+        grid[nr][nc] = 1;
+        // carve wall between
+        grid[cr + dr/2][cc + dc/2] = 1;
+        stack.push([nr, nc]);
+        moved = true;
+        break;
+      }
+    }
+    if (!moved) stack.pop();
+  }
+
+  return { grid, W, H };
+}
+
+/* ================================================================
+   BFS PATHFINDING
+   ================================================================ */
+function bfsPath(grid, startR, startC, endR, endC) {
+  const W = grid[0].length - 1;
+  const H = grid.length - 1;
+  if (startR === endR && startC === endC) return [{r: startR, c: startC}];
+
+  const visited = Array.from({length: H + 1}, () => new Uint8Array(W + 1));
+  const parent = Array.from({length: H + 1}, () => new Array(W + 1).fill(null));
+  const queue = [[startR, startC]];
+  visited[startR][startC] = 1;
+
+  while (queue.length > 0) {
+    const [r, c] = queue.shift();
+    if (r === endR && c === endC) {
+      // reconstruct path
+      const path = [];
+      let cur = [endR, endC];
+      while (cur) {
+        path.unshift({r: cur[0], c: cur[1]});
+        cur = parent[cur[0]][cur[1]];
+      }
+      return path;
+    }
+    for (const [dr, dc] of [[0,-1],[0,1],[-1,0],[1,0]]) {
+      const nr = r + dr, nc = c + dc;
+      if (nr >= 0 && nr <= H && nc >= 0 && nc <= W && !visited[nr][nc] && grid[nr][nc]) {
+        visited[nr][nc] = 1;
+        parent[nr][nc] = [r, c];
+        queue.push([nr, nc]);
+      }
+    }
+  }
+  return []; // unreachable (shouldn't happen in a perfect maze)
+}
+
+/* ================================================================
+   GAME STATE
+   ================================================================ */
+let mazeData = null;       // { grid, W, H }
+let spawnR = 1, spawnC = 1;
+let exitR  = MAZE_H * 2 - 1, exitC = MAZE_W * 2 - 1;
+
+let bots = [];             // array of bot objects
+let stepCount = 0;         // global simulation steps elapsed
+let startTime = 0;         // performance.now() when game started
+let animFrameId = null;    // rAF handle for live animation
+let lastTickTime = 0;      // for delta-time tracking
+
+// Bot palette — 24 distinct colours
+const BOT_COLORS = [
+  "#ff6b6b","#ee5a24","#feca57","#48dbfb","#ff9ff3",
+  "#54a0ff","#5f27cd","#01a3a4","#f368e0","#ff6348",
+  "#7bed9f","#70a1ff","#eccc68","#a29bfe","#fd79a8",
+  "#00cec9","#e17055","#6c5ce7","#00b894","#fdcb6e",
+  "#e84393","#0984e3","#2d98da","#b8e994"
+];
+
+function createBots() {
+  const path = bfsPath(mazeData.grid, spawnR, spawnC, exitR, exitC);
+  if (path.length === 0) return [];
+
+  bots = [];
+  for (let i = 0; i < NUM_BOTS; i++) {
+    // stagger start: each bot begins at a different step offset
+    const offset = Math.floor(i * (path.length / NUM_BOTS) * 0.4);
+    bots.push({
+      x: spawnC,           // column cell coord
+      y: spawnR,           // row cell coord
+      path,                // full BFS path from spawn → exit
+      pathIdx: 0,          // current index into path
+      offset,              // step at which this bot starts moving
+      done: false,
+      color: BOT_COLORS[i % BOT_COLORS.length],
+      pulsePhase: Math.random() * Math.PI * 2,
+    });
+  }
+}
+
+function resetGame() {
+  if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
+  mazeData = generateMaze();
+  spawnR = 1; spawnC = 1;
+  exitR = MAZE_H * 2 - 1; exitC = MAZE_W * 2 - 1;
+  stepCount = 0;
+  startTime = performance.now();
+  lastTickTime = startTime;
+  createBots();
+  updateHUD();
+  render();
+}
+
+/* ================================================================
+   TICK — synchronous simulation advance
+   Each call to tick(1) processes one discrete step:
+     every unfinished bot whose offset ≤ stepCount advances one cell.
+   ================================================================ */
+function tick(n) {
+  if (startTime === 0) startTime = performance.now();
+  for (let s = 0; s < n; s++) {
+    stepCount++;
+    let anyDone = true;
+    for (const b of bots) {
+      if (b.done) continue;
+      if (stepCount < b.offset) { anyDone = false; continue; }
+      // advance one cell along path
+      b.pathIdx++;
+      if (b.pathIdx >= b.path.length) {
+        b.done = true;
+        // snap to exit
+        const last = b.path[b.path.length - 1];
+        b.x = last.c;
+        b.y = last.r;
+      } else {
+        const cell = b.path[b.pathIdx];
+        b.x = cell.c;
+        b.y = cell.r;
+      }
+    }
+  }
+  // update elapsedMs based on real time for the timer display
+  updateHUD();
+}
+
+/* ================================================================
+   HUD UPDATE
+   ================================================================ */
+function getCompleted() {
+  return bots.filter(b => b.done).length;
+}
+
+function getElapsedMs() {
+  if (startTime === 0) return 0;
+  return performance.now() - startTime;
+}
+
+function updateHUD() {
+  document.getElementById("completed").textContent =
+    `${getCompleted()} / ${NUM_BOTS} completed`;
+  const secs = (getElapsedMs() / 1000).toFixed(1);
+  document.getElementById("timer").textContent = `${secs}s`;
+}
+
+/* ================================================================
+   RENDERING — Canvas
+   ================================================================ */
+const canvas = document.getElementById("maze");
+const ctx = canvas.getContext("2d");
+
+function render(time) {
+  if (!time) time = performance.now();
+  const dt = (time - lastTickTime) / 1000;
+  lastTickTime = time;
+
+  // Auto-advance one step every ~80 ms for live animation
+  // We track a virtual accumulator so tick() stays the source of truth
+  if (!render._acc) render._acc = 0;
+  render._acc += dt * 1000;
+  while (render._acc >= 80) {
+    tick(1);
+    render._acc -= 80;
+  }
+
+  updateHUD();
+
+  /* ---- draw maze ---- */
+  ctx.fillStyle = "#0f1117";
+  ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+  const g = mazeData.grid;
+  for (let r = 0; r <= MAZE_H * 2; r++) {
+    for (let c = 0; c <= MAZE_W * 2; c++) {
+      if (g[r][c]) {
+        // floor cell — subtle gradient
+        const shade = ((r + c) % 2 === 0) ? "#1e2235" : "#181c2d";
+        ctx.fillStyle = shade;
+        ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+      } else {
+        // wall
+        ctx.fillStyle = "#2a2f4a";
+        ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+        // wall highlight
+        ctx.fillStyle = "#363d5e";
+        ctx.fillRect(c * CELL, r * CELL, CELL, 2);
+        ctx.fillRect(c * CELL, r * CELL, 2, CELL);
+      }
+    }
+  }
+
+  /* ---- spawn & exit markers ---- */
+  // Spawn glow
+  const sg = ctx.createRadialGradient(
+    (spawnC + .5) * CELL, (spawnR + .5) * CELL, 2,
+    (spawnC + .5) * CELL, (spawnR + .5) * CELL, CELL);
+  sg.addColorStop(0, "rgba(126,255,145,.35)");
+  sg.addColorStop(1, "rgba(126,255,145,0)");
+  ctx.fillStyle = sg;
+  ctx.fillRect(spawnC * CELL - CELL/2, spawnR * CELL - CELL/2, CELL*2, CELL*2);
+
+  // Exit glow (pulsing)
+  const pulse = .25 + .15 * Math.sin(time / 300);
+  const eg = ctx.createRadialGradient(
+    (exitC + .5) * CELL, (exitR + .5) * CELL, 2,
+    (exitC + .5) * CELL, (exitR + .5) * CELL, CELL);
+  eg.addColorStop(0, `rgba(255,107,107,${pulse})`);
+  eg.addColorStop(1, "rgba(255,107,107,0)");
+  ctx.fillStyle = eg;
+  ctx.fillRect(exitC * CELL - CELL/2, exitR * CELL - CELL/2, CELL*2, CELL*2);
+
+  // Exit label
+  ctx.fillStyle = "#ff6b6b";
+  ctx.font = "bold 14px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("🏁", (exitC + .5) * CELL, (exitR + .5) * CELL);
+
+  // Spawn label
+  ctx.fillStyle = "#7eff91";
+  ctx.font = "bold 12px sans-serif";
+  ctx.fillText("S", (spawnC + .5) * CELL, (spawnR + .5) * CELL);
+
+  /* ---- draw bots ---- */
+  for (const b of bots) {
+    const cx = (b.x + .5) * CELL;
+    const cy = (b.y + .5) * CELL;
+    const radius = b.done ? CELL * .3 : CELL * (.32 + .06 * Math.sin(time / 200 + b.pulsePhase));
+
+    // glow
+    const bg = ctx.createRadialGradient(cx, cy, radius * .3, cx, cy, radius * 2.5);
+    bg.addColorStop(0, b.color + "aa");
+    bg.addColorStop(1, b.color + "00");
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 2.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // body
+    ctx.fillStyle = b.done ? "#ffffff" : b.color;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // inner highlight
+    ctx.fillStyle = "rgba(255,255,255,.35)";
+    ctx.beginPath();
+    ctx.arc(cx - radius * .2, cy - radius * .2, radius * .4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // done indicator
+    if (b.done) {
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 10px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("✓", cx, cy);
+    }
+  }
+
+  animFrameId = requestAnimationFrame(render);
+}
+
+/* ================================================================
+   INIT & EVENT BINDING
+   ================================================================ */
+document.getElementById("reset").addEventListener("click", () => {
+  resetGame();
+});
+
+// Expose programmatic API on window.game
+window.game = {
+  get bots()       { return bots; },
+  get completed()  { return getCompleted(); },
+  get elapsedMs()  { return getElapsedMs(); },
+  tick(n)          { tick(n); },
+  reset()          { resetGame(); },
+};
+
+// Start the game
+resetGame();
+animFrameId = requestAnimationFrame(render);
+</script>
+</body>
+</html>

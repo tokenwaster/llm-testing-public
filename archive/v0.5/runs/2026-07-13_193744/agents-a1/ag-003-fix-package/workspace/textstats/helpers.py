@@ -1,0 +1,16 @@
+"""Tokenisation helpers for textstats."""
+
+import re
+
+PUNCT = ".,;:!?\"'()"
+
+
+def tokenize(text):
+    """Split text into raw word tokens on any whitespace."""
+    return re.split(r'\s+', text.strip())
+
+
+def clean(token):
+    """Strip surrounding punctuation from a token and convert to lowercase."""
+    cleaned = token.strip(PUNCT)
+    return cleaned.lower()

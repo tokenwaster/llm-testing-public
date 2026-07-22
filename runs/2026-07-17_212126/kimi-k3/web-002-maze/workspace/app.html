@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maze Bots — Trémaux Exploration</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background: radial-gradient(1200px 800px at 50% -10%, #182030 0%, #0c0f14 60%);
+    color: #e8ecf1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    display: flex; flex-direction: column; align-items: center;
+    gap: 12px; padding: 18px 12px 28px;
+  }
+  h1 { font-size: 17px; letter-spacing: 2px; margin: 2px 0; font-weight: 700; color: #cdd6e4; }
+  h1 .accent { color: #4ade80; }
+  #hud {
+    display: flex; align-items: center; gap: 22px; flex-wrap: wrap; justify-content: center;
+    background: rgba(23,28,36,.9); border: 1px solid #2a3240; border-radius: 12px;
+    padding: 10px 18px; font-size: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.35);
+  }
+  #hud .label { color: #8b96a5; margin-right: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 1px; }
+  #completed { color: #4ade80; font-weight: 700; }
+  #timer { color: #60a5fa; font-weight: 700; min-width: 4ch; display: inline-block; }
+  .frozen #timer, .frozen .label { color: #4ade80; }
+  #reset {
+    background: #2563eb; color: #fff; border: 0; border-radius: 8px;
+    padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer;
+    transition: background .15s ease, transform .05s ease;
+  }
+  #reset:hover { background: #1d4ed8; }
+  #reset:active { transform: translateY(1px); }
+  #maze {
+    background: rgba(23,28,36,.9); border: 1px solid #2a3240; border-radius: 12px;
+    padding: 12px; line-height: 0; box-shadow: 0 10px 40px rgba(0,0,0,.45);
+  }
+  #board { border-radius: 6px; }
+  #status { font-size: 12px; color: #8b96a5; letter-spacing: .5px; text-align: center; max-width: 560px; }
+  #status.done { color: #4ade80; }
+</style>
+</head>
+<body>
+  <h1>MAZE BOTS <span class="accent">· TRÉMAUX EXPLORATION ·</span> 24 BOTS</h1>
+  <div id="hud">
+    <span><span class="label">Completed</span><span id="completed">0 / 24</span></span>
+    <span id="timerWrap"><span class="label">Time (ticks)</span><span id="timer">0</span></span>
+    <button id="reset" title="Generate a new maze">↻ Reset</button>
+  </div>
+  <div id="maze"><canvas id="board"></canvas></div>
+  <div id="status"></div>
+
+<script>
+(function () {
+'use strict';
+
+/* ================= RNG: mulberry32 — fully deterministic for a given seed ================= */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ================= Config ================= */
+const ROWS = 20, COLS = 20;          // >= 15x15 required
+const CELL = 24, PAD = 3;
+const BOT_COUNT = 24;
+const TICKS_PER_SEC = 14;
+const W = PAD * 2 + COLS * CELL;     // 486 px
+const H = PAD * 2 + ROWS * CELL;     // 486 px
+
+const DIRS = [
+  { dr: -1, dc:  0, wall: 'n', opp: 's' }, // 0 = N
+  { dr:  0, dc:  1, wall: 'e', opp: 'w' }, // 1 = E
+  { dr:  1, dc:  0, wall: 's', opp: 'n' }, // 2 = S
+  { dr:  0, dc: -1, wall: 'w', opp: 'e' }  // 3 = W
+];
+const key = (r, c) => r * COLS + c;
+
+/* ================= Simulation state ================= */
+const state = {
+  seed: 0,
+  maze: null,
+  spawn: { r: 0, c: 0 },
+  exit:  { r: 0, c: 0 },
+  bots: [],
+  elapsed: 0,
+  remaining: BOT_COUNT
+};
+
+/* ======= Maze generation: recursive backtracker => a PERFECT maze (a spanning tree) ======= */
+function generateMaze(rng) {
+  const maze = [];
+  for (let r = 0; r < ROWS; r++) {
+    const row = [];
+    for (let c = 0; c < COLS; c++) row.push({ n: true, e: true, s: true, w: true });
+    maze.push(row);
+  }
+  const seen = new Uint8Array(ROWS * COLS);
+  const stack = [{ r: 0, c: 0 }];
+  seen[0] = 1;
+  while (stack.length) {
+    const cur = stack[stack.length - 1];
+    const opts = [];
+    for (let i = 0; i < 4; i++) {
+      const d = DIRS[i];
+      const nr = cur.r + d.dr, nc = cur.c + d.dc;
+      if (nr < 0 || nc < 0 || nr >= ROWS || nc >= COLS) continue;
+      if (seen[key(nr, nc)]) continue;
+      opts.push({ d: d, nr: nr, nc: nc });
+    }
+    if (!opts.length) { stack.pop(); continue; }
+    const p = opts[Math.floor(rng() * opts.length)];
+    maze[cur.r][cur.c][p.d.wall] = false;
+    maze[p.nr][p.nc][p.d.opp] = false;
+    seen[key(p.nr, p.nc)] = 1;
+    stack.push({ r: p.nr, c: p.nc });
+  }
+  return maze;
+}
+
+/* Pick the exit as the farthest cell from spawn (setup-only BFS; bots never see this). */
+function farthestCell(maze, from) {
+  const dist = new Int32Array(ROWS * COLS).fill(-1);
+  dist[key(from.r, from.c)] = 0;
+  const q = [{ r: from.r, c: from.c }];
+  let head = 0;
+  let best = q[0];
+  while (head < q.length) {
+    const cur = q[head++];
+    const cd = dist[key(cur.r, cur.c)];
+    if (cd > dist[key(best.r, best.c)]) best = cur;
+    const w = maze[cur.r][cur.c];
+    for (let i = 0; i < 4; i++) {
+      const d = DIRS[i];
+      if (w[d.wall]) continue;
+      const nr = cur.r + d.dr, nc = cur.c + d.dc;
+      if (dist[key(nr, nc)] !== -1) continue;
+      dist[key(nr, nc)] = cd + 1;
+      q.push({ r: nr, c: nc });
+    }
+  }
+  return { r: best.r, c: best.c };
+}
+
+/* ================= Bots: memory-only DFS / Trémaux explorers ================= */
+function botColor(i) {
+  const hue = Math.round((i * 137.508) % 360);   // golden-angle spread => distinct dots
+  const light = 55 + (i % 2) * 10;
+  return 'hsl(' + hue + ', 85%, ' + light + '%)';
+}
+
+function createBots(rng) {
+  const bots = [];
+  for (let i = 0; i < BOT_COUNT; i++) {
+    // Per-bot seeded direction preference so the swarm spreads out.
+    const pref = [0, 1, 2, 3];
+    for (let j = pref.length - 1; j > 0; j--) {
+      const k = Math.floor(rng() * (j + 1));
+      const tmp = pref[j]; pref[j] = pref[k]; pref[k] = tmp;
+    }
+    const ja = i * 2.399963;
+    bots.push({
+      id: i,
+      color: botColor(i),
+      r: state.spawn.r,
+      c: state.spawn.c,
+      path: [{ r: state.spawn.r, c: state.spawn.c }],   // every cell entered, in order
+      deadEnds: [],                                      // cells this bot marked dead
+      finishTick: null,
+      // ---- private memory (local knowledge only) ----
+      _pref: pref,
+      _stack: [{ r: state.spawn.r, c: state.spawn.c }], // DFS backtrack stack
+      _visited: new Set([key(state.spawn.r, state.spawn.c)]),
+      _dead: new Set(),
+      // ---- render-only fields ----
+      _jx: Math.cos(ja) * 1.7,
+      _jy: Math.sin(ja) * 1.7,
+      _rx: null, _ry: null
+    });
+  }
+  return bots;
+}
+
+function markDead(bot, r, c) {
+  const k = key(r, c);
+  if (!bot._dead.has(k)) {
+    bot._dead.add(k);
+    bot.deadEnds.push({ r: r, c: c });
+  }
+}
+
+function moveBot(bot, nr, nc) {
+  bot.r = nr; bot.c = nc;
+  bot._visited.add(key(nr, nc));
+  bot.path.push({ r: nr, c: nc });
+  if (nr === state.exit.r && nc === state.exit.c) {
+    bot.finishTick = state.elapsed;
+    state.remaining--;
+  }
+}
+
+/* One tick of one bot: sense ONLY the walls of the cell it stands in, then
+   - walk into an unvisited open neighbour (its own preference order), or
+   - if none exist, record this cell as a dead/fully-explored branch and backtrack
+     one cell along its own stack. On a perfect maze this traverses each passage
+     at most twice per bot (once in, once out). No global knowledge is ever used. */
+function stepBot(bot) {
+  const w = state.maze[bot.r][bot.c];
+  for (let i = 0; i < 4; i++) {
+    const d = DIRS[bot._pref[i]];
+    if (w[d.wall]) continue;
+    const nr = bot.r + d.dr, nc = bot.c + d.dc;
+    if (bot._visited.has(key(nr, nc))) continue;
+    bot._stack.push({ r: nr, c: nc });
+    moveBot(bot, nr, nc);
+    return;
+  }
+  bot._stack.pop();
+  markDead(bot, bot.r, bot.c);
+  if (!bot._stack.length) return; // whole maze exhausted (exit is always found first)
+  const parent = bot._stack[bot._stack.length - 1];
+  moveBot(bot, parent.r, parent.c);
+}
+
+function tickOnce() {
+  if (state.remaining === 0) return;  // timer FROZEN: last bot already arrived
+  state.elapsed++;
+  for (let i = 0; i < state.bots.length; i++) {
+    const b = state.bots[i];
+    if (b.finishTick === null) stepBot(b);
+  }
+}
+
+function init(seed) {
+  state.seed = (typeof seed === 'number' && isFinite(seed))
+    ? (seed >>> 0)
+    : ((Math.random() * 4294967296) >>> 0);
+  const rng = mulberry32(state.seed);
+  state.maze = generateMaze(rng);
+  state.spawn = { r: 0, c: 0 };
+  state.exit = farthestCell(state.maze, state.spawn);
+  state.elapsed = 0;
+  state.remaining = BOT_COUNT;
+  state.bots = createBots(rng);
+}
+
+/* ================= Public scripting API ================= */
+window.game = {
+  tick: function (n) {
+    n = Math.floor(n);
+    if (!(n > 0)) return;
+    for (let i = 0; i < n; i++) tickOnce();   // identical to calling tick(1) n times
+  },
+  reset: function (seed) { init(seed); return state.seed; },
+  get elapsed() { return state.elapsed; },
+  get size()  { return { rows: ROWS, cols: COLS }; },
+  get spawn() { return { r: state.spawn.r, c: state.spawn.c }; },
+  get exit()  { return { r: state.exit.r,  c: state.exit.c  }; },
+  walls: function (r, c) {
+    const w = state.maze[r][c];
+    return { n: w.n, e: w.e, s: w.s, w: w.w };
+  },
+  get bots() { return state.bots; },
+  get seed() { return state.seed; }
+};
+
+/* ================= Rendering ================= */
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const dpr = Math.min(2, window.devicePixelRatio || 1);
+canvas.width = Math.round(W * dpr);
+canvas.height = Math.round(H * dpr);
+canvas.style.width = W + 'px';
+canvas.style.height = H + 'px';
+ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+const completedEl = document.getElementById('completed');
+const timerEl = document.getElementById('timer');
+const timerWrap = document.getElementById('timerWrap');
+const statusEl = document.getElementById('status');
+
+function cellCenter(r, c) {
+  return [PAD + c * CELL + CELL / 2, PAD + r * CELL + CELL / 2];
+}
+
+function drawMarker(cell, fill, stroke, label) {
+  const x = PAD + cell.c * CELL, y = PAD + cell.r * CELL;
+  ctx.fillStyle = fill;
+  ctx.fillRect(x + 2, y + 2, CELL - 4, CELL - 4);
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(x + 2.75, y + 2.75, CELL - 5.5, CELL - 5.5);
+  ctx.fillStyle = stroke;
+  ctx.font = 'bold 11px ui-monospace, Menlo, Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + CELL / 2, y + CELL / 2 + 0.5);
+}
+
+function drawMaze() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0d1017';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#121722';
+  ctx.fillRect(PAD, PAD, COLS * CELL, ROWS * CELL);
+
+  ctx.strokeStyle = '#46536a';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'square';
+  ctx.beginPath();
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const w = state.maze[r][c];
+      const x = PAD + c * CELL, y = PAD + r * CELL;
+      if (w.n) { ctx.moveTo(x, y); ctx.lineTo(x + CELL, y); }
+      if (w.w) { ctx.moveTo(x, y); ctx.lineTo(x, y + CELL); }
+      if (r === ROWS - 1 && w.s) { ctx.moveTo(x, y + CELL); ctx.lineTo(x + CELL, y + CELL); }
+      if (c === COLS - 1 && w.e) { ctx.moveTo(x + CELL, y); ctx.lineTo(x + CELL, y + CELL); }
+    }
+  }
+  ctx.stroke();
+
+  drawMarker(state.spawn, 'rgba(96,165,250,0.20)', '#60a5fa', 'S');
+  drawMarker(state.exit,  'rgba(74,222,128,0.25)', '#4ade80', 'E');
+}
+
+function drawBots(dt) {
+  const k = Math.min(1, dt * 0.02);   // exponential smoothing => smooth interpolated motion
+  let i, b, t, tx, ty, dx, dy;
+
+  for (i = 0; i < state.bots.length; i++) {
+    b = state.bots[i];
+    t = cellCenter(b.r, b.c);
+    tx = t[0] + b._jx; ty = t[1] + b._jy;
+    if (b._rx === null) { b._rx = tx; b._ry = ty; continue; }
+    dx = tx - b._rx; dy = ty - b._ry;
+    if (Math.abs(dx) > CELL * 3 || Math.abs(dy) > CELL * 3) { b._rx = tx; b._ry = ty; }
+    else { b._rx += dx * k; b._ry += dy * k; }
+  }
+
+  // short fading tails from each bot's own recent path
+  ctx.lineWidth = 2;
+  for (i = 0; i < state.bots.length; i++) {
+    b = state.bots[i];
+    const p = b.path;
+    const start = Math.max(0, p.length - 9);
+    if (p.length - start < 2) continue;
+    ctx.strokeStyle = b.color;
+    ctx.globalAlpha = 0.22;
+    ctx.beginPath();
+    for (let j = start; j < p.length; j++) {
+      t = cellCenter(p[j].r, p[j].c);
+      if (j === start) ctx.moveTo(t[0] + b._jx, t[1] + b._jy);
+      else ctx.lineTo(t[0] + b._jx, t[1] + b._jy);
+    }
+    ctx.lineTo(b._rx, b._ry);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  for (i = 0; i < state.bots.length; i++) {
+    b = state.bots[i];
+    ctx.beginPath();
+    ctx.arc(b._rx, b._ry, CELL * 0.3, 0, Math.PI * 2);
+    ctx.fillStyle = b.color;
+    ctx.fill();
+    ctx.lineWidth = 1.4;
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.stroke();
+    if (b.finishTick !== null) {
+      ctx.beginPath();
+      ctx.arc(b._rx, b._ry, CELL * 0.45, 0, Math.PI * 2);
+      ctx.strokeStyle = '#4ade80';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+  }
+}
+
+function updateHud() {
+  const done = BOT_COUNT - state.remaining;
+  completedEl.textContent = done + ' / ' + BOT_COUNT;
+  timerEl.textContent = String(state.elapsed);
+  timerWrap.classList.toggle('frozen', state.remaining === 0);
+  if (state.remaining === 0) {
+    statusEl.textContent = 'All ' + BOT_COUNT + ' bots discovered the exit — timer frozen at ' +
+      state.elapsed + ' ticks · seed ' + state.seed;
+    statusEl.classList.add('done');
+  } else {
+    statusEl.textContent = 'seed ' + state.seed + ' · ' + ROWS + '×' + COLS +
+      ' perfect maze · memory-only DFS (Trémaux): every passage ≤ 2 traversals per bot';
+    statusEl.classList.remove('done');
+  }
+}
+
+/* ================= Main loop ================= */
+const TICK_MS = 1000 / TICKS_PER_SEC;
+let last = performance.now();
+let acc = 0;
+
+function frame(now) {
+  const dt = Math.min(100, now - last);
+  last = now;
+  if (state.remaining > 0) {
+    acc += dt;
+    let guard = 0;
+    while (acc >= TICK_MS && guard < 60) {
+      window.game.tick(1);
+      acc -= TICK_MS;
+      guard++;
+    }
+    if (guard >= 60) acc = 0;
+  } else {
+    acc = 0;
+  }
+  drawMaze();
+  drawBots(dt);
+  updateHud();
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('reset').addEventListener('click', function () { window.game.reset(); });
+
+init();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

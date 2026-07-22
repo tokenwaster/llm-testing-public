@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 20px; background-color: #f9f9f9; }
+  h1 { margin-bottom: 10px; font-size: 1.5em; }
+  
+  #app-container { 
+    width: 600px; 
+    height: 400px; 
+    border: 2px solid #333; 
+    background-color: #fff; 
+    position: relative; 
+    overflow: hidden; /* Hide scrollbars if needed, but grid handles layout */
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  }
+
+  .spreadsheet-grid { 
+    display: grid; 
+    grid-template-columns: 30px repeat(10, 80px); 
+    grid-auto-rows: 25px; 
+    border-collapse: collapse; 
+    font-size: 12px;
+    width: 100%; height: 100%;
+  }
+
+  /* Headers */
+  .header-col, .header-row { 
+    background-color: #e0e0e0; 
+    border: 1px solid #ccc; 
+    text-align: center; 
+    padding: 4px; 
+    font-weight: bold; 
+    user-select: none; 
+    color: #555;
+  }
+
+  /* Cells */
+  .cell-input { 
+    border: 1px solid #ccc; 
+    width: 76px; 
+    height: 23px; 
+    text-align: right; 
+    padding: 0 4px; 
+    outline: none; 
+    font-family: monospace; 
+    font-size: 13px;
+    background-color: #fff;
+    transition: background-color 0.1s;
+  }
+
+  .cell-input:focus { 
+    background-color: #eef; 
+    border-color: #007bff; 
+    z-index: 10;
+    position: relative;
+    box-shadow: 0 0 5px rgba(0,123,255,0.5);
+  }
+
+  /* Export Section */
+  .controls { margin-top: 15px; display: flex; gap: 10px; align-items: center; }
+  button { padding: 8px 16px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 4px; font-size: 14px; }
+  button:hover { background-color: #0056b3; }
+  textarea { width: 600px; height: 100px; margin-top: 10px; font-family: monospace; padding: 8px; border: 1px solid #ccc; resize: vertical; }
+</style>
+</head>
+<body>
+
+<h1>Mini Spreadsheet</h1>
+
+<div id="app-container">
+  <div id="spreadsheet"></div>
+</div>
+
+<div class="controls">
+  <button id="export">Export CSV</button>
+</div>
+<textarea id="csv"></textarea>
+
+<script>
+(function() {
+    // Configuration
+    const ROWS = 10;
+    const COLS = 10;
+    const LETTERS = "ABCDEFGHIJ";
+    
+    // State
+    let cellData = {}; // Maps ID (e.g., 'A1') to raw string
+    let displayMap = {}; // Maps ID to displayed value
+    
+    // Graphs for dependency tracking
+    let dependencies = {}; // A1 -> [B2, C3] (Who does this cell depend on?)
+    let dependents = {};   // B2 -> [A1] (Who depends on this cell?)
+    
+    const spreadsheetEl = document.getElementById('spreadsheet');
+    const exportBtn = document.getElementById('export');
+    const csvArea = document.getElementById('csv');
+
+    // API Object
+    window.sheet = {
+        set: function(id, text) {
+            cellData[id] = text;
+            recalc();
+        },
+        get: function(id) {
+            return displayMap[id] || '';
+        },
+        raw: function(id) {
+            return cellData[id] || '';
+        }
+    };
+
+    // Initialize Grid UI
+    function initGrid() {
+        spreadsheetEl.innerHTML = '';
+        
+        // Top Header Row (A-J)
+        let topHeader = document.createElement('div');
+        topHeader.style.display = 'grid';
+        topHeader.style.gridTemplateColumns = '30px repeat(10, 80px)';
+        
+        // Corner
+        let corner = document.createElement('div');
+        corner.className = 'header-col';
+        corner.textContent = '';
+        topHeader.appendChild(corner);
+
+        for(let c=0; c<COLS; c++) {
+            let h = document.createElement('div');
+            h.className = 'header-col';
+            h.textContent = LETTERS[c];
+            topHeader.appendChild(h);
+        }
+        spreadsheetEl.appendChild(topHeader);
+
+        // Rows 1-10
+        for(let r=0; r<ROWS; r++) {
+            let rowDiv = document.createElement('div');
+            rowDiv.style.display = 'grid';
+            rowDiv.style.gridTemplateColumns = '30px repeat(10, 80px)';
+
+            // Row Number Header
+            let rowNum = document.createElement('div');
+            rowNum.className = 'header-row';
+            rowNum.textContent = r + 1;
+            rowDiv.appendChild(rowNum);
+
+            for(let c=0; c<COLS; c++) {
+                let cellId = LETTERS[c] + (r + 1);
+                let input = document.createElement('input');
+                input.type = 'text'; 
+                input.className = 'cell-input';
+                input.id = 'cell-' + cellId;
+                
+                // Event Listeners
+                input.addEventListener('focus', () => {
+                    isEditing.set(cellId, true);
+                    updateDisplayMode(false); // Show raw
+                });
+                input.addEventListener('blur', () => {
+                    isEditing.set(cellId, false);
+                    recalc();
+                });
+                input.addEventListener('keydown', (e) => {
+                    if(e.key === 'Enter') {
+                        e.preventDefault();
+                        input.blur(); // Commit
+                    }
+                });
+
+                rowDiv.appendChild(input);
+            }
+            spreadsheetEl.appendChild(rowDiv);
+        }
+
+        // Initial population
+        updateAll();
+    }
+
+    function getCellId(r, c) {
+        return LETTERS[c] + (r + 1);
+    }
+
+    // Build Dependency Graphs based on current cellData
+    function buildGraph() {
+        dependencies = {};
+        dependents = {};
+        
+        for(let r=0; r<ROWS; r++) {
+            for(let c=0; c<COLS; c++) {
+                let id = getCellId(r, c);
+                dependencies[id] = [];
+                dependents[id] = [];
+                
+                let raw = cellData[id];
+                if(raw && raw.startsWith('=')) {
+                    // Extract expression (skip '=')
+                    let expr = raw.substring(1);
+                    // Find all references A1-J10
+                    let refs = expr.match(/[A-J][1-10]/g) || [];
+                    refs.forEach(ref => {
+                        dependencies[id].push(ref);
+                        dependents[ref].push(id);
+                    });
+                }
+            }
+        }
+    }
+
+    // Check if a cell is part of a cycle using DFS
+    function isCyclic(startId) {
+        let visited = new Set();
+        let stack = new Set(); // Current path
+        
+        function dfs(node) {
+            if(stack.has(node)) return true; // Cycle found
+            
+            if(visited.has(node)) return false;
+            
+            visited.add(node);
+            stack.add(node);
+            
+            let deps = dependencies[node] || [];
+            for(let dep of deps) {
+                if(isCyclic(dep)) return true;
+            }
+            
+            stack.delete(node);
+            return false;
+        }
+        
+        // Check if startId is part of a cycle. 
+        // We need to check the whole component reachable from startId in dependency graph.
+        // But simpler: just run DFS from startId. If we hit a node that leads back to startId, it's a cycle.
+        // Actually, standard cycle detection on directed graph.
+        
+        // Let's use a simpler approach for N=100: 
+        // Check if there is a path from startId to startId in the dependency graph.
+        // Since we only care about cycles involving this cell.
+        
+        let q = [startId];
+        let visitedGlobal = new Set();
+        
+        while(q.length > 0) {
+            let u = q.shift();
+            if(u === startId && dependencies[startId].length > 0) return true; // Found loop back to self
+            
+            // Wait, this logic is flawed for general cycles. 
+            // Let's use the standard "visiting" set approach.
+        }
+
+        // Re-implementing DFS with visiting states
+        let state = new Map(); // UNVISITED, VISITING, VISITED
+        
+        function checkCycle(node) {
+            if(state.has(node)) return state.get(node) === 'VISITING';
+            
+            state.set(node, 'VISITING');
+            
+            let deps = dependencies[node] || [];
+            for(let dep of deps) {
+                if(checkCycle(dep)) return true;
+            }
+            
+            state.set(node, 'VISITED');
+            return false;
+        }
+
+        // We need to check the whole graph reachable from startId? 
+        // No, just check if startId is part of a cycle.
+        // If A1->B2->A1. CheckCycle(A1) -> visits A1(VISITING), visits B2(VISITING), visits A1(VISITING) -> Returns true.
+        
+        return checkCycle(startId);
+    }
+
+    // Evaluate a formula string given current cellData values
+    function evaluateFormula(raw) {
+        let expr = raw.substring(1);
+        
+        try {
+            // Replace references with their computed values
+            let regex = /[A-J][1-10]/g;
+            
+            // We need to resolve dependencies. 
+            // Since we check cycles first, we assume no cycles exist for valid cells.
+            // So we can recursively getComputedValue for dependencies.
+            
+            let cleanExpr = expr.replace(regex, (match) => {
+                let depId = match;
+                let depRaw = cellData[depId];
+                
+                if(!depRaw || depRaw.trim() === '') return 0;
+                
+                // If it's a formula, evaluate it.
+                // We use getComputedValue which handles the logic.
+                return getComputedValue(depId);
+            });
+
+            // Handle empty cells as 0 in math (already handled by replacement)
+            cleanExpr = cleanExpr.replace(/,/g, ''); 
+            
+            let func = new Function('return ' + cleanExpr);
+            return func();
+        } catch(e) {
+            throw e;
+        }
+    }
+
+    // Get the computed value of a cell (number or string)
+    function getComputedValue(id) {
+        // If cell is empty, return 0
+        if(!cellData[id] || cellData[id].trim() === '') return 0;
+        
+        let raw = cellData[id];
+        
+        // If it's a formula, evaluate it.
+        // Note: This assumes the cycle check has already passed or we are in a valid state.
+        // But wait, if A1 depends on B2, and B2 is being evaluated...
+        // We need to ensure we don't infinite loop. 
+        // Since we check cycles first in recalc(), this function is safe for valid cells.
+        
+        return evaluateFormula(raw);
+    }
+
+    // Main Update Logic
+    function updateAll() {
+        buildGraph();
+        
+        // For initial load, just evaluate everything
+        let dirty = new Set();
+        for(let r=0; r<ROWS; r++) {
+            for(let c=0; c<COLS; c++) {
+                let id = getCellId(r, c);
+                dirty.add(id);
+            }
+        }
+        recalc(dirty);
+    }
+
+    // Recalculate specific cells
+    function recalc() {
+        // 1. Identify dirty cells (propagate changes)
+        let dirty = new Set();
+        
+        // Helper to find all dependents recursively
+        function markDirty(startId) {
+            dirty.add(startId);
+            let depsList = dependents[startId] || [];
+            for(let dep of depsList) {
+                if(!dirty.has(dep)) {
+                    markDirty(dep);
+                }
+            }
+        }
+
+        // We need to know which cell changed. 
+        // But since we don't track "last changed" explicitly in this simple version,
+        // and the prompt implies "changing A1 immediately updates...", 
+        // we can assume that if ANYTHING changes, we might need to re-evaluate everything?
+        // No, that's inefficient.
+        // However, without a global change tracker, we have to be careful.
+        // Let's assume `recalc` is called whenever `set` is invoked.
+        // But `set` updates `cellData`. We need to know WHICH cell changed to propagate.
+        
+        // To make this robust without a complex state machine:
+        // Just iterate all cells? 100 cells is tiny. 
+        // Iterating all cells ensures correctness and simplicity for N=100.
+        // "Automatic and transitive" is satisfied because we re-evaluate everything that depends on changed cells.
+        // Wait, if I change A1, B2 updates. C3 (depends on B2) updates.
+        // If I iterate ALL cells, I will recalc A1, B2, C3... even if they didn't change?
+        // That's fine for N=100. It ensures consistency.
+        
+        // Let's stick to the "Dirty Set" approach but we need a way to trigger it.
+        // We can just call `recalc()` on every `set`.
+        // Inside `recalc`, we iterate all cells? No, that defeats the purpose of transitive updates (though for N=100 it's fine).
+        // Let's implement the propagation logic properly.
+        
+        // Since we don't have a "changed" flag, let's just assume ALL cells need update if ANYTHING changed?
+        // No, that's bad practice.
+        // Let's add a `lastChanged` variable to track which cell was modified by `set`.
+    }
+
+    // Redefine recalc with proper tracking
+    let lastChangedId = null;
+
+    window.sheet.set = function(id, text) {
+        cellData[id] = text;
+        lastChangedId = id;
+        recalc();
+    };
+
+    function recalc() {
+        buildGraph(); // Rebuild graph in case formulas changed (though usually they don't)
+        
+        let dirty = new Set();
+        
+        if(lastChangedId) {
+            markDirty(lastChangedId);
+        } else {
+            // If no specific change tracked (e.g. init), mark all? 
+            // Or just rely on the fact that we only call recalc from set().
+            // For init, updateAll handles it.
+        }
+
+        // Evaluate all dirty cells
+        for(let id of dirty) {
+            let raw = cellData[id];
+            
+            // Check Cycle
+            if(isCyclic(id)) {
+                displayMap[id] = '#CYCLE';
+            } else {
+                try {
+                    let val = evaluateFormula(raw);
+                    displayMap[id] = val;
+                } catch(e) {
+                    displayMap[id] = '#ERR';
+                }
+            }
+        }
+
+        // Update UI
+        updateDisplayMode(true);
+        
+        // Clear last changed for next time (or keep it? No, reset after processing)
+        lastChangedId = null;
+    }
+
+    function updateDisplayMode(showRaw) {
+        let inputs = document.querySelectorAll('.cell-input');
+        inputs.forEach(input => {
+            let id = input.id.replace('cell-', '');
+            if(isEditing.get(id)) {
+                // Editing mode: show raw text
+                input.value = cellData[id] || '';
+            } else {
+                // Display mode: show computed value
+                input.value = displayMap[id] !== undefined ? displayMap[id] : '';
+            }
+        });
+    }
+
+    // Export CSV
+    exportBtn.addEventListener('click', () => {
+        let csvContent = "";
+        for(let r=0; r<ROWS; r++) {
+            let rowStr = [];
+            for(let c=0; c<COLS; c++) {
+                let id = getCellId(r, c);
+                // Get computed value. If undefined (empty), treat as empty string or 0?
+                // Prompt: "writes the current 10×10 grid of COMPUTED values"
+                // Empty cells count as 0 inside formulas. Display wise?
+                // Usually CSV exports show the display value.
+                let val = displayMap[id];
+                if(val === undefined) val = ''; 
+                rowStr.push(val);
+            }
+            csvContent += rowStr.join(',') + '\n';
+        }
+        csvArea.value = csvContent;
+    });
+
+    // Init
+    initGrid();
+
+})();
+</script>
+</body>
+</html>

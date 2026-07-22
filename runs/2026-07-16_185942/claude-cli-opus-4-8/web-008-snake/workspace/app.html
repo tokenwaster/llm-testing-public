@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snake</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --accent: #4ade80;
+    --accent-dim: #22c55e;
+    --food: #f87171;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+    --border: #2a2f3a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+  }
+  body {
+    background: radial-gradient(1200px 800px at 50% -10%, #1a1f2b 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    gap: 18px;
+    padding: 24px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent);
+    text-shadow: 0 0 18px rgba(74, 222, 128, 0.35);
+  }
+  .hud {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    font-variant-numeric: tabular-nums;
+  }
+  #score {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  #score span { color: var(--accent); }
+  .status {
+    font-size: 13px;
+    color: var(--muted);
+    min-width: 90px;
+  }
+  .status.dead { color: var(--food); font-weight: 600; }
+  .board-wrap {
+    padding: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.45), inset 0 0 0 1px rgba(255,255,255,0.02);
+  }
+  #snake {
+    display: block;
+    background: #0b0d12;
+    border-radius: 8px;
+    image-rendering: pixelated;
+  }
+  .controls {
+    display: flex;
+    gap: 10px;
+  }
+  button {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: #1e232d;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    padding: 9px 18px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: transform .05s ease, background .15s ease, border-color .15s ease;
+  }
+  button:hover { background: #262c38; border-color: #3a4150; }
+  button:active { transform: translateY(1px); }
+  #start { border-color: var(--accent-dim); color: var(--accent); }
+  .hint {
+    font-size: 12px;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+  <h1>Snake</h1>
+  <div class="hud">
+    <div id="score">Score: <span>0</span></div>
+    <div class="status" id="status">Ready</div>
+  </div>
+  <div class="board-wrap">
+    <canvas id="snake" width="440" height="440"></canvas>
+  </div>
+  <div class="controls">
+    <button id="start">Start</button>
+    <button id="pause">Pause</button>
+    <button id="reset">Reset</button>
+  </div>
+  <div class="hint">Use the arrow keys to steer · eat the red food</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const COLS = 20;
+  const ROWS = 20;
+  const canvas = document.getElementById("snake");
+  const ctx = canvas.getContext("2d");
+  const CELL = Math.floor(canvas.width / COLS); // 22px per cell -> 440
+
+  const scoreValueEl = document.querySelector("#score span");
+  const statusEl = document.getElementById("status");
+
+  // --- game state ---
+  let snake;        // array of [x,y], head first
+  let dir;          // current heading {x,y}
+  let queuedDir;    // next heading applied on tick
+  let foodPos;      // [x,y]
+  let scoreVal;
+  let isAlive;
+
+  const DIRS = {
+    up:    { x: 0,  y: -1 },
+    down:  { x: 0,  y: 1 },
+    left:  { x: -1, y: 0 },
+    right: { x: 1,  y: 0 },
+  };
+
+  function cellsEqual(a, b) { return a[0] === b[0] && a[1] === b[1]; }
+
+  function occupied(x, y) {
+    return snake.some(s => s[0] === x && s[1] === y);
+  }
+
+  function spawnFood() {
+    const free = [];
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        if (!occupied(x, y)) free.push([x, y]);
+      }
+    }
+    if (free.length === 0) { foodPos = null; return; }
+    // Deterministic-ish spread without Math.random dependency concerns.
+    const idx = (snake.length * 7 + scoreVal * 13 + free.length) % free.length;
+    foodPos = free[idx];
+  }
+
+  function reset() {
+    const cx = Math.floor(COLS / 2);
+    const cy = Math.floor(ROWS / 2);
+    // length 3, heading right, head first
+    snake = [[cx, cy], [cx - 1, cy], [cx - 2, cy]];
+    dir = DIRS.right;
+    queuedDir = dir;
+    scoreVal = 0;
+    isAlive = true;
+    spawnFood();
+    setStatus("Ready");
+    draw();
+    return true;
+  }
+
+  function setDir(name) {
+    const nd = DIRS[name];
+    if (!nd) return;
+    // Ignore 180° reversal relative to current heading.
+    if (nd.x === -dir.x && nd.y === -dir.y) return;
+    queuedDir = nd;
+  }
+
+  function tick() {
+    if (!isAlive) return;
+
+    // Apply queued direction, but never allow a reversal vs the live heading.
+    if (!(queuedDir.x === -dir.x && queuedDir.y === -dir.y)) {
+      dir = queuedDir;
+    }
+
+    const head = snake[0];
+    const nx = head[0] + dir.x;
+    const ny = head[1] + dir.y;
+
+    // Wall collision.
+    if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) {
+      isAlive = false;
+      setStatus("Game Over");
+      draw();
+      return;
+    }
+
+    const willEat = foodPos && nx === foodPos[0] && ny === foodPos[1];
+
+    // Body collision. The tail cell frees up unless we're growing.
+    const body = willEat ? snake : snake.slice(0, snake.length - 1);
+    if (body.some(s => s[0] === nx && s[1] === ny)) {
+      isAlive = false;
+      setStatus("Game Over");
+      draw();
+      return;
+    }
+
+    snake.unshift([nx, ny]);
+    if (willEat) {
+      scoreVal += 1;
+      spawnFood();
+    } else {
+      snake.pop();
+    }
+
+    updateScore();
+    draw();
+  }
+
+  function setFood(x, y) {
+    x = Math.max(0, Math.min(COLS - 1, x | 0));
+    y = Math.max(0, Math.min(ROWS - 1, y | 0));
+    foodPos = [x, y];
+    draw();
+  }
+
+  // --- rendering ---
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // subtle grid
+    ctx.strokeStyle = "rgba(255,255,255,0.03)";
+    ctx.lineWidth = 1;
+    for (let i = 1; i < COLS; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * CELL + 0.5, 0);
+      ctx.lineTo(i * CELL + 0.5, ROWS * CELL);
+      ctx.stroke();
+    }
+    for (let j = 1; j < ROWS; j++) {
+      ctx.beginPath();
+      ctx.moveTo(0, j * CELL + 0.5);
+      ctx.lineTo(COLS * CELL, j * CELL + 0.5);
+      ctx.stroke();
+    }
+
+    // food
+    if (foodPos) {
+      const fx = foodPos[0] * CELL;
+      const fy = foodPos[1] * CELL;
+      ctx.fillStyle = "#f87171";
+      ctx.shadowColor = "rgba(248,113,113,0.6)";
+      ctx.shadowBlur = 12;
+      roundRect(fx + 4, fy + 4, CELL - 8, CELL - 8, 5);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // snake
+    for (let i = snake.length - 1; i >= 0; i--) {
+      const [x, y] = snake[i];
+      const isHead = i === 0;
+      ctx.fillStyle = isHead ? "#4ade80" : (isAlive ? "#22c55e" : "#6b7280");
+      roundRect(x * CELL + 2, y * CELL + 2, CELL - 4, CELL - 4, 5);
+      ctx.fill();
+      if (isHead) {
+        // eyes
+        ctx.fillStyle = "#0b0d12";
+        const ex = x * CELL, ey = y * CELL;
+        const e = Math.max(2, CELL * 0.12);
+        ctx.beginPath();
+        ctx.arc(ex + CELL * 0.35, ey + CELL * 0.38, e, 0, Math.PI * 2);
+        ctx.arc(ex + CELL * 0.65, ey + CELL * 0.38, e, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    if (!isAlive) {
+      ctx.fillStyle = "rgba(15,17,21,0.55)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#f87171";
+      ctx.font = "700 26px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("Game Over", canvas.width / 2, canvas.height / 2 - 10);
+      ctx.fillStyle = "#e5e7eb";
+      ctx.font = "500 14px system-ui, sans-serif";
+      ctx.fillText("Press Reset to play again", canvas.width / 2, canvas.height / 2 + 20);
+    }
+  }
+
+  function roundRect(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function updateScore() {
+    scoreValueEl.textContent = String(scoreVal);
+  }
+
+  function setStatus(text) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle("dead", !isAlive);
+  }
+
+  // --- loop control ---
+  let timer = null;
+  const SPEED_MS = 110;
+
+  function start() {
+    if (!isAlive) reset();
+    if (timer !== null) return;
+    setStatus("Playing");
+    timer = setInterval(() => {
+      tick();
+      if (!isAlive) stop();
+    }, SPEED_MS);
+  }
+
+  function stop() {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  function pause() {
+    if (timer !== null) {
+      stop();
+      if (isAlive) setStatus("Paused");
+    } else if (isAlive) {
+      start();
+    }
+  }
+
+  function fullReset() {
+    stop();
+    reset();
+    updateScore();
+  }
+
+  // --- input ---
+  const KEYMAP = {
+    ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+    w: "up", s: "down", a: "left", d: "right",
+  };
+  window.addEventListener("keydown", (e) => {
+    const name = KEYMAP[e.key];
+    if (name) {
+      e.preventDefault();
+      setDir(name);
+    } else if (e.key === " ") {
+      e.preventDefault();
+      pause();
+    }
+  });
+
+  document.getElementById("start").addEventListener("click", start);
+  document.getElementById("pause").addEventListener("click", pause);
+  document.getElementById("reset").addEventListener("click", fullReset);
+
+  // --- public API ---
+  window.game = {
+    w: COLS,
+    h: ROWS,
+    reset() { fullReset(); return true; },
+    tick() { tick(); },
+    setDir(name) { setDir(name); },
+    setFood(x, y) { setFood(x, y); },
+    snake() { return snake.map(s => [s[0], s[1]]); },
+    food() { return foodPos ? [foodPos[0], foodPos[1]] : null; },
+    alive() { return isAlive; },
+    score() { return scoreVal; },
+  };
+
+  // boot
+  reset();
+  updateScore();
+})();
+</script>
+</body>
+</html>

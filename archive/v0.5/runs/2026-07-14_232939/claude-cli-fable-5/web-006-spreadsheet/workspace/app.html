@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    margin: 16px;
+    background: #f5f6f8;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  #app {
+    min-width: 600px;
+    min-height: 400px;
+    display: inline-block;
+    background: #fff;
+    padding: 12px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+  }
+  #grid {
+    display: grid;
+    grid-template-columns: 36px repeat(10, 72px);
+    grid-auto-rows: 28px;
+    gap: 1px;
+    background: #c8ccd4;
+    border: 1px solid #c8ccd4;
+    width: max-content;
+  }
+  .hdr {
+    background: #e8eaf0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: #444;
+    user-select: none;
+  }
+  #grid input {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    border: none;
+    padding: 0 5px;
+    font-size: 13px;
+    font-family: inherit;
+    background: #fff;
+    outline: none;
+  }
+  #grid input:focus {
+    box-shadow: inset 0 0 0 2px #3b82f6;
+  }
+  #toolbar { margin-top: 12px; }
+  #export {
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid #888;
+    border-radius: 4px;
+    background: #eef1f5;
+  }
+  #export:hover { background: #dde3ea; }
+  #csv {
+    display: block;
+    margin-top: 10px;
+    width: 740px;
+    height: 140px;
+    font-family: monospace;
+    font-size: 12px;
+    box-sizing: border-box;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <div id="grid"></div>
+  <div id="toolbar">
+    <button id="export" type="button">Export CSV</button>
+    <textarea id="csv" readonly placeholder="CSV output appears here"></textarea>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var COLS = "ABCDEFGHIJ".split("");
+  var NROWS = 10;
+  var IDS = [];
+  var raw = {};       // cell id -> raw text
+  var computed = {};  // cell id -> displayed string
+  var editing = null; // id of cell currently focused
+
+  // ---------- build grid ----------
+  var grid = document.getElementById("grid");
+  grid.appendChild(hdr(""));                       // corner
+  COLS.forEach(function (c) { grid.appendChild(hdr(c)); });
+  for (var r = 1; r <= NROWS; r++) {
+    grid.appendChild(hdr(String(r)));
+    for (var ci = 0; ci < COLS.length; ci++) {
+      var id = COLS[ci] + r;
+      IDS.push(id);
+      raw[id] = "";
+      var inp = document.createElement("input");
+      inp.id = "cell-" + id;
+      inp.dataset.cell = id;
+      inp.setAttribute("autocomplete", "off");
+      inp.setAttribute("spellcheck", "false");
+      inp.addEventListener("focus", onFocus);
+      inp.addEventListener("blur", onBlur);
+      inp.addEventListener("keydown", onKey);
+      grid.appendChild(inp);
+    }
+  }
+
+  function hdr(text) {
+    var d = document.createElement("div");
+    d.className = "hdr";
+    d.textContent = text;
+    return d;
+  }
+
+  function inputOf(id) { return document.getElementById("cell-" + id); }
+
+  // ---------- editing ----------
+  function onFocus(e) {
+    var id = e.target.dataset.cell;
+    editing = id;
+    e.target.value = raw[id];
+  }
+  function onBlur(e) {
+    var id = e.target.dataset.cell;
+    editing = null;
+    commit(id, e.target.value);
+  }
+  function onKey(e) {
+    if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
+    else if (e.key === "Escape") { e.target.value = raw[e.target.dataset.cell]; e.target.blur(); }
+  }
+
+  function commit(id, text) {
+    raw[id] = String(text);
+    recalcAll();
+    render();
+  }
+
+  function render() {
+    IDS.forEach(function (id) {
+      if (id !== editing) inputOf(id).value = computed[id];
+    });
+  }
+
+  // ---------- formula parser (recursive descent) ----------
+  function tokenize(src) {
+    var toks = [], i = 0;
+    while (i < src.length) {
+      var ch = src[i];
+      if (ch === " " || ch === "\t") { i++; continue; }
+      if ("+-*/()".indexOf(ch) >= 0) { toks.push({ t: ch }); i++; continue; }
+      if (/[0-9.]/.test(ch)) {
+        var j = i;
+        while (j < src.length && /[0-9.]/.test(src[j])) j++;
+        var numStr = src.slice(i, j);
+        var n = Number(numStr);
+        if (numStr === "" || isNaN(n)) throw { err: "#ERR" };
+        toks.push({ t: "num", v: n });
+        i = j;
+        continue;
+      }
+      if (/[A-Za-z]/.test(ch)) {
+        var k = i;
+        while (k < src.length && /[A-Za-z]/.test(src[k])) k++;
+        var m = k;
+        while (m < src.length && /[0-9]/.test(src[m])) m++;
+        var ref = src.slice(i, m).toUpperCase();
+        if (!/^[A-J](10|[1-9])$/.test(ref)) throw { err: "#ERR" };
+        toks.push({ t: "ref", v: ref });
+        i = m;
+        continue;
+      }
+      throw { err: "#ERR" };
+    }
+    return toks;
+  }
+
+  // evalFormula: parses and evaluates; lookup(id) -> number (may throw)
+  function evalFormula(src, lookup) {
+    var toks = tokenize(src);
+    var pos = 0;
+    function peek() { return toks[pos]; }
+    function next() { return toks[pos++]; }
+
+    function parseExpr() {                 // + -
+      var v = parseTerm();
+      while (peek() && (peek().t === "+" || peek().t === "-")) {
+        var op = next().t;
+        var r = parseTerm();
+        v = op === "+" ? v + r : v - r;
+      }
+      return v;
+    }
+    function parseTerm() {                 // * /
+      var v = parseFactor();
+      while (peek() && (peek().t === "*" || peek().t === "/")) {
+        var op = next().t;
+        var r = parseFactor();
+        v = op === "*" ? v * r : v / r;
+      }
+      return v;
+    }
+    function parseFactor() {
+      var tk = peek();
+      if (!tk) throw { err: "#ERR" };
+      if (tk.t === "+") { next(); return parseFactor(); }
+      if (tk.t === "-") { next(); return -parseFactor(); }
+      if (tk.t === "num") { next(); return tk.v; }
+      if (tk.t === "ref") { next(); return lookup(tk.v); }
+      if (tk.t === "(") {
+        next();
+        var v = parseExpr();
+        if (!peek() || peek().t !== ")") throw { err: "#ERR" };
+        next();
+        return v;
+      }
+      throw { err: "#ERR" };
+    }
+
+    var result = parseExpr();
+    if (pos !== toks.length) throw { err: "#ERR" };
+    return result;
+  }
+
+  // ---------- recalculation with cycle detection ----------
+  // value objects: {num: n} | {num: 0, empty: true} | {text: s} | {err: "#ERR"|"#CYCLE"}
+  function recalcAll() {
+    var state = {};   // id -> "progress" | "done"
+    var values = {};  // id -> value object
+    var stack = [];
+
+    function evaluate(id) {
+      if (state[id] === "done") return values[id];
+      if (state[id] === "progress") {
+        // cycle: mark every cell on the stack from the re-entered cell onward
+        var idx = stack.indexOf(id);
+        for (var i = idx; i < stack.length; i++) {
+          values[stack[i]] = { err: "#CYCLE" };
+          state[stack[i]] = "done";
+        }
+        return { err: "#CYCLE" };
+      }
+      state[id] = "progress";
+      stack.push(id);
+
+      var result;
+      var r = raw[id] || "";
+      if (r.charAt(0) === "=") {
+        try {
+          var n = evalFormula(r.slice(1), function (dep) {
+            var v = evaluate(dep);
+            if (v.err) throw { prop: v.err };
+            if (typeof v.num === "number") return v.num;
+            return 0; // non-numeric text counts as 0 in formulas
+          });
+          result = isFinite(n) ? { num: n } : { err: "#ERR" };
+        } catch (e) {
+          result = { err: (e && e.prop) || "#ERR" };
+        }
+      } else if (r.trim() === "") {
+        result = { num: 0, empty: true };
+      } else {
+        var num = Number(r);
+        result = isNaN(num) ? { text: r } : { num: num };
+      }
+
+      stack.pop();
+      if (state[id] === "done") return values[id]; // was marked #CYCLE while recursing
+      state[id] = "done";
+      values[id] = result;
+      return result;
+    }
+
+    IDS.forEach(function (id) { evaluate(id); });
+    IDS.forEach(function (id) {
+      var v = values[id];
+      if (v.err) computed[id] = v.err;
+      else if (v.empty) computed[id] = "";
+      else if (typeof v.num === "number") computed[id] = String(v.num);
+      else computed[id] = v.text;
+    });
+  }
+
+  // ---------- CSV export ----------
+  function csvEscape(s) {
+    if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+  document.getElementById("export").addEventListener("click", function () {
+    var lines = [];
+    for (var r = 1; r <= NROWS; r++) {
+      lines.push(COLS.map(function (c) { return csvEscape(computed[c + r]); }).join(","));
+    }
+    document.getElementById("csv").value = lines.join("\n");
+  });
+
+  // ---------- scripting API ----------
+  function norm(id) {
+    id = String(id).toUpperCase().trim();
+    if (!/^[A-J](10|[1-9])$/.test(id)) throw new Error("Invalid cell: " + id);
+    return id;
+  }
+  window.sheet = {
+    set: function (id, text) {
+      id = norm(id);
+      if (editing === id) editing = null;
+      commit(id, text);
+    },
+    get: function (id) { return computed[norm(id)]; },
+    raw: function (id) { return raw[norm(id)]; }
+  };
+
+  recalcAll();
+  render();
+})();
+</script>
+</body>
+</html>

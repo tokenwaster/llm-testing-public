@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Bot Explorer</title>
+<style>
+  body{font-family:Arial,sans-serif;margin:0;padding:20px;background:#fafafa;}
+  #controls{margin-bottom:10px;}
+  #maze{position:relative;width:400px;height:400px;border:2px solid #333;overflow:hidden;background:#fff;}
+  .cell{box-sizing:border-box;}
+  .wall{background:#000;}
+  .bot{position:absolute;width:8px;height:8px;border-radius:50%;pointer-events:none;}
+  #completed{font-weight:bold;margin-right:10px;}
+</style>
+</head>
+<body>
+<div id="controls">
+  <span id="completed">0/24</span>
+  <span id="timer">0</span> ticks
+  <button id="reset">Reset</button>
+</div>
+<div id="maze"></div>
+
+<script>
+// ---------- Utility: Seeded RNG ----------
+function mulberry32(a) {
+  return function() {
+    var t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+}
+
+// ---------- Maze Generation ----------
+function generateMaze(rows, cols, seedRNG) {
+  const maze = Array.from({length: rows}, () => Array(cols).fill(null));
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+    maze[r][c] = {n:true,e:true,s:true,w:true};
+  }
+  const stack=[];
+  let r=0,c=0;
+  const visited=new Set();
+  function key(r,c){return r+','+c;}
+  visited.add(key(r,c));
+  while(true){
+    const dirs=[{dr:-1,dc:0,n:'n',op:'s'},{dr:0,dc:1,n:'e',op:'w'},
+                {dr:1,dc:0,n:'s',op:'n'},{dr:0,dc:-1,n:'w',op:'e'}];
+    const shuffled=dirs.sort(()=>seedRNG()-0.5);
+    let moved=false;
+    for(const d of shuffled){
+      const nr=r+d.dr,nc=c+d.dc;
+      if(nr>=0&&nr<rows&&nc>=0&&nc<cols&&!visited.has(key(nr,nc))){
+        maze[r][c][d.n]=false;maze[nr][nc][d.op]=false;
+        stack.push([r,c]); r=nr;c=nc; visited.add(key(r,c)); moved=true; break;
+      }
+    }
+    if(!moved){
+      if(stack.length===0)break;
+      [r,c]=stack.pop();
+    }
+  }
+  return maze;
+}
+
+// ---------- Bot Class ----------
+class Bot {
+  constructor(id, startR,startC, dirOrder){
+    this.id=id;
+    this.pos={r:startR,c:startC};
+    this.target=this.pos; // next cell
+    this.path=[{r:startR,c:startC}];
+    this.deadEnds=[];
+    this.finishTick=null;
+    this.stack=[[startR,startC]];
+    this.visited=new Set([`${startR},${startC}`]);
+    this.dirOrder=dirOrder; // array of {dr,dc,n}
+  }
+  step(maze, exit){
+    if(this.finishTick!==null) return;
+    const r=this.pos.r,c=this.pos.c;
+    const cell=maze[r][c];
+    let moved=false;
+    for(const d of this.dirOrder){
+      if(cell[d.n]===false){ // passage
+        const nr=r+d.dr,nc=c+d.dc;
+        const key=`${nr},${nc}`;
+        if(!this.visited.has(key)){
+          // move forward
+          this.target={r:nr,c:nc};
+          this.pos=this.target; // instant for logic, animation handled separately
+          this.path.push({r:nr,c:nc});
+          this.stack.push([nr,nc]);
+          this.visited.add(key);
+          moved=true;
+          break;
+        }
+      }
+    }
+    if(!moved){
+      // dead end: mark and backtrack
+      this.deadEnds.push({r,c});
+      const popped=this.stack.pop();
+      if(this.stack.length>0){
+        const [pr,pc]=this.stack[this.stack.length-1];
+        this.target={r:pr,c:pc};
+        this.pos=this.target;
+        this.path.push({r:pr,c:pc});
+      }else{
+        // should not happen
+      }
+    }
+    if(this.pos.r===exit.r && this.pos.c===exit.c){
+      this.finishTick=game.elapsed+1; // will be set by tick handler
+    }
+  }
+}
+
+// ---------- Game State ----------
+const game={};
+let rng;
+function init(seed){
+  const seedRNG = mulberry32(seed);
+  rng = seedRNG;
+  const rows=15, cols=15;
+  game.size={rows,cols};
+  // generate maze
+  const maze=generateMaze(rows,cols,seedRNG);
+  game.maze=maze;
+  // spawn at (0,0), exit at bottom right
+  game.spawn={r:0,c:0};
+  game.exit={r:rows-1,c:cols-1};
+  // bots
+  const dirBase=[
+    {dr:-1,dc:0,n:'n'},
+    {dr:0,dc:1,n:'e'},
+    {dr:1,dc:0,n:'s'},
+    {dr:0,dc:-1,n:'w'}
+  ];
+  game.bots=[];
+  for(let i=0;i<24;i++){
+    const dirOrder=dirBase.slice().sort(()=>seedRNG()-0.5);
+    game.bots.push(new Bot(i,game.spawn.r,game.spawn.c,dirOrder));
+  }
+  game.elapsed=0;
+  game.lastArrivalTick=null;
+}
+
+// ---------- Rendering ----------
+const mazeDiv=document.getElementById('maze');
+function renderMaze(){
+  const {rows,cols}=game.size;
+  const cellSize=Math.floor(400/Math.max(rows,cols));
+  mazeDiv.style.width=`${cellSize*cols}px`;
+  mazeDiv.style.height=`${cellSize*rows}px`;
+  mazeDiv.innerHTML='';
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const cell=document.createElement('div');
+      cell.className='cell';
+      cell.style.position='absolute';
+      cell.style.width=`${cellSize}px`;
+      cell.style.height=`${cellSize}px`;
+      cell.style.left=`${c*cellSize}px`;
+      cell.style.top=`${r*cellSize}px`;
+      const walls=game.walls(r,c);
+      if(walls.n){const w=document.createElement('div');w.className='wall';w.style.position='absolute';w.style.width=`${cellSize}px`;w.style.height='2px';w.style.left='0';w.style.top='0';mazeDiv.appendChild(w);}
+      if(walls.s){const w=document.createElement('div');w.className='wall';w.style.position='absolute';w.style.width=`${cellSize}px`;w.style.height='2px';w.style.left='0';w.style.bottom='0';mazeDiv.appendChild(w);}
+      if(walls.w){const w=document.createElement('div');w.className='wall';w.style.position='absolute';w.style.width='2px';w.style.height=`${cellSize}px`;w.style.top='0';w.style.left='0';mazeDiv.appendChild(w);}
+      if(walls.e){const w=document.createElement('div');w.className='wall';w.style.position='absolute';w.style.width='2px';w.style.height=`${cellSize}px`;w.style.top='0';w.style.right='0';mazeDiv.appendChild(w);}
+    }
+  }
+}
+function renderBots(){
+  // remove old bots
+  const old=document.querySelectorAll('.bot');
+  old.forEach(el=>el.remove());
+  const {rows,cols}=game.size;
+  const cellSize=Math.floor(400/Math.max(rows,cols));
+  game.bots.forEach(bot=>{
+    if(bot.finishTick!==null && bot.finishTick<game.elapsed) return; // finished
+    const div=document.createElement('div');
+    div.className='bot';
+    div.style.background=`hsl(${bot.id*15},70%,50%)`;
+    const r=bot.pos.r,c=bot.pos.c;
+    div.style.left=`${c*cellSize+cellSize/2-4}px`;
+    div.style.top=`${r*cellSize+cellSize/2-4}px`;
+    mazeDiv.appendChild(div);
+  });
+}
+function updateUI(){
+  document.getElementById('completed').textContent=
+    `${game.bots.filter(b=>b.finishTick!==null).length}/24`;
+  document.getElementById('timer').textContent=game.elapsed;
+}
+
+// ---------- API ----------
+window.game={
+  tick(n){
+    for(let i=0;i<n;i++){
+      if(game.lastArrivalTick===null || game.elapsed<game.lastArrivalTick){
+        game.bots.forEach(bot=>bot.step(game.maze,game.exit));
+        // set finish ticks after all steps
+        game.bots.forEach(bot=>{
+          if(bot.finishTick===null && bot.pos.r===game.exit.r && bot.pos.c===game.exit.c){
+            bot.finishTick=game.elapsed+1;
+          }
+        });
+        const finishedBots=game.bots.filter(b=>b.finishTick!==null);
+        if(finishedBots.length>0){
+          const last=Math.max(...finishedBots.map(b=>b.finishTick));
+          if(game.lastArrivalTick===null || last>game.lastArrivalTick) game.lastArrivalTick=last;
+        }
+      }
+      if(game.lastArrivalTick===null || game.elapsed<game.lastArrivalTick){
+        game.elapsed++;
+      }
+    }
+    renderBots();
+    updateUI();
+  },
+  reset(seed){init(seed||Math.floor(Math.random()*1e9));renderMaze();renderBots();updateUI();},
+  get elapsed(){return game.elapsed;},
+  get size(){return game.size;},
+  get spawn(){return game.spawn;},
+  get exit(){return game.exit;},
+  walls(r,c){
+    const cell=game.maze[r][c];
+    return {n:cell.n,e:cell.e,s:cell.s,w:cell.w};
+  },
+  get bots(){
+    return game.bots.map(b=>{
+      return {
+        path:b.path.slice(),
+        deadEnds:b.deadEnds.slice(),
+        finishTick:b.finishTick
+      };
+    });
+  }
+};
+
+// ---------- Init ----------
+document.getElementById('reset').onclick=()=>window.game.reset();
+window.game.reset();
+
+</script>
+</body>
+</html>

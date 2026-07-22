@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Pathfinders — 24 Bots</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at 50% 0%, #131a2e 0%, #070a14 70%);
+    color: #e0e6f0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 12px;
+  }
+  h1 {
+    margin: 0 0 14px;
+    font-size: 22px;
+    letter-spacing: 0.5px;
+    background: linear-gradient(90deg, #5fc9ff, #a06bff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hud {
+    display: flex;
+    gap: 14px;
+    margin-bottom: 14px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .pill {
+    background: #141a2a;
+    padding: 9px 16px;
+    border-radius: 10px;
+    border: 1px solid #2a3550;
+    font-size: 14px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.3) inset;
+  }
+  .pill b { color: #5fc9ff; font-variant-numeric: tabular-nums; }
+  #reset {
+    background: linear-gradient(180deg, #2a6cf5, #1e4fd0);
+    color: white;
+    border: none;
+    padding: 9px 22px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    box-shadow: 0 4px 14px rgba(42,108,245,0.4);
+    transition: transform 0.1s, box-shadow 0.2s;
+  }
+  #reset:hover { box-shadow: 0 6px 20px rgba(42,108,245,0.6); }
+  #reset:active { transform: translateY(1px); }
+  #maze {
+    background: #0d1320;
+    border: 2px solid #2a3550;
+    border-radius: 8px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5), 0 0 60px rgba(42,108,245,0.08);
+    display: block;
+  }
+  .legend {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #7a86a0;
+    display: flex;
+    gap: 18px;
+  }
+  .legend i {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    margin-right: 5px;
+    vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+  <h1>Maze Pathfinders — 24 Autonomous Bots</h1>
+  <div class="hud">
+    <span class="pill">Completed: <b id="completed">0</b> / 24</span>
+    <span class="pill">Time: <b id="timer">0.0s</b></span>
+    <button id="reset">Reset</button>
+  </div>
+  <canvas id="maze" width="588" height="588"></canvas>
+  <div class="legend">
+    <span><i style="background:#50dc78"></i>Spawn</span>
+    <span><i style="background:#ffc83c"></i>Exit</span>
+    <span><i style="background:#5fc9ff"></i>Walls</span>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  const canvas = document.getElementById('maze');
+  const ctx = canvas.getContext('2d');
+  const COLS = 21, ROWS = 21, CELL = 28; // 21*28 = 588 px
+  const STEP_MS = 120;                    // ms per logical step
+  const SPAWN = { x: 0, y: 0 };
+  const EXIT  = { x: COLS - 1, y: ROWS - 1 };
+
+  let cells = null;
+  let bots = [];
+  let completed = 0;
+  let elapsedMs = 0;
+  let stepAccum = 0;
+  let lastTime = 0;
+  let running = false;
+
+  // ---------- Maze generation (recursive backtracker = perfect maze) ----------
+  function makeGrid() {
+    const g = [];
+    for (let y = 0; y < ROWS; y++) {
+      const row = [];
+      for (let x = 0; x < COLS; x++) {
+        row.push({ x, y, walls: { N: true, E: true, S: true, W: true }, visited: false });
+      }
+      g.push(row);
+    }
+    return g;
+  }
+
+  function unvisitedNeighbors(c, g) {
+    const r = [];
+    const { x, y } = c;
+    if (y > 0          && !g[y - 1][x].visited) r.push({ cell: g[y - 1][x], dir: 'N', opp: 'S' });
+    if (x < COLS - 1   && !g[y][x + 1].visited) r.push({ cell: g[y][x + 1], dir: 'E', opp: 'W' });
+    if (y < ROWS - 1   && !g[y + 1][x].visited) r.push({ cell: g[y + 1][x], dir: 'S', opp: 'N' });
+    if (x > 0          && !g[y][x - 1].visited) r.push({ cell: g[y][x - 1], dir: 'W', opp: 'E' });
+    return r;
+  }
+
+  function generateMaze() {
+    const g = makeGrid();
+    const stack = [g[0][0]];
+    g[0][0].visited = true;
+    while (stack.length) {
+      const cur = stack[stack.length - 1];
+      const ns = unvisitedNeighbors(cur, g);
+      if (ns.length === 0) { stack.pop(); continue; }
+      const n = ns[(Math.random() * ns.length) | 0];
+      cur.walls[n.dir] = false;
+      n.cell.walls[n.opp] = false;
+      n.cell.visited = true;
+      stack.push(n.cell);
+    }
+    return g;
+  }
+
+  // ---------- BFS pathfinding ----------
+  function bfs(g, sx, sy, ex, ey) {
+    const q = [[sx, sy]];
+    const visited = new Set([sx + ',' + sy]);
+    const prev = Object.create(null);
+    while (q.length) {
+      const [x, y] = q.shift();
+      if (x === ex && y === ey) break;
+      const c = g[y][x];
+      const moves = [];
+      if (!c.walls.N && y > 0)        moves.push([x, y - 1]);
+      if (!c.walls.E && x < COLS - 1) moves.push([x + 1, y]);
+      if (!c.walls.S && y < ROWS - 1) moves.push([x, y + 1]);
+      if (!c.walls.W && x > 0)        moves.push([x - 1, y]);
+      for (const [nx, ny] of moves) {
+        const k = nx + ',' + ny;
+        if (!visited.has(k)) {
+          visited.add(k);
+          prev[k] = x + ',' + y;
+          q.push([nx, ny]);
+        }
+      }
+    }
+    const path = [];
+    let cur = ex + ',' + ey;
+    const startKey = sx + ',' + sy;
+    if (!(cur in prev) && cur !== startKey) return null;
+    while (cur !== startKey) {
+      const [px, py] = cur.split(',').map(Number);
+      path.unshift({ x: px, y: py });
+      cur = prev[cur];
+      if (cur === undefined) return null;
+    }
+    path.unshift({ x: sx, y: sy });
+    return path;
+  }
+
+  // ---------- Bots ----------
+  function makeBots(g) {
+    const arr = [];
+    const baseDelay = 3;
+    for (let i = 0; i < 24; i++) {
+      const hue = Math.round(i * 360 / 24);
+      arr.push({
+        id: i,
+        x: SPAWN.x,
+        y: SPAWN.y,
+        animX: SPAWN.x,
+        animY: SPAWN.y,
+        path: bfs(g, SPAWN.x, SPAWN.y, EXIT.x, EXIT.y),
+        pathIdx: 0,
+        delay: i * baseDelay,   // deterministic stagger so they don't move as one blob
+        finished: false,
+        color: 'hsl(' + hue + ',85%,62%)'
+      });
+    }
+    return arr;
+  }
+
+  // ---------- Core simulation step (synchronous, deterministic) ----------
+  function stepOnce() {
+    if (completed >= 24) return;
+    for (const bot of bots) {
+      if (bot.finished) continue;
+      if (bot.delay > 0) { bot.delay--; continue; }
+      bot.pathIdx++;
+      if (bot.pathIdx >= bot.path.length - 1) {
+        bot.pathIdx = bot.path.length - 1;
+        bot.x = EXIT.x;
+        bot.y = EXIT.y;
+        bot.finished = true;
+        completed++;
+      } else {
+        const p = bot.path[bot.pathIdx];
+        bot.x = p.x;
+        bot.y = p.y;
+      }
+    }
+    elapsedMs += STEP_MS;
+  }
+
+  function tick(n) {
+    n = Math.max(0, Math.floor(n));
+    for (let s = 0; s < n; s++) {
+      if (completed >= 24) break;
+      stepOnce();
+    }
+    updateHUD();
+  }
+
+  function reset() {
+    cells = generateMaze();
+    bots = makeBots(cells);
+    completed = 0;
+    elapsedMs = 0;
+    stepAccum = 0;
+    lastTime = performance.now();
+    running = true;
+    updateHUD();
+  }
+
+  // ---------- HUD ----------
+  function updateHUD() {
+    document.getElementById('completed').textContent = completed;
+    document.getElementById('timer').textContent = (elapsedMs / 1000).toFixed(1) + 's';
+  }
+
+  // ---------- Rendering ----------
+  function render() {
+    ctx.fillStyle = '#0d1320';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // spawn highlight
+    ctx.fillStyle = 'rgba(80,220,120,0.22)';
+    ctx.fillRect(SPAWN.x * CELL, SPAWN.y * CELL, CELL, CELL);
+
+    // exit highlight (pulsing)
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 320);
+    ctx.fillStyle = 'rgba(255,200,60,' + (0.18 + 0.22 * pulse) + ')';
+    ctx.fillRect(EXIT.x * CELL, EXIT.y * CELL, CELL, CELL);
+    ctx.strokeStyle = 'rgba(255,200,60,0.9)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(EXIT.x * CELL + 2, EXIT.y * CELL + 2, CELL - 4, CELL - 4);
+
+    // walls
+    ctx.strokeStyle = '#4a8fdf';
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = 'rgba(74,143,223,0.7)';
+    ctx.shadowBlur = 5;
+    ctx.beginPath();
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        const c = cells[y][x];
+        const px = x * CELL, py = y * CELL;
+        if (c.walls.N) { ctx.moveTo(px, py);          ctx.lineTo(px + CELL, py); }
+        if (c.walls.W) { ctx.moveTo(px, py);          ctx.lineTo(px, py + CELL); }
+        if (y === ROWS - 1 && c.walls.S) { ctx.moveTo(px, py + CELL); ctx.lineTo(px + CELL, py + CELL); }
+        if (x === COLS - 1 && c.walls.E) { ctx.moveTo(px + CELL, py); ctx.lineTo(px + CELL, py + CELL); }
+      }
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // bots
+    for (const bot of bots) {
+      bot.animX += (bot.x - bot.animX) * 0.22;
+      bot.animY += (bot.y - bot.animY) * 0.22;
+      const cx = bot.animX * CELL + CELL / 2;
+      const cy = bot.animY * CELL + CELL / 2;
+      const r = CELL * 0.32;
+
+      // glow
+      ctx.shadowColor = bot.color;
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = bot.color;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // inner highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.beginPath();
+      ctx.arc(cx - r * 0.32, cy - r * 0.32, r * 0.34, 0, Math.PI * 2);
+      ctx.fill();
+
+      // finished bots get a ring
+      if (bot.finished) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r + 3, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // ---------- Main loop ----------
+  function loop(now) {
+    const dt = now - lastTime;
+    lastTime = now;
+    if (running && completed < 24) {
+      stepAccum += dt;
+      let safety = 0;
+      while (stepAccum >= STEP_MS && completed < 24 && safety < 50) {
+        stepAccum -= STEP_MS;
+        stepOnce();
+        safety++;
+      }
+      updateHUD();
+    }
+    if (completed >= 24) running = false;
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- Public API ----------
+  window.game = {
+    get bots() { return bots; },
+    get completed() { return completed; },
+    get elapsedMs() { return elapsedMs; },
+    tick: tick,
+    reset: reset
+  };
+
+  // ---------- Wire up ----------
+  document.getElementById('reset').addEventListener('click', reset);
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

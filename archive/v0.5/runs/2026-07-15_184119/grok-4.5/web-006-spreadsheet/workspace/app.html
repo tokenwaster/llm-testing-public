@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    margin: 0;
+    padding: 16px;
+    background: #f7f8fa;
+    color: #222;
+  }
+  .app {
+    min-width: 600px;
+    min-height: 400px;
+    background: #fff;
+    border: 1px solid #d0d5dd;
+    border-radius: 8px;
+    padding: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+  h1 {
+    margin: 0 0 12px;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .sheet-wrap {
+    overflow: auto;
+    border: 1px solid #c5c9d0;
+    border-radius: 4px;
+  }
+  table {
+    border-collapse: collapse;
+    table-layout: fixed;
+    min-width: 100%;
+  }
+  th, td {
+    border: 1px solid #d8dce3;
+    padding: 0;
+    height: 28px;
+  }
+  th {
+    background: #eef1f6;
+    font-size: 12px;
+    font-weight: 600;
+    color: #555;
+    text-align: center;
+    user-select: none;
+  }
+  th.corner {
+    width: 32px;
+    min-width: 32px;
+  }
+  th.col-header {
+    width: 72px;
+    min-width: 72px;
+  }
+  th.row-header {
+    width: 32px;
+    min-width: 32px;
+  }
+  td input {
+    display: block;
+    width: 100%;
+    height: 28px;
+    border: none;
+    margin: 0;
+    padding: 2px 6px;
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: transparent;
+  }
+  td input:focus {
+    outline: 2px solid #3b82f6;
+    outline-offset: -2px;
+    background: #fff;
+  }
+  .toolbar {
+    margin-top: 12px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  #export {
+    padding: 8px 16px;
+    font-size: 14px;
+    border: 1px solid #3b82f6;
+    background: #3b82f6;
+    color: #fff;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  #export:hover { background: #2563eb; }
+  #csv {
+    flex: 1;
+    min-width: 280px;
+    min-height: 100px;
+    width: 100%;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    padding: 8px;
+    border: 1px solid #c5c9d0;
+    border-radius: 6px;
+    resize: vertical;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Mini Spreadsheet</h1>
+  <div class="sheet-wrap">
+    <table id="grid" aria-label="Spreadsheet"></table>
+  </div>
+  <div class="toolbar">
+    <button type="button" id="export">Export CSV</button>
+    <textarea id="csv" placeholder="CSV export appears here" readonly></textarea>
+  </div>
+</div>
+<script>
+(function () {
+  const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+  const NROWS = 10;
+  const cells = [];
+  for (let r = 1; r <= NROWS; r++) {
+    for (const c of COLS) cells.push(c + r);
+  }
+
+  const raw = Object.create(null);
+  const display = Object.create(null);
+  const numeric = Object.create(null);
+
+  for (const id of cells) {
+    raw[id] = '';
+    display[id] = '';
+    numeric[id] = 0;
+  }
+
+  function isValidCell(ref) {
+    return /^[A-J]([1-9]|10)$/.test(ref);
+  }
+
+  function formatNum(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return String(n);
+    if (Object.is(n, -0)) return '0';
+    if (Number.isInteger(n)) return String(n);
+    const rounded = Math.round(n * 1e12) / 1e12;
+    return String(rounded);
+  }
+
+  function tokenize(expr) {
+    const tokens = [];
+    let i = 0;
+    const s = expr;
+    while (i < s.length) {
+      const ch = s[i];
+      if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+        i++;
+        continue;
+      }
+      if (ch === '+' || ch === '-' || ch === '*' || ch === '/' || ch === '(' || ch === ')') {
+        tokens.push({ type: ch });
+        i++;
+        continue;
+      }
+      if ((ch >= '0' && ch <= '9') || ch === '.') {
+        let start = i;
+        i++;
+        while (i < s.length && ((s[i] >= '0' && s[i] <= '9') || s[i] === '.')) i++;
+        const numStr = s.slice(start, i);
+        if (numStr === '.' || numStr.split('.').length > 2) throw new Error('bad number');
+        const v = Number(numStr);
+        if (!isFinite(v)) throw new Error('bad number');
+        tokens.push({ type: 'num', value: v });
+        continue;
+      }
+      if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+        let col = s[i].toUpperCase();
+        i++;
+        if (i >= s.length || s[i] < '0' || s[i] > '9') throw new Error('bad ref');
+        let row = '';
+        while (i < s.length && s[i] >= '0' && s[i] <= '9') {
+          row += s[i];
+          i++;
+        }
+        tokens.push({ type: 'ref', value: col + row });
+        continue;
+      }
+      throw new Error('bad char');
+    }
+    return tokens;
+  }
+
+  function extractRefs(expr) {
+    try {
+      return tokenize(expr)
+        .filter((t) => t.type === 'ref')
+        .map((t) => t.value);
+    } catch {
+      return [];
+    }
+  }
+
+  function evaluateExpression(expr, getRef) {
+    const tokens = tokenize(expr);
+    let pos = 0;
+
+    function peek() {
+      return pos < tokens.length ? tokens[pos] : null;
+    }
+    function consume() {
+      if (pos >= tokens.length) throw new Error('unexpected end');
+      return tokens[pos++];
+    }
+
+    function parseExpr() {
+      let left = parseTerm();
+      while (peek() && (peek().type === '+' || peek().type === '-')) {
+        const op = consume().type;
+        const right = parseTerm();
+        left = op === '+' ? left + right : left - right;
+      }
+      return left;
+    }
+
+    function parseTerm() {
+      let left = parseFactor();
+      while (peek() && (peek().type === '*' || peek().type === '/')) {
+        const op = consume().type;
+        const right = parseFactor();
+        left = op === '*' ? left * right : left / right;
+      }
+      return left;
+    }
+
+    function parseFactor() {
+      const t = peek();
+      if (!t) throw new Error('unexpected end');
+      if (t.type === '-') {
+        consume();
+        return -parseFactor();
+      }
+      if (t.type === '+') {
+        consume();
+        return parseFactor();
+      }
+      if (t.type === '(') {
+        consume();
+        const v = parseExpr();
+        const close = peek();
+        if (!close || close.type !== ')') throw new Error('missing )');
+        consume();
+        return v;
+      }
+      if (t.type === 'num') {
+        consume();
+        return t.value;
+      }
+      if (t.type === 'ref') {
+        consume();
+        if (!isValidCell(t.value)) throw new Error('bad ref');
+        return getRef(t.value);
+      }
+      throw new Error('unexpected token');
+    }
+
+    if (tokens.length === 0) throw new Error('empty');
+    const result = parseExpr();
+    if (pos < tokens.length) throw new Error('trailing');
+    if (typeof result !== 'number' || !isFinite(result)) throw new Error('nonfinite');
+    return result;
+  }
+
+  function parsePlainNumber(text) {
+    const t = text.trim();
+    if (t === '') return { empty: true };
+    if (/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(t)) {
+      const n = Number(t);
+      if (isFinite(n)) return { num: n };
+    }
+    return { text: text };
+  }
+
+  function findCycles(deps) {
+    const inCycle = new Set();
+    const color = Object.create(null); // 0=unseen, 1=visiting, 2=done
+
+    function dfs(node, path) {
+      const c = color[node] || 0;
+      if (c === 1) {
+        const idx = path.indexOf(node);
+        if (idx >= 0) {
+          for (let i = idx; i < path.length; i++) inCycle.add(path[i]);
+        }
+        return;
+      }
+      if (c === 2) return;
+      color[node] = 1;
+      path.push(node);
+      const list = deps[node] || [];
+      for (const d of list) {
+        if (isValidCell(d)) dfs(d, path);
+      }
+      path.pop();
+      color[node] = 2;
+    }
+
+    for (const id of cells) {
+      if (!color[id]) dfs(id, []);
+    }
+    return inCycle;
+  }
+
+  function recalculate() {
+    const deps = Object.create(null);
+    for (const id of cells) {
+      const text = raw[id] || '';
+      if (text.startsWith('=')) {
+        deps[id] = extractRefs(text.slice(1)).filter(isValidCell);
+      } else {
+        deps[id] = [];
+      }
+    }
+
+    const inCycle = findCycles(deps);
+    const memo = Object.create(null); // id -> {ok, value} or {err} or {cycle}
+
+    function evalCell(id) {
+      if (memo[id]) return memo[id];
+      if (inCycle.has(id)) {
+        memo[id] = { cycle: true };
+        return memo[id];
+      }
+
+      const text = raw[id] || '';
+
+      if (!text.startsWith('=')) {
+        const plain = parsePlainNumber(text);
+        if (plain.empty) {
+          memo[id] = { ok: true, value: 0, display: true };
+        } else if (plain.num !== undefined) {
+          memo[id] = { ok: true, value: plain.num };
+        } else {
+          memo[id] = { ok: true, value: null, text: plain.text };
+        }
+        return memo[id];
+      }
+
+      // formula
+      try {
+        const result = evaluateExpression(text.slice(1), function (ref) {
+          const r = evalCell(ref);
+          if (r.cycle) throw new Error('cycle');
+          if (r.err) throw new Error('err');
+          if (r.value === null) throw new Error('non-numeric');
+          return r.value;
+        });
+        memo[id] = { ok: true, value: result };
+      } catch (e) {
+        if (e && e.message === 'cycle') {
+          // dependency in a cycle — treat as error for non-cycle cells
+          memo[id] = { err: true };
+        } else {
+          memo[id] = { err: true };
+        }
+      }
+      return memo[id];
+    }
+
+    for (const id of cells) evalCell(id);
+
+    for (const id of cells) {
+      const r = memo[id];
+      if (r.cycle) {
+        display[id] = '#CYCLE';
+        numeric[id] = NaN;
+      } else if (r.err) {
+        display[id] = '#ERR';
+        numeric[id] = NaN;
+      } else if (r.text !== undefined) {
+        display[id] = r.text;
+        numeric[id] = NaN;
+      } else if (r.empty) {
+        display[id] = '';
+        numeric[id] = 0;
+      } else {
+        display[id] = formatNum(r.value);
+        numeric[id] = r.value;
+      }
+    }
+
+    updateUI();
+  }
+
+  function updateUI() {
+    for (const id of cells) {
+      const input = document.getElementById('cell-' + id);
+      if (!input) continue;
+      if (document.activeElement === input) continue;
+      input.value = display[id];
+    }
+  }
+
+  // Build grid
+  const table = document.getElementById('grid');
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  const corner = document.createElement('th');
+  corner.className = 'corner';
+  corner.textContent = '';
+  headRow.appendChild(corner);
+  for (const c of COLS) {
+    const th = document.createElement('th');
+    th.className = 'col-header';
+    th.textContent = c;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  for (let r = 1; r <= NROWS; r++) {
+    const tr = document.createElement('tr');
+    const rh = document.createElement('th');
+    rh.className = 'row-header';
+    rh.textContent = String(r);
+    tr.appendChild(rh);
+    for (const c of COLS) {
+      const id = c + r;
+      const td = document.createElement('td');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.id = 'cell-' + id;
+      input.setAttribute('autocomplete', 'off');
+      input.setAttribute('spellcheck', 'false');
+      input.value = '';
+
+      input.addEventListener('focus', function () {
+        input.value = raw[id] || '';
+        // select on next tick so click-to-focus still works
+        setTimeout(function () {
+          if (document.activeElement === input) input.select();
+        }, 0);
+      });
+
+      input.addEventListener('blur', function () {
+        raw[id] = input.value;
+        recalculate();
+      });
+
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          input.blur();
+        }
+      });
+
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+
+  document.getElementById('export').addEventListener('click', function () {
+    const lines = [];
+    for (let r = 1; r <= NROWS; r++) {
+      const row = [];
+      for (const c of COLS) {
+        row.push(display[c + r] ?? '');
+      }
+      lines.push(row.join(','));
+    }
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  window.sheet = {
+    set: function (cell, value) {
+      if (!isValidCell(cell)) return;
+      raw[cell] = value == null ? '' : String(value);
+      recalculate();
+      const input = document.getElementById('cell-' + cell);
+      if (input && document.activeElement === input) {
+        input.value = raw[cell];
+      }
+    },
+    get: function (cell) {
+      if (!isValidCell(cell)) return '';
+      return display[cell] !== undefined ? display[cell] : '';
+    },
+    raw: function (cell) {
+      if (!isValidCell(cell)) return '';
+      return raw[cell] !== undefined ? raw[cell] : '';
+    }
+  };
+
+  recalculate();
+})();
+</script>
+</body>
+</html>

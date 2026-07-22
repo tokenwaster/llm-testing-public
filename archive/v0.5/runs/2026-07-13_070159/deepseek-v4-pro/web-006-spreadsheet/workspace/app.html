@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Spreadsheet</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: #f0f2f5;
+            flex-direction: column;
+            gap: 20px;
+            padding: 20px;
+        }
+        .app-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 600px;
+            min-height: 400px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 50px repeat(10, 80px);
+            grid-template-rows: 30px repeat(10, 35px);
+            gap: 2px;
+            background: #e1e4e8;
+            border: 1px solid #d0d5dd;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+        .header {
+            background: #f7f8fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            color: #344054;
+            font-size: 14px;
+            border-bottom: 1px solid #d0d5dd;
+            border-right: 1px solid #d0d5dd;
+        }
+        .corner {
+            background: #f7f8fa;
+        }
+        .row-header {
+            background: #f7f8fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            color: #344054;
+            font-size: 14px;
+            border-right: 1px solid #d0d5dd;
+        }
+        .cell {
+            background: white;
+            border: 1px solid #e1e4e8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.1s;
+        }
+        .cell input {
+            width: 100%;
+            height: 100%;
+            border: none;
+            text-align: center;
+            font-size: 14px;
+            padding: 4px;
+            outline: none;
+            background: transparent;
+            color: #1a1a1a;
+        }
+        .cell input:focus {
+            background: #eef2ff;
+            border: 2px solid #4f46e5;
+            border-radius: 2px;
+            box-shadow: 0 0 0 2px rgba(79,70,229,0.2);
+        }
+        .cell input.editing {
+            background: #fff9e6;
+            border: 2px solid #f59e0b;
+            border-radius: 2px;
+        }
+        .buttons {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        button {
+            background: #4f46e5;
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+            letter-spacing: 0.3px;
+        }
+        button:hover {
+            background: #4338ca;
+        }
+        button:active {
+            background: #3730a3;
+        }
+        #csv {
+            width: 100%;
+            max-width: 600px;
+            min-height: 120px;
+            margin-top: 20px;
+            padding: 12px;
+            font-family: monospace;
+            border: 1px solid #d0d5dd;
+            border-radius: 8px;
+            resize: vertical;
+            background: #f9fafb;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <div class="grid" id="grid"></div>
+        <div class="buttons">
+            <button id="export">Export CSV</button>
+        </div>
+        <textarea id="csv" readonly placeholder="CSV output will appear here..."></textarea>
+    </div>
+
+    <script>
+        (function() {
+            // --- Spreadsheet Engine ---
+            const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+            const ROWS = 10;
+            
+            // Store raw text for each cell: key "A1" -> string
+            const rawData = {};
+            
+            // Store computed values: key "A1" -> number or string or null
+            const computedData = {};
+            
+            // Dependency graph: key "A1" -> Set of cells that depend on it (for invalidation)
+            const dependents = {};
+            
+            // Reverse: key "A1" -> Set of cells it directly references (for cycle detection)
+            const references = {};
+            
+            // Input elements map: key "A1" -> HTMLInputElement
+            const inputElements = {};
+            
+            // Flag to prevent recursive updates
+            let computing = false;
+            
+            // Initialize all data structures
+            function initData() {
+                for (let r = 1; r <= ROWS; r++) {
+                    for (let c of COLS) {
+                        const id = c + r;
+                        rawData[id] = '';
+                        computedData[id] = '';
+                        dependents[id] = new Set();
+                        references[id] = new Set();
+                    }
+                }
+            }
+            
+            // Clear all dependencies and references
+            function clearGraphForCell(id) {
+                // Remove this cell from dependents of all its references
+                if (references[id]) {
+                    for (let ref of references[id]) {
+                        if (dependents[ref]) {
+                            dependents[ref].delete(id);
+                        }
+                    }
+                    references[id].clear();
+                }
+            }
+            
+            // Build graph for a cell based on its raw text
+            function updateGraphForCell(id) {
+                clearGraphForCell(id);
+                const raw = rawData[id] || '';
+                if (raw.startsWith('=')) {
+                    const refs = extractReferences(raw.substring(1));
+                    for (let ref of refs) {
+                        if (isValidCellId(ref)) {
+                            references[id].add(ref);
+                            if (!dependents[ref]) dependents[ref] = new Set();
+                            dependents[ref].add(id);
+                        }
+                    }
+                }
+            }
+            
+            // Extract cell references from a formula string (e.g., "A1+B2*C3")
+            function extractReferences(formula) {
+                const regex = /\b([A-J])([1-9]|10)\b/g;
+                const refs = new Set();
+                let match;
+                while ((match = regex.exec(formula)) !== null) {
+                    refs.add(match[1] + match[2]);
+                }
+                return refs;
+            }
+            
+            function isValidCellId(id) {
+                return /^[A-J]([1-9]|10)$/.test(id);
+            }
+            
+            // Evaluate a formula and return either a number, '#ERR', or '#CYCLE'
+            function evaluateFormula(id, formula, visited = new Set()) {
+                if (visited.has(id)) {
+                    return '#CYCLE';
+                }
+                visited.add(id);
+                
+                // Replace cell references with their computed values
+                let expr = formula;
+                const refs = extractReferences(formula);
+                for (let ref of refs) {
+                    if (!isValidCellId(ref)) {
+                        return '#ERR';
+                    }
+                    const val = computedData[ref];
+                    if (val === '#CYCLE') return '#CYCLE';
+                    if (val === '#ERR') return '#ERR';
+                    const num = (val === '' || val === null || val === undefined) ? 0 : Number(val);
+                    if (isNaN(num)) return '#ERR';
+                    // Replace all occurrences of the reference with the number
+                    // Use word boundaries to avoid partial replacements
+                    const regex = new RegExp('\\b' + ref + '\\b', 'g');
+                    expr = expr.replace(regex, num);
+                }
+                
+                // Now evaluate the arithmetic expression safely
+                try {
+                    // Sanitize: only allow numbers, operators, parentheses, spaces, decimal points
+                    if (!/^[0-9+\-*/().\s]+$/.test(expr)) {
+                        return '#ERR';
+                    }
+                    // Use Function constructor to evaluate
+                    const result = new Function('return (' + expr + ')')();
+                    if (typeof result !== 'number' || isNaN(result) || !isFinite(result)) {
+                        return '#ERR';
+                    }
+                    return result;
+                } catch (e) {
+                    return '#ERR';
+                }
+            }
+            
+            // Compute the value for a single cell, handling cycles and errors
+            function computeCell(id, visited = new Set()) {
+                if (visited.has(id)) {
+                    computedData[id] = '#CYCLE';
+                    return '#CYCLE';
+                }
+                visited.add(id);
+                
+                const raw = rawData[id] || '';
+                if (!raw.startsWith('=')) {
+                    // Plain value
+                    if (raw === '') {
+                        computedData[id] = '';
+                    } else {
+                        const num = Number(raw);
+                        computedData[id] = isNaN(num) ? raw : num;
+                    }
+                    return computedData[id];
+                }
+                
+                // Formula
+                const formula = raw.substring(1).trim();
+                if (formula === '') {
+                    computedData[id] = '';
+                    return '';
+                }
+                
+                // Check for cycles first by looking at references
+                if (hasCycle(id, new Set())) {
+                    computedData[id] = '#CYCLE';
+                    return '#CYCLE';
+                }
+                
+                const result = evaluateFormula(id, formula, visited);
+                computedData[id] = result;
+                return result;
+            }
+            
+            // Detect cycle using DFS on references graph
+            function hasCycle(startId, visited = new Set(), stack = new Set()) {
+                if (stack.has(startId)) return true;
+                if (visited.has(startId)) return false;
+                visited.add(startId);
+                stack.add(startId);
+                if (references[startId]) {
+                    for (let ref of references[startId]) {
+                        if (hasCycle(ref, visited, stack)) return true;
+                    }
+                }
+                stack.delete(startId);
+                return false;
+            }
+            
+            // Recompute a cell and all its dependents recursively
+            function recompute(id, visited = new Set()) {
+                if (visited.has(id)) return;
+                visited.add(id);
+                
+                // First recompute dependencies (cells that this cell references) to ensure they are up-to-date
+                if (references[id]) {
+                    for (let ref of references[id]) {
+                        recompute(ref, visited);
+                    }
+                }
+                
+                // Compute this cell
+                computeCell(id);
+                
+                // Then recompute all dependents
+                if (dependents[id]) {
+                    for (let dep of dependents[id]) {
+                        recompute(dep, visited);
+                    }
+                }
+            }
+            
+            // Full recalculation of all cells
+            function fullRecalc() {
+                const visited = new Set();
+                // Compute all cells in order, but cycles will be handled
+                for (let r = 1; r <= ROWS; r++) {
+                    for (let c of COLS) {
+                        const id = c + r;
+                        if (!visited.has(id)) {
+                            recompute(id, visited);
+                        }
+                    }
+                }
+                // After recompute, update all UI elements
+                updateAllDisplays();
+            }
+            
+            // Update display for a single cell
+            function updateDisplay(id) {
+                const input = inputElements[id];
+                if (!input) return;
+                if (document.activeElement === input) {
+                    // User is editing, do not overwrite
+                    return;
+                }
+                const val = computedData[id];
+                input.value = (val !== undefined && val !== null) ? val : '';
+                // Style based on error/cycle
+                if (val === '#CYCLE' || val === '#ERR') {
+                    input.style.color = '#b91c1c';
+                    input.style.fontWeight = 'bold';
+                } else {
+                    input.style.color = '#1a1a1a';
+                    input.style.fontWeight = 'normal';
+                }
+            }
+            
+            function updateAllDisplays() {
+                for (let r = 1; r <= ROWS; r++) {
+                    for (let c of COLS) {
+                        updateDisplay(c + r);
+                    }
+                }
+            }
+            
+            // Set raw text of a cell programmatically or via UI
+            function setCellRaw(id, rawText) {
+                if (!isValidCellId(id)) return;
+                rawData[id] = rawText;
+                updateGraphForCell(id);
+                // Recompute from this cell and all affected
+                const visited = new Set();
+                recompute(id, visited);
+                // Ensure all other cells are consistent (some might have been missed)
+                fullRecalc();
+            }
+            
+            // UI handling
+            function handleInputFocus(e) {
+                const input = e.target;
+                const id = input.dataset.cellId;
+                input.value = rawData[id] || '';
+                input.classList.add('editing');
+            }
+            
+            function handleInputBlur(e) {
+                const input = e.target;
+                const id = input.dataset.cellId;
+                input.classList.remove('editing');
+                const newRaw = input.value;
+                if (rawData[id] !== newRaw) {
+                    setCellRaw(id, newRaw);
+                } else {
+                    // Just update display
+                    updateDisplay(id);
+                }
+            }
+            
+            function handleInputKeyDown(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const input = e.target;
+                    input.blur();
+                }
+            }
+            
+            // Build the grid UI
+            function buildGrid() {
+                const gridEl = document.getElementById('grid');
+                gridEl.innerHTML = '';
+                
+                // Corner
+                const corner = document.createElement('div');
+                corner.className = 'header corner';
+                corner.textContent = '';
+                gridEl.appendChild(corner);
+                
+                // Column headers
+                for (let c of COLS) {
+                    const header = document.createElement('div');
+                    header.className = 'header';
+                    header.textContent = c;
+                    gridEl.appendChild(header);
+                }
+                
+                // Rows
+                for (let r = 1; r <= ROWS; r++) {
+                    const rowHeader = document.createElement('div');
+                    rowHeader.className = 'row-header';
+                    rowHeader.textContent = r;
+                    gridEl.appendChild(rowHeader);
+                    
+                    for (let c of COLS) {
+                        const id = c + r;
+                        const cellDiv = document.createElement('div');
+                        cellDiv.className = 'cell';
+                        
+                        const input = document.createElement('input');
+                        input.type = 'text';
+                        input.dataset.cellId = id;
+                        input.id = 'cell-' + id;
+                        input.value = computedData[id] !== undefined ? computedData[id] : '';
+                        
+                        input.addEventListener('focus', handleInputFocus);
+                        input.addEventListener('blur', handleInputBlur);
+                        input.addEventListener('keydown', handleInputKeyDown);
+                        
+                        inputElements[id] = input;
+                        cellDiv.appendChild(input);
+                        gridEl.appendChild(cellDiv);
+                    }
+                }
+            }
+            
+            // Export CSV
+            function exportCSV() {
+                const lines = [];
+                for (let r = 1; r <= ROWS; r++) {
+                    const row = [];
+                    for (let c of COLS) {
+                        const id = c + r;
+                        let val = computedData[id];
+                        if (val === '' || val === undefined || val === null) {
+                            val = '';
+                        } else if (typeof val === 'number') {
+                            // Keep as number representation
+                            val = String(val);
+                        } else {
+                            val = String(val);
+                        }
+                        // Escape commas and quotes if necessary
+                        if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+                            val = '"' + val.replace(/"/g, '""') + '"';
+                        }
+                        row.push(val);
+                    }
+                    lines.push(row.join(','));
+                }
+                document.getElementById('csv').value = lines.join('\n');
+            }
+            
+            // Initialize everything
+            function init() {
+                initData();
+                buildGrid();
+                // Initial computation
+                fullRecalc();
+                
+                // Export button
+                document.getElementById('export').addEventListener('click', exportCSV);
+                
+                // Expose API
+                window.sheet = {
+                    set: function(id, text) {
+                        if (!isValidCellId(id)) return;
+                        setCellRaw(id, text);
+                        // Ensure display is updated even if input is focused
+                        const input = inputElements[id];
+                        if (input && document.activeElement !== input) {
+                            updateDisplay(id);
+                        }
+                    },
+                    get: function(id) {
+                        if (!isValidCellId(id)) return undefined;
+                        const val = computedData[id];
+                        return val !== undefined && val !== null ? String(val) : '';
+                    },
+                    raw: function(id) {
+                        if (!isValidCellId(id)) return undefined;
+                        return rawData[id] || '';
+                    }
+                };
+            }
+            
+            // Start the app
+            init();
+        })();
+    </script>
+</body>
+</html>

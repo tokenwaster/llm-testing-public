@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    padding: 20px;
+    margin: 0;
+    background: #f5f5f5;
+  }
+  
+  .grid {
+    display: inline-grid;
+    grid-template-columns: 50px repeat(10, 55px);
+    grid-template-rows: 35px repeat(10, 37px);
+    gap: 0;
+    border: 2px solid #333;
+    background: #333;
+    margin-bottom: 20px;
+  }
+  
+  .header, input {
+    border: 1px solid #999;
+    padding: 4px;
+    box-sizing: border-box;
+    font-size: 12px;
+  }
+  
+  .header {
+    background: #e8e8e8;
+    font-weight: bold;
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+  }
+  
+  input {
+    width: 100%;
+    height: 100%;
+    font-family: monospace;
+    background: white;
+    border: 1px solid #ccc;
+  }
+  
+  input:focus {
+    outline: none;
+    background: #fffacd;
+    border: 1px solid #4CAF50;
+  }
+  
+  .export-section {
+    margin-top: 20px;
+  }
+  
+  button {
+    padding: 10px 20px;
+    font-size: 14px;
+    cursor: pointer;
+    background: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 4px;
+  }
+  
+  button:hover {
+    background: #45a049;
+  }
+  
+  #csv {
+    display: block;
+    width: 100%;
+    max-width: 600px;
+    height: 100px;
+    font-family: monospace;
+    margin-top: 10px;
+    padding: 8px;
+    box-sizing: border-box;
+    border: 1px solid #ccc;
+    resize: vertical;
+  }
+</style>
+</head>
+<body>
+
+<div id="grid"></div>
+
+<div class="export-section">
+  <button id="export">Export CSV</button>
+  <textarea id="csv" readonly></textarea>
+</div>
+
+<script>
+const COLS = 'ABCDEFGHIJ';
+const ROWS = 10;
+
+class Spreadsheet {
+  constructor() {
+    this.cells = new Map();
+    this.dependents = new Map();
+    this.dependencies = new Map();
+    
+    for (let col of COLS) {
+      for (let row = 1; row <= ROWS; row++) {
+        const cellId = col + row;
+        this.cells.set(cellId, { raw: '', computed: '' });
+        this.dependents.set(cellId, new Set());
+        this.dependencies.set(cellId, new Set());
+      }
+    }
+  }
+  
+  extractReferences(formula) {
+    const refs = new Set();
+    const regex = /[A-J](?:10|[1-9])/g;
+    let match;
+    while ((match = regex.exec(formula)) !== null) {
+      refs.add(match[0]);
+    }
+    return refs;
+  }
+  
+  isInCycle(cellId, visited = new Set(), recStack = new Set()) {
+    visited.add(cellId);
+    recStack.add(cellId);
+    
+    const deps = this.dependents.get(cellId) || new Set();
+    for (let dep of deps) {
+      if (!visited.has(dep)) {
+        if (this.isInCycle(dep, visited, recStack)) {
+          return true;
+        }
+      } else if (recStack.has(dep)) {
+        return true;
+      }
+    }
+    
+    recStack.delete(cellId);
+    return false;
+  }
+  
+  getAllCycleMembers() {
+    const cycleMembers = new Set();
+    for (let cellId of this.cells.keys()) {
+      if (this.isInCycle(cellId)) {
+        cycleMembers.add(cellId);
+      }
+    }
+    return cycleMembers;
+  }
+  
+  evaluateFormula(formula) {
+    try {
+      const refs = this.extractReferences(formula);
+      
+      let expr = formula;
+      for (let ref of refs) {
+        let value = this.cells.get(ref).computed;
+        if (value === '#ERR' || value === '#CYCLE' || value === '') {
+          value = '0';
+        } else {
+          const num = parseFloat(value);
+          value = isNaN(num) ? '0' : String(num);
+        }
+        expr = expr.replace(new RegExp('\\b' + ref + '\\b', 'g'), '(' + value + ')');
+      }
+      
+      const result = Function('"use strict"; return (' + expr + ')')();
+      
+      if (typeof result !== 'number' || isNaN(result)) {
+        return '#ERR';
+      }
+      
+      return String(result);
+    } catch (e) {
+      return '#ERR';
+    }
+  }
+  
+  compute(cellId) {
+    const { raw } = this.cells.get(cellId);
+    
+    if (raw.startsWith('=')) {
+      const formula = raw.substring(1);
+      return this.evaluateFormula(formula);
+    } else {
+      return raw;
+    }
+  }
+  
+  updateDependencies(cellId, refs) {
+    const oldDeps = this.dependents.get(cellId) || new Set();
+    for (let oldDep of oldDeps) {
+      this.dependencies.get(oldDep).delete(cellId);
+    }
+    
+    this.dependents.set(cellId, new Set(refs));
+    for (let ref of refs) {
+      this.dependencies.get(ref).add(cellId);
+    }
+  }
+  
+  recalculate(cellId) {
+    const computed = this.compute(cellId);
+    this.cells.get(cellId).computed = computed;
+    
+    const deps = this.dependencies.get(cellId) || new Set();
+    for (let dep of deps) {
+      this.recalculate(dep);
+    }
+  }
+  
+  set(cellId, rawValue) {
+    if (!this.cells.has(cellId)) return;
+    
+    this.cells.get(cellId).raw = rawValue;
+    
+    let refs = new Set();
+    if (rawValue.startsWith('=')) {
+      const formula = rawValue.substring(1);
+      refs = this.extractReferences(formula);
+    }
+    
+    this.updateDependencies(cellId, refs);
+    
+    const cycleMembers = this.getAllCycleMembers();
+    if (cycleMembers.size > 0) {
+      for (let member of cycleMembers) {
+        this.cells.get(member).computed = '#CYCLE';
+      }
+    } else {
+      this.recalculate(cellId);
+    }
+    
+    this.updateUI();
+  }
+  
+  get(cellId) {
+    if (!this.cells.has(cellId)) return '';
+    return this.cells.get(cellId).computed;
+  }
+  
+  raw(cellId) {
+    if (!this.cells.has(cellId)) return '';
+    return this.cells.get(cellId).raw;
+  }
+  
+  updateUI() {
+    for (let col of COLS) {
+      for (let row = 1; row <= ROWS; row++) {
+        const cellId = col + row;
+        const input = document.getElementById('cell-' + cellId);
+        if (input && !input.matches(':focus')) {
+          input.value = this.cells.get(cellId).computed;
+        }
+      }
+    }
+  }
+  
+  exportCSV() {
+    const rows = [];
+    for (let row = 1; row <= ROWS; row++) {
+      const cols = [];
+      for (let col of COLS) {
+        const cellId = col + row;
+        cols.push(this.get(cellId));
+      }
+      rows.push(cols.join(','));
+    }
+    return rows.join('\n');
+  }
+}
+
+window.sheet = new Spreadsheet();
+
+const grid = document.getElementById('grid');
+
+// Column headers
+const empty = document.createElement('div');
+empty.className = 'header';
+grid.appendChild(empty);
+
+for (let col of COLS) {
+  const header = document.createElement('div');
+  header.className = 'header';
+  header.textContent = col;
+  grid.appendChild(header);
+}
+
+// Rows and cells
+for (let row = 1; row <= ROWS; row++) {
+  const rowHeader = document.createElement('div');
+  rowHeader.className = 'header';
+  rowHeader.textContent = row;
+  grid.appendChild(rowHeader);
+  
+  for (let col of COLS) {
+    const cellId = col + row;
+    const input = document.createElement('input');
+    input.id = 'cell-' + cellId;
+    input.type = 'text';
+    
+    input.addEventListener('focus', () => {
+      input.value = window.sheet.raw(cellId);
+    });
+    
+    input.addEventListener('blur', () => {
+      window.sheet.set(cellId, input.value);
+    });
+    
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        window.sheet.set(cellId, input.value);
+        input.blur();
+      }
+    });
+    
+    grid.appendChild(input);
+  }
+}
+
+document.getElementById('export').addEventListener('click', () => {
+  const csv = window.sheet.exportCSV();
+  document.getElementById('csv').value = csv;
+});
+</script>
+
+</body>
+</html>

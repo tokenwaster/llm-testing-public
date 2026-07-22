@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Falling Sand Sandbox</title>
+  <style>
+    :root {
+      --bg-color: #2d2d2d;
+      --text-color: #e0e0e0;
+      --accent-color: #4caf50;
+      --button-bg: #3d3d3d;
+      --button-hover: #505050;
+      --canvas-border: #1a1a1a;
+    }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    h1 {
+      margin-bottom: 20px;
+      font-weight: 400;
+      letter-spacing: 1px;
+    }
+
+    .controls-container {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    button {
+      background-color: var(--button-bg);
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      font-size: 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    }
+
+    button:hover {
+      background-color: var(--button-hover);
+      transform: translateY(-1px);
+    }
+
+    button.active {
+      background-color: var(--accent-color);
+      font-weight: bold;
+    }
+
+    #clear {
+      background-color: #f44336;
+    }
+
+    #clear:hover {
+      background-color: #e53935;
+    }
+
+    .canvas-container {
+      position: relative;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      border: 4px solid var(--canvas-border);
+    }
+
+    canvas#sand {
+      display: block;
+      cursor: crosshair;
+    }
+
+    .info {
+      margin-top: 15px;
+      font-size: 14px;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <h1>Falling Sand Sandbox</h1>
+
+  <div class="controls-container">
+    <button id="mat-sand" class="active">Sand</button>
+    <button id="mat-water">Water</button>
+    <button id="mat-wall">Wall</button>
+    <button id="mat-acid">Acid</button>
+    <button id="mat-empty">Eraser</button>
+  </div>
+
+  <div class="controls-container">
+    <button id="clear">Clear Canvas</button>
+  </div>
+
+  <div class="canvas-container">
+    <canvas id="sand" width="400" height="400"></canvas>
+  </div>
+
+  <p class="info">Click and drag to paint. Sand falls, water flows, acid dissolves walls and sand.</p>
+
+  <script>
+    // Configuration
+    const GRID_WIDTH = 100;
+    const GRID_HEIGHT = 100;
+    const CELL_SIZE = 4; // Canvas is 400x400, so 400/4 = 100 cells
+
+    // Material constants
+    const EMPTY = 0;
+    const SAND = 1;
+    const WATER = 2;
+    const WALL = 3;
+    const ACID = 4;
+
+    // Canvas setup
+    const canvas = document.getElementById('sand');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    
+    // Set actual grid dimensions based on cell size
+    canvas.width = GRID_WIDTH * CELL_SIZE;
+    canvas.height = GRID_HEIGHT * CELL_SIZE;
+
+    // Create the simulation grid
+    let grid = new Uint8Array(GRID_WIDTH * GRID_HEIGHT);
+    
+    // Helper functions for grid access
+    const getIdx = (x, y) => y * GRID_WIDTH + x;
+    
+    // Material colors
+    const materialColors = {
+      [EMPTY]: '#2d2d2d',
+      [SAND]: '#e6c978',   // Sand color
+      [WATER]: '#4fc3f7',  // Water color
+      [WALL]: '#9e9e9e',   // Wall color
+      ACID: '#a5d6a7'      // Acid color (light green)
+    };
+
+    // Current state
+    let currentMaterial = SAND;
+    let isDrawing = false;
+
+    // Initialize the simulation API
+    window.sim = {
+      w: GRID_WIDTH,
+      h: GRID_HEIGHT,
+      
+      tick(n) {
+        for (let step = 0; step < n; step++) {
+          // Process from bottom to top to ensure particles move at most one cell per step
+          for (let y = GRID_HEIGHT - 1; y >= 0; y--) {
+            // Randomize x-direction traversal or use fixed order
+            const leftToRight = Math.random() > 0.5;
+            
+            for (let i = 0; i < GRID_WIDTH; i++) {
+              const x = leftToRight ? i : GRID_WIDTH - 1 - i;
+              
+              const idx = getIdx(x, y);
+              const material = grid[idx];
+              
+              if (material === SAND) {
+                // Sand falls down
+                if (y < GRID_HEIGHT - 1) {
+                  const belowIdx = getIdx(x, y + 1);
+                  
+                  if (grid[belowIdx] === EMPTY) {
+                    // Move down into empty space
+                    grid[idx] = EMPTY;
+                    grid[belowIdx] = SAND;
+                  } else if (grid[belowIdx] === WATER || grid[belowIdx] === ACID) {
+                    // Swap with water or acid (sand sinks)
+                    grid[idx] = grid[belowIdx];
+                    grid[belowIdx] = SAND;
+                  }
+                }
+                
+                // If blocked below, try diagonal movement
+                if (y < GRID_HEIGHT - 1) {
+                  const belowIdx = getIdx(x, y + 1);
+                  
+                  // Only try diagonals if we couldn't move straight down
+                  if (grid[belowIdx] !== EMPTY && grid[belowIdx] !== WATER && grid[belowIdx] !== ACID) {
+                    // Randomize diagonal direction
+                    const leftFirst = Math.random() > 0.5;
+                    
+                    let moved = false;
+                    
+                    if (leftFirst) {
+                      // Try left-down
+                      if (x > 0 && y < GRID_HEIGHT - 1) {
+                        const leftDownIdx = getIdx(x - 1, y + 1);
+                        if (grid[leftDownIdx] === EMPTY || grid[leftDownIdx] === WATER || grid[leftDownIdx] === ACID) {
+                          grid[idx] = grid[leftDownIdx];
+                          grid[leftDownIdx] = SAND;
+                          moved = true;
+                        }
+                      }
+                    } else {
+                      // Try right-down
+                      if (x < GRID_WIDTH - 1 && y < GRID_HEIGHT - 1) {
+                        const rightDownIdx = getIdx(x + 1, y + 1);
+                        if (grid[rightDownIdx] === EMPTY || grid[rightDownIdx] === WATER || grid[rightDownIdx] === ACID) {
+                          grid[idx] = grid[rightDownIdx];
+                          grid[rightDownIdx] = SAND;
+                          moved = true;
+                        }
+                      }
+                    }
+                    
+                    // Try the other diagonal if first one failed
+                    if (!moved) {
+                      if (leftFirst && x < GRID_WIDTH - 1 && y < GRID_HEIGHT - 1) {
+                        const rightDownIdx = getIdx(x + 1, y + 1);
+                        if (grid[rightDownIdx] === EMPTY || grid[rightDownIdx] === WATER || grid[rightDownIdx] === ACID) {
+                          grid[idx] = grid[rightDownIdx];
+                          grid[rightDownIdx] = SAND;
+                        }
+                      } else if (!leftFirst && x > 0 && y < GRID_HEIGHT - 1) {
+                        const leftDownIdx = getIdx(x - 1, y + 1);
+                        if (grid[leftDownIdx] === EMPTY || grid[leftDownIdx] === WATER || grid[leftDownIdx] === ACID) {
+                          grid[idx] = grid[leftDownIdx];
+                          grid[leftDownIdx] = SAND;
+                        }
+                      }
+                    }
+                  }
+                }
+              } else if (material === WATER) {
+                // Water falls down
+                if (y < GRID_HEIGHT - 1) {
+                  const belowIdx = getIdx(x, y + 1);
+                  
+                  if (grid[belowIdx] === EMPTY) {
+                    grid[idx] = EMPTY;
+                    grid[belowIdx] = WATER;
+                  }
+                }
+                
+                // If blocked below, try to spread horizontally
+                if (y < GRID_HEIGHT - 1 && 
+                    grid[getIdx(x, y + 1)] !== EMPTY) {
+                  const leftFirst = Math.random() > 0.5;
+                  
+                  let moved = false;
+                  
+                  if (leftFirst) {
+                    // Try left
+                    if (x > 0) {
+                      const leftIdx = getIdx(x - 1, y);
+                      if (grid[leftIdx] === EMPTY) {
+                        grid[idx] = EMPTY;
+                        grid[leftIdx] = WATER;
+                        moved = true;
+                      }
+                    }
+                  } else {
+                    // Try right
+                    if (x < GRID_WIDTH - 1) {
+                      const rightIdx = getIdx(x + 1, y);
+                      if (grid[rightIdx] === EMPTY) {
+                        grid[idx] = EMPTY;
+                        grid[rightIdx] = WATER;
+                        moved = true;
+                      }
+                    }
+                  }
+                  
+                  // Try the other direction if first one failed
+                  if (!moved) {
+                    if (leftFirst && x < GRID_WIDTH - 1) {
+                      const rightIdx = getIdx(x + 1, y);
+                      if (grid[rightIdx] === EMPTY) {
+                        grid[idx] = EMPTY;
+                        grid[rightIdx] = WATER;
+                      }
+                    } else if (!leftFirst && x > 0) {
+                      const leftIdx = getIdx(x - 1, y);
+                      if (grid[leftIdx] === EMPTY) {
+                        grid[idx] = EMPTY;
+                        grid[leftIdx] = WATER;
+                      }
+                    }
+                  }
+                }
+              } else if (material === ACID) {
+                // Acid falls down
+                if (y < GRID_HEIGHT - 1) {
+                  const belowIdx = getIdx(x, y + 1);
+                  
+                  if (grid[belowIdx] === EMPTY) {
+                    grid[idx] = EMPTY;
+                    grid[belowIdx] = ACID;
+                  } else if (grid[belowIdx] === WATER) {
+                    // Acid and water mix/neutralize - both disappear
+                    grid[idx] = EMPTY;
+                    grid[belowIdx] = EMPTY;
+                  }
+                }
+                
+                // Try to spread horizontally like water
+                if (y < GRID_HEIGHT - 1 && 
+                    grid[getIdx(x, y + 1)] !== EMPTY && 
+                    grid[getIdx(x, y + 1)] !== WATER) {
+                  const leftFirst = Math.random() > 0.5;
+                  
+                  let moved = false;
+                  
+                  if (leftFirst) {
+                    // Try left
+                    if (x > 0) {
+                      const leftIdx = getIdx(x - 1, y);
+                      if (grid[leftIdx] === EMPTY) {
+                        grid[idx] = EMPTY;
+                        grid[leftIdx] = ACID;
+                        moved = true;
+                      }
+                    }
+                  } else {
+                    // Try right
+                    if (x < GRID_WIDTH - 1) {
+                      const rightIdx = getIdx(x + 1, y);
+                      if (grid[rightIdx] === EMPTY) {
+                        grid[idx] = EMPTY;
+                        grid[rightIdx] = ACID;
+                        moved = true;
+                      }
+                    }
+                  }
+                  
+                  // Try the other direction if first one failed
+                  if (!moved) {
+                    if (leftFirst && x < GRID_WIDTH - 1) {
+                      const rightIdx = getIdx(x + 1, y);
+                      if (grid[rightIdx] === EMPTY) {
+                        grid[idx] = EMPTY;
+                        grid[rightIdx] = ACID;
+                      }
+                    } else if (!leftFirst && x > 0) {
+                      const leftIdx = getIdx(x - 1, y);
+                      if (grid[leftIdx] === EMPTY) {
+                        grid[idx] = EMPTY;
+                        grid[leftIdx] = ACID;
+                      }
+                    }
+                  }
+                }
+                
+                // Acid dissolves sand and walls
+                // Check below
+                if (y < GRID_HEIGHT - 1) {
+                  const belowIdx = getIdx(x, y + 1);
+                  if (grid[belowIdx] === SAND || grid[belowIdx] === WALL) {
+                    // Both acid and target disappear
+                    grid[idx] = EMPTY;
+                    grid[belowIdx] = EMPTY;
+                  }
+                }
+                
+                // Check sides
+                if (x > 0 && grid[getIdx(x - 1, y)] !== WATER) {
+                  if (grid[getIdx(x - 1, y)] === SAND || grid[getIdx(x - 1, y)] === WALL) {
+                    grid[idx] = EMPTY;
+                    grid[getIdx(x - 1, y)] = EMPTY;
+                  }
+                }
+                
+                if (x < GRID_WIDTH - 1 && grid[getIdx(x + 1, y)] !== WATER) {
+                  if (grid[getIdx(x + 1, y)] === SAND || grid[getIdx(x + 1, y)] === WALL) {
+                    grid[idx] = EMPTY;
+                    grid[getIdx(x + 1, y)] = EMPTY;
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      
+      get(x, y) {
+        if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) return "empty";
+        
+        const material = grid[getIdx(x, y)];
+        switch (material) {
+          case EMPTY: return "empty";
+          case SAND: return "sand";
+          case WATER: return "water";
+          case WALL: return "wall";
+          case ACID: return "acid";
+          default: return "empty";
+        }
+      },
+      
+      set(x, y, material) {
+        if (x < 0 || x >= GRID_WIDTH || y < 0 || y >= GRID_HEIGHT) return;
+        
+        let matValue = EMPTY;
+        switch (material) {
+          case "empty": matValue = EMPTY; break;
+          case "sand": matValue = SAND; break;
+          case "water": matValue = WATER; break;
+          case "wall": matValue = WALL; break;
+          case "acid": matValue = ACID; break;
+        }
+        
+        grid[getIdx(x, y)] = matValue;
+      },
+      
+      clear() {
+        for (let i = 0; i < grid.length; i++) {
+          grid[i] = EMPTY;
+        }
+      }
+    };
+
+    // Initialize with empty grid
+    window.sim.clear();
+
+    // Drawing functionality
+    function paint(x, y) {
+      const gridX = Math.floor(x / CELL_SIZE);
+      const gridY = Math.floor(y / CELL_SIZE);
+      
+      if (gridX >= 0 && gridX < GRID_WIDTH && gridY >= 0 && gridY < GRID_HEIGHT) {
+        window.sim.set(gridX, gridY, currentMaterial === EMPTY ? "empty" : 
+                      currentMaterial === SAND ? "sand" :
+                      currentMaterial === WATER ? "water" :
+                      currentMaterial === WALL ? "wall" : "acid");
+      }
+    }
+
+    // Mouse event handlers
+    canvas.addEventListener('mousedown', (e) => {
+      isDrawing = true;
+      const rect = canvas.getBoundingClientRect();
+      paint(e.clientX - rect.left, e.clientY - rect.top);
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (isDrawing) {
+        const rect = canvas.getBoundingClientRect();
+        paint(e.clientX - rect.left, e.clientY - rect.top);
+      }
+    });
+
+    window.addEventListener('mouseup', () => {
+      isDrawing = false;
+    });
+
+    // Material selection buttons
+    document.getElementById('mat-sand').addEventListener('click', function() {
+      currentMaterial = SAND;
+      updateActiveButton(this);
+    });
+
+    document.getElementById('mat-water').addEventListener('click', function() {
+      currentMaterial = WATER;
+      updateActiveButton(this);
+    });
+
+    document.getElementById('mat-wall').addEventListener('click', function() {
+      currentMaterial = WALL;
+      updateActiveButton(this);
+    });
+
+    document.getElementById('mat-acid').addEventListener('click', function() {
+      currentMaterial = ACID;
+      updateActiveButton(this);
+    });
+
+    document.getElementById('mat-empty').addEventListener('click', function() {
+      currentMaterial = EMPTY;
+      updateActiveButton(this);
+    });
+
+    // Clear button
+    document.getElementById('clear').addEventListener('click', () => {
+      window.sim.clear();
+    });
+
+    function updateActiveButton(activeBtn) {
+      document.querySelectorAll('.controls-container button').forEach(btn => {
+        btn.classList.remove('active');
+      });
+      activeBtn.classList.add('active');
+    }
+
+    // Rendering loop
+    function render() {
+      // Create an image buffer for the grid
+      const imageData = ctx.createImageData(canvas.width, canvas.height);
+      const data = imageData.data;
+      
+      for (let y = 0; y < GRID_HEIGHT; y++) {
+        for (let x = 0; x < GRID_WIDTH; x++) {
+          const idx = getIdx(x, y);
+          const material = grid[idx];
+          const color = materialColors[material] || '#2d2d2d';
+          
+          // Parse the hex color to RGB
+          let r, g, b;
+          if (color === '#2d2d2d') {
+            r = 45; g = 45; b = 45;
+          } else if (color === '#e6c978') {
+            r = 230; g = 201; b = 120;
+          } else if (color === '#4fc3f7') {
+            r = 79; g = 195; b = 247;
+          } else if (color === '#9e9e9e') {
+            r = 158; g = 158; b = 158;
+          } else if (color === '#a5d6a7') {
+            r = 165; g = 214; b = 167;
+          }
+          
+          // Fill the cell area in the image
+          const pixelX = x * CELL_SIZE;
+          const pixelY = y * CELL_SIZE;
+          
+          for (let py = 0; py < CELL_SIZE; py++) {
+            for (let px = 0; px < CELL_SIZE; px++) {
+              const pixelIdx = ((pixelY + py) * canvas.width + (pixelX + px)) * 4;
+              data[pixelIdx] = r;
+              data[pixelIdx + 1] = g;
+              data[pixelIdx + 2] = b;
+              data[pixelIdx + 3] = 255; // Alpha
+            }
+          }
+        }
+      }
+      
+      ctx.putImageData(imageData, 0, 0);
+    }
+
+    // Animation loop
+    function animate() {
+      render();
+      requestAnimationFrame(animate);
+    }
+
+    // Start the animation
+    animate();
+
+    // Initialize with some sample content for demonstration
+    setTimeout(() => {
+      // Add a sand pile in the center
+      const centerX = Math.floor(GRID_WIDTH / 2);
+      const centerY = Math.floor(GRID_HEIGHT / 4);
+      
+      for (let y = 0; y < 15; y++) {
+        for (let x = -y + 5; x < y - 5; x++) {
+          if (centerX + x >= 0 && centerX + x < GRID_WIDTH) {
+            window.sim.set(centerX + x, centerY + y, "sand");
+          }
+        }
+      }
+      
+      // Add some water on the left side
+      for (let y = 10; y < 25; y++) {
+        for (let x = 5; x < 15; x++) {
+          if (x >= 0 && x < GRID_WIDTH) {
+            window.sim.set(x, y, "water");
+          }
+        }
+      }
+      
+      // Add a wall on the right side
+      for (let y = 20; y < 40; y++) {
+        for (let x = 85; x <= 95; x++) {
+          if (x >= 0 && x < GRID_WIDTH) {
+            window.sim.set(x, y, "wall");
+          }
+        }
+      }
+    }, 100);
+  </script>
+</body>
+</html>

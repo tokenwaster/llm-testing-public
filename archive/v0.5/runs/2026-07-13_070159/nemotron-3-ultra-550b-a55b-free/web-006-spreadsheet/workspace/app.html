@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Mini Spreadsheet</title>
+<style>
+  #app { width: 600px; height: 400px; overflow: auto; font-family: sans-serif; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #ccc; padding: 2px; text-align: center; }
+  th { background: #f0f0f0; }
+  .cell-input { width: 50px; height: 24px; box-sizing: border-box; text-align: right; border: none; outline: none; background: transparent; }
+  .cell-input:focus { background: #fff; }
+  #export { margin-top: 10px; padding: 4px 8px; }
+  #csv { width: 100%; height: 100px; margin-top: 10px; font-family: monospace; box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const COLS = 10, ROWS = 10;
+let rawValues = [];
+let inputs = [];
+let currentComputedCache = new Map();
+
+function colToLetter(c) { return String.fromCharCode(65 + c); }
+function letterToCol(l) { return l.toUpperCase().charCodeAt(0) - 65; }
+function cellKey(col, row) { return colToLetter(col) + (row + 1); }
+
+// ---------- Tokenizer ----------
+function tokenize(str) {
+  const tokens = [];
+  let i = 0;
+  while (i < str.length) {
+    const ch = str[i];
+    if (/\s/.test(ch)) { i++; continue; }
+    if (ch >= '0' && ch <= '9' || ch === '.') {
+      let j = i, dot = false;
+      while (j < str.length) {
+        const c = str[j];
+        if (c >= '0' && c <= '9') j++;
+        else if (c === '.' && !dot) { dot = true; j++; }
+        else break;
+      }
+      tokens.push({ type: 'NUMBER', value: parseFloat(str.slice(i, j)) });
+      i = j;
+    } else if (/[A-Za-z]/.test(ch)) {
+      let j = i + 1;
+      while (j < str.length && /[0-9]/.test(str[j])) j++;
+      const ref = str.slice(i, j).toUpperCase();
+      const col = letterToCol(ref[0]);
+      const row = parseInt(ref.slice(1)) - 1;
+      if (col < 0 || col >= COLS || row < 0 || row >= ROWS) throw new Error('Invalid reference');
+      tokens.push({ type: 'CELL_REF', col, row });
+      i = j;
+    } else if (ch === '+') { tokens.push({ type: 'PLUS' }); i++; }
+    else if (ch === '-') { tokens.push({ type: 'MINUS' }); i++; }
+    else if (ch === '*') { tokens.push({ type: 'MUL' }); i++; }
+    else if (ch === '/') { tokens.push({ type: 'DIV' }); i++; }
+    else if (ch === '(') { tokens.push({ type: 'LPAREN' }); i++; }
+    else if (ch === ')') { tokens.push({ type: 'RPAREN' }); i++; }
+    else throw new Error('Invalid character');
+  }
+  tokens.push({ type: 'EOF' });
+  return tokens;
+}
+
+// ---------- Parser ----------
+class Parser {
+  constructor(tokens) { this.tokens = tokens; this.pos = 0; }
+  peek() { return this.tokens[this.pos]; }
+  consume(type) {
+    const t = this.peek();
+    if (t.type !== type) throw new Error(`Expected ${type}`);
+    this.pos++;
+    return t;
+  }
+  parse() {
+    const node = this.expr();
+    this.consume('EOF');
+    return node;
+  }
+  expr() {
+    let node = this.term();
+    while (this.peek().type === 'PLUS' || this.peek().type === 'MINUS') {
+      const op = this.peek().type;
+      this.consume(op);
+      node = new BinaryOp(node, op, this.term());
+    }
+    return node;
+  }
+  term() {
+    let node = this.factor();
+    while (this.peek().type === 'MUL' || this.peek().type === 'DIV') {
+      const op = this.peek().type;
+      this.consume(op);
+      node = new BinaryOp(node, op, this.factor());
+    }
+    return node;
+  }
+  factor() {
+    const t = this.peek();
+    if (t.type === 'NUMBER') { this.consume('NUMBER'); return new NumNode(t.value); }
+    if (t.type === 'CELL_REF') { this.consume('CELL_REF'); return new RefNode(t.col, t.row); }
+    if (t.type === 'LPAREN') { this.consume('LPAREN'); const n = this.expr(); this.consume('RPAREN'); return n; }
+    if (t.type === 'MINUS') { this.consume('MINUS'); return new UnaryOp('-', this.factor()); }
+    if (t.type === 'PLUS') { this.consume('PLUS'); return this.factor(); }
+    throw new Error('Unexpected token');
+  }
+}
+
+// ---------- AST Nodes ----------
+class NumNode {
+  constructor(v) { this.v = v; }
+  eval(ctx) { return { value: this.v, error: null }; }
+}
+class RefNode {
+  constructor(c, r) { this.c = c; this.r = r; }
+  eval(ctx) { return ctx.computeCell(this.c, this.r); }
+}
+class BinaryOp {
+  constructor(l, op, r) { this.l = l; this.op = op; this.r = r; }
+  eval(ctx) {
+    const L = this.l.eval(ctx); if (L.error) return L;
+    const R = this.r.eval(ctx); if (R.error) return R;
+    let v;
+    switch (this.op) {
+      case 'PLUS': v = L.value + R.value; break;
+      case 'MINUS': v = L.value - R.value; break;
+      case 'MUL': v = L.value * R.value; break;
+      case 'DIV': if (R.value === 0) return { value: 0, error: '#ERR' }; v = L.value / R.value; break;
+      default: return { value: 0, error: '#ERR' };
+    }
+    return { value: v, error: null };
+  }
+}
+class UnaryOp {
+  constructor(op, n) { this.op = op; this.n = n; }
+  eval(ctx) {
+    const r = this.n.eval(ctx); if (r.error) return r;
+    return this.op === '-' ? { value: -r.value, error: null } : r;
+  }
+}
+
+function parseFormula(s) {
+  return new Parser(tokenize(s)).parse();
+}
+
+// ---------- Recalculation ----------
+function recalcAll() {
+  const cache = new Map();
+  const visiting = new Set();
+
+  function computeCell(col, row) {
+    const key = cellKey(col, row);
+    if (cache.has(key)) return cache.get(key);
+    if (visiting.has(key)) {
+      const res = { value: 0, error: '#CYCLE', display: '#CYCLE' };
+      cache.set(key, res);
+      return res;
+    }
+    visiting.add(key);
+    const raw = rawValues[row][col];
+    let result;
+    if (raw.startsWith('=')) {
+      try {
+        const ast = parseFormula(raw.slice(1).trim());
+        const ctx = { computeCell };
+        const ev = ast.eval(ctx);
+        if (ev.error) result = { value: 0, error: ev.error, display: ev.error };
+        else result = { value: ev.value, error: null, display: ev.value.toString() };
+      } catch (e) {
+        result = { value: 0, error: '#ERR', display: '#ERR' };
+      }
+    } else {
+      const disp = raw;
+      const num = parseFloat(raw);
+      result = { value: isNaN(num) ? 0 : num, error: null, display: disp };
+    }
+    visiting.delete(key);
+    cache.set(key, result);
+    return result;
+  }
+
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      computeCell(c, r);
+
+  currentComputedCache = cache;
+
+  // Update DOM for non-focused cells
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++) {
+      const inp = inputs[r][c];
+      if (inp !== document.activeElement) {
+        const comp = cache.get(cellKey(c, r));
+        if (comp) inp.value = comp.display;
+      }
+    }
+}
+
+// ---------- UI Setup ----------
+const container = document.getElementById('app');
+const table = document.createElement('table');
+
+// Header row
+const thead = document.createElement('thead');
+const hdr = document.createElement('tr');
+hdr.appendChild(document.createElement('th'));
+for (let c = 0; c < COLS; c++) {
+  const th = document.createElement('th');
+  th.textContent = colToLetter(c);
+  hdr.appendChild(th);
+}
+thead.appendChild(hdr);
+table.appendChild(thead);
+
+// Body rows
+const tbody = document.createElement('tbody');
+inputs = Array.from({ length: ROWS }, () => Array(COLS));
+rawValues = Array.from({ length: ROWS }, () => Array(COLS).fill(''));
+
+for (let r = 0; r < ROWS; r++) {
+  const tr = document.createElement('tr');
+  const th = document.createElement('th');
+  th.textContent = r + 1;
+  tr.appendChild(th);
+  for (let c = 0; c < COLS; c++) {
+    const td = document.createElement('td');
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.className = 'cell-input';
+    inp.id = `cell-${colToLetter(c)}${r+1}`;
+    inp.dataset.col = c;
+    inp.dataset.row = r;
+    td.appendChild(inp);
+    tr.appendChild(td);
+    inputs[r][c] = inp;
+  }
+  tbody.appendChild(tr);
+}
+table.appendChild(tbody);
+container.appendChild(table);
+
+// Export button & textarea
+const btn = document.createElement('button');
+btn.id = 'export';
+btn.textContent = 'Export CSV';
+container.appendChild(btn);
+
+const ta = document.createElement('textarea');
+ta.id = 'csv';
+container.appendChild(ta);
+
+// ---------- Event Handlers ----------
+function commitCell(r, c) {
+  const inp = inputs[r][c];
+  const newRaw = inp.value.trim();
+  if (newRaw !== rawValues[r][c]) {
+    rawValues[r][c] = newRaw;
+    recalcAll();
+  } else {
+    // just refresh display from cache
+    const comp = currentComputedCache.get(cellKey(c, r));
+    if (comp) inp.value = comp.display;
+  }
+}
+
+for (let r = 0; r < ROWS; r++) {
+  for (let c = 0; c < COLS; c++) {
+    const inp = inputs[r][c];
+    inp.addEventListener('focus', () => { inp.value = rawValues[r][c]; });
+    inp.addEventListener('blur', () => commitCell(r, c));
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const newRaw = inp.value.trim();
+        if (newRaw !== rawValues[r][c]) rawValues[r][c] = newRaw;
+        recalcAll();
+        inp.blur();
+      }
+    });
+  }
+}
+
+btn.addEventListener('click', () => {
+  let csv = '';
+  for (let r = 0; r < ROWS; r++) {
+    const row = [];
+    for (let c = 0; c < COLS; c++) {
+      const comp = currentComputedCache.get(cellKey(c, r));
+      row.push(comp ? comp.display : '');
+    }
+    csv += row.join(',') + '\n';
+  }
+  ta.value = csv.trim();
+});
+
+// ---------- Scripting API ----------
+window.sheet = {
+  set(id, raw) {
+    const col = letterToCol(id[0]);
+    const row = parseInt(id.slice(1)) - 1;
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return;
+    rawValues[row][col] = raw.trim();
+    recalcAll();
+  },
+  get(id) {
+    const col = letterToCol(id[0]);
+    const row = parseInt(id.slice(1)) - 1;
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return '';
+    const comp = currentComputedCache.get(cellKey(col, row));
+    return comp ? comp.display : '';
+  },
+  raw(id) {
+    const col = letterToCol(id[0]);
+    const row = parseInt(id.slice(1)) - 1;
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return '';
+    return rawValues[row][col];
+  }
+};
+
+// Initial calculation
+recalcAll();
+</script>
+</body>
+</html>

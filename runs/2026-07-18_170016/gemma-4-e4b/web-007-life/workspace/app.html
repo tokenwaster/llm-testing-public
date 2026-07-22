@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Conway's Game of Life</title>
+    <style>
+        :root {
+            --bg-color: #1e2124;
+            --text-color: #e0e6ed;
+            --alive-color: #38a169; /* Green */
+            --dead-color: #1e2124;
+            --border-color: #333;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+
+        #controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        button {
+            background-color: #3a3f44;
+            color: var(--text-color);
+            border: none;
+            padding: 10px 20px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.2s, transform 0.1s;
+            border-radius: 5px;
+        }
+
+        button:hover {
+            background-color: #4a4e55;
+        }
+
+        button:active {
+            transform: translateY(1px);
+        }
+
+        #life-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* The grid itself */
+        #life {
+            display: grid;
+            border: 2px solid var(--border-color);
+            background-color: #0d1013; /* Slightly darker background for the grid area */
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+        }
+
+        /* Individual cell styling */
+        .cell {
+            width: 1em; /* Use em units based on container size */
+            height: 1em;
+            background-color: var(--dead-color);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            box-sizing: border-box;
+            cursor: pointer;
+        }
+
+        /* Alive cell styling */
+        .cell.alive {
+            background-color: var(--alive-color);
+            border-color: var(--alive-color);
+            box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.2);
+        }
+
+    </style>
+</head>
+<body>
+
+    <h1>Conway's Game of Life</h1>
+    <p>Click or drag on the grid to paint cells (toggle state).</p>
+
+    <div id="controls">
+        <button id="step">Step (Next Generation)</button>
+        <button id="play">Start Auto-Run</button>
+        <button id="random">Random Seed</button>
+        <button id="clear">Clear Grid</button>
+    </div>
+
+    <div id="life-container">
+        <!-- The grid will be populated here by JavaScript -->
+        <div id="life"></div>
+    </div>
+
+
+<script>
+/**
+ * Conway's Game of Life Implementation
+ */
+
+const GRID_SIZE = 50; // W and H must be at least 40. Using 50x50.
+const CELL_PIXEL_SIZE = 18; // Controls the visible size (CSS pixels)
+
+// --- State Management ---
+let currentGridState = [];
+let isRunning = false;
+let autoStepIntervalId = null;
+
+/**
+ * Initializes and manages the Game of Life simulation state.
+ */
+const lifeAPI = {
+    w: GRID_SIZE,
+    h: GRID_SIZE,
+    gridElement: document.getElementById('life'),
+
+    // Initialize internal grid structure (0 for dead, 1 for alive)
+    init() {
+        currentGridState = Array(this.w).fill(0).map(() => Array(this.h).fill(0));
+        this.renderGridStructure();
+        this.clear(); // Start clean
+    },
+
+    /**
+     * Renders the structural HTML elements for all cells based on W and H.
+     * This is done once at initialization.
+     */
+    renderGridStructure() {
+        this.gridElement.style.setProperty('grid-template-columns', `repeat(${this.w}, ${CELL_PIXEL_SIZE}px)`);
+        this.gridElement.style.setProperty('grid-template-rows', `repeat(${this.h}, ${CELL_PIXEL_SIZE}px)`);
+
+        // Clear existing children
+        this.gridElement.innerHTML = ''; 
+
+        for (let y = 0; y < this.h; y++) {
+            for (let x = 0; x < this.w; x++) {
+                const cellDiv = document.createElement('div');
+                cellDiv.className = 'cell';
+                cellDiv.dataset.x = x;
+                cellDiv.dataset.y = y;
+                this.gridElement.appendChild(cellDiv);
+            }
+        }
+
+        // Attach interaction listeners after structure is built
+        this.attachInteractionListeners();
+    },
+
+    /**
+     * Helper function to safely get the state of a cell (0 or 1).
+     * Handles out-of-bounds by returning 0 (dead).
+     * @param {number} x - Column index.
+     * @param {number} y - Row index.
+     * @returns {number} 0 or 1.
+     */
+    get(x, y) {
+        if (x < 0 || x >= this.w || y < 0 || y >= this.h) {
+            return 0; // Edges are dead
+        }
+        return currentGridState[y][x];
+    },
+
+    /**
+     * Sets the state of a cell and updates its visual representation.
+     * @param {number} x - Column index.
+     * @param {number} y - Row index.
+     * @param {boolean|number} v - True/1 for alive, False/0 for dead.
+     */
+    set(x, y, v) {
+        if (x < 0 || x >= this.w || y < 0 || y >= this.h) return;
+
+        const value = (v ? 1 : 0);
+        currentGridState[y][x] = value;
+        this.updateCellVisual(x, y, value);
+    },
+
+    /**
+     * Counts the number of live neighbors for a cell at (x, y).
+     * @param {number} x - Column index.
+     * @param {number} y - Row index.
+     * @returns {number} Count of live neighbors (0-8).
+     */
+    countNeighbors(x, y) {
+        let count = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dy === 0) continue; // Skip the cell itself
+
+                // Use get() which handles boundary checks and returns 0 for out-of-bounds
+                count += this.get(x + dx, y + dy);
+            }
+        }
+        return count;
+    },
+
+    /**
+     * Calculates the next state of the entire grid simultaneously (B3/S23 rules).
+     * @returns {Array<Array<number>>} The new grid state.
+     */
+    calculateNextState() {
+        // Create a deep copy for the next generation's state
+        const nextGrid = currentGridState.map(row => [...row]);
+
+        for (let y = 0; y < this.h; y++) {
+            for (let x = 0; x < this.w; x++) {
+                const currentState = currentGridState[y][x];
+                const neighbors = this.countNeighbors(x, y);
+
+                let nextState = 0; // Default to dead
+
+                if (currentState === 1) {
+                    // Rule for Live Cell: Survival (2 or 3 neighbors)
+                    if (neighbors === 2 || neighbors === 3) {
+                        nextState = 1; // Survives
+                    } else {
+                        nextState = 0; // Dies (under/overpopulation)
+                    }
+                } else {
+                    // Rule for Dead Cell: Reproduction (exactly 3 neighbors)
+                    if (neighbors === 3) {
+                        nextState = 1; // Becomes alive
+                    } else {
+                        nextState = 0; // Remains dead
+                    }
+                }
+
+                nextGrid[y][x] = nextState;
+            }
+        }
+        return nextGrid;
+    },
+
+    /**
+     * Advances the simulation by exactly one generation, updates state, and redraws.
+     */
+    step() {
+        if (isRunning) return; // Prevent stepping if auto-running
+
+        // 1. Calculate new state based on current state
+        const nextState = this.calculateNextState();
+
+        // 2. Update the internal grid reference
+        currentGridState = nextState;
+
+        // 3. Redraw all cells to reflect the new state
+        this.redrawAllCells();
+    },
+
+    /**
+     * Sets every cell in the grid to dead (0) and redraws.
+     */
+    clear() {
+        for (let y = 0; y < this.h; y++) {
+            for (let x = 0; x < this.w; x++) {
+                this.set(x, y, false);
+            }
+        }
+        console.log("Grid cleared.");
+    },
+
+    /**
+     * Seeds the grid randomly with a probability of 25%.
+     */
+    randomSeed() {
+        for (let y = 0; y < this.h; y++) {
+            for (let x = 0; x < this.w; x++) {
+                if (Math.random() < 0.25) { // 25% chance of being alive
+                    this.set(x, y, true);
+                } else {
+                    this.set(x, y, false);
+                }
+            }
+        }
+    },
+
+    /**
+     * Updates the visual class of a single cell element and its internal state.
+     * @param {number} x - Column index.
+     * @param {number} y - Row index.
+     * @param {number} value - 0 or 1.
+     */
+    updateCellVisual(x, y, value) {
+        const cellDiv = this.gridElement.querySelector(`[data-x="${x}"][data-y="${y}"]`);
+        if (cellDiv) {
+            if (value === 1) {
+                cellDiv.classList.add('alive');
+            } else {
+                cellDiv.classList.remove('alive');
+            }
+        }
+    },
+
+    /**
+     * Redraws the entire grid based on currentGridState. Used after a step calculation.
+     */
+    redrawAllCells() {
+        for (let y = 0; y < this.h; y++) {
+            for (let x = 0; x < this.w; x++) {
+                const value = currentGridState[y][x];
+                this.updateCellVisual(x, y, value);
+            }
+        }
+    },
+
+    /**
+     * Attaches mouse event listeners for painting/toggling cells.
+     */
+    attachInteractionListeners() {
+        let isPainting = false;
+
+        const handleMouseDown = (e) => {
+            if (!e.target.classList.contains('cell')) return;
+            isPainting = true;
+            this.toggleCell(e.target);
+        };
+
+        const handleMouseMove = (e) => {
+            if (!isPainting || !e.target.classList.contains('cell')) return;
+            this.toggleCell(e.target);
+        };
+
+        const handleMouseUp = () => {
+            isPainting = false;
+        };
+
+        // Attach listeners to the container, delegating events
+        this.gridElement.addEventListener('mousedown', handleMouseDown);
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mouseup', handleMouseUp);
+    },
+
+    /**
+     * Toggles the state of a cell based on click/drag interaction.
+     * @param {HTMLElement} cellDiv - The clicked/moved cell element.
+     */
+    toggleCell(cellDiv) {
+        const x = parseInt(cellDiv.dataset.x);
+        const y = parseInt(cellDiv.dataset.y);
+
+        // Toggle state: 0 -> 1, or 1 -> 0
+        const currentState = currentGridState[y][x];
+        const newState = (currentState === 1) ? 0 : 1;
+
+        this.set(x, y, newState);
+    },
+
+
+    /**
+     * Toggles the auto-run loop state.
+     */
+    togglePlay() {
+        if (isRunning) {
+            // Stop running
+            clearInterval(autoStepIntervalId);
+            autoStepIntervalId = null;
+            document.getElementById('play').textContent = 'Start Auto-Run';
+            isRunning = false;
+        } else {
+            // Start running
+            this.step(); // Run first step immediately
+            autoStepIntervalId = setInterval(() => this.step(), 150); // ~6 steps per second
+            document.getElementById('play').textContent = 'Pause Auto-Run';
+            isRunning = true;
+        }
+    }
+};
+
+// --- Initialization and Event Binding ---
+
+window.life = lifeAPI; // Expose API globally for grading harness
+
+document.addEventListener('DOMContentLoaded', () => {
+    lifeAPI.init();
+
+    // Bind controls
+    document.getElementById('step').addEventListener('click', () => {
+        if (isRunning) lifeAPI.togglePlay(); // Pause if running
+        lifeAPI.step();
+    });
+
+    document.getElementById('play').addEventListener('click', () => {
+        lifeAPI.togglePlay();
+    });
+
+    document.getElementById('random').addEventListener('click', () => {
+        if (isRunning) lifeAPI.togglePlay(); // Pause before seeding
+        lifeAPI.randomSeed();
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+        if (isRunning) lifeAPI.togglePlay(); // Pause before clearing
+        lifeAPI.clear();
+    });
+});
+
+</script>
+</body>
+</html>

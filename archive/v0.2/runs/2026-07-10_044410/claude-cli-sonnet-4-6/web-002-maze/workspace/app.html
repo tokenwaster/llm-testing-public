@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Bot Race</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #080814;
+  color: #e2e8f0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 12px;
+  min-height: 100vh;
+}
+
+h1 {
+  font-size: 1.75em;
+  font-weight: 900;
+  letter-spacing: 5px;
+  margin-bottom: 16px;
+  background: linear-gradient(90deg, #c084fc 0%, #38bdf8 50%, #34d399 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+#hud {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(192,132,252,0.15);
+  border-radius: 14px;
+  padding: 12px 28px;
+  margin-bottom: 16px;
+  box-shadow: 0 0 30px rgba(192,132,252,0.07);
+}
+
+.hud-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+.hud-label {
+  font-size: 0.6em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: #64748b;
+}
+
+#completed {
+  font-size: 1.8em;
+  font-weight: 700;
+  color: #34d399;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.comp-denom {
+  font-size: 0.9em;
+  color: #475569;
+}
+
+#timer {
+  font-size: 1.8em;
+  font-weight: 700;
+  color: #38bdf8;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  min-width: 5.5ch;
+  text-align: center;
+}
+
+#reset {
+  background: linear-gradient(135deg, #7c3aed 0%, #2563eb 100%);
+  color: #fff;
+  border: none;
+  padding: 9px 22px;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 0.85em;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  transition: opacity 0.15s, transform 0.15s;
+  box-shadow: 0 2px 12px rgba(124,58,237,0.4);
+}
+#reset:hover  { opacity: 0.85; transform: translateY(-1px); }
+#reset:active { transform: translateY(1px); }
+
+canvas#maze {
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 6px;
+  display: block;
+  box-shadow: 0 0 50px rgba(192,132,252,0.1), 0 0 100px rgba(56,189,248,0.05);
+}
+
+#msg {
+  margin-top: 12px;
+  font-size: 0.8em;
+  color: #475569;
+  min-height: 1.3em;
+  transition: color 0.3s;
+}
+#msg.win { color: #34d399; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>MAZE BOT RACE</h1>
+
+<div id="hud">
+  <div class="hud-block">
+    <span class="hud-label">Bots Out</span>
+    <div style="display:flex;align-items:baseline;gap:3px">
+      <span id="completed">0</span><span class="comp-denom">/24</span>
+    </div>
+  </div>
+  <div class="hud-block">
+    <span class="hud-label">Elapsed</span>
+    <span id="timer">0.0s</span>
+  </div>
+  <button id="reset">&#x21BA; Reset</button>
+</div>
+
+<canvas id="maze"></canvas>
+<div id="msg">24 bots racing through the maze</div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────────────────
+var COLS     = 21;
+var ROWS     = 21;
+var CS       = 27;   // cell size px
+var WW       = 2;    // wall thickness px
+var N_BOTS   = 24;
+var STAGGER  = 3;    // sim-steps between consecutive bot starts
+var TICK_MS  = 90;   // ms between sim-steps in live animation
+
+var SPAWN = { x: 0,       y: 0       };
+var EXIT  = { x: COLS-1,  y: ROWS-1  };
+
+// ── Canvas ────────────────────────────────────────────────────────────────────
+var canvas = document.getElementById('maze');
+var ctx    = canvas.getContext('2d');
+canvas.width  = COLS * CS + WW;
+canvas.height = ROWS * CS + WW;
+
+// ── UI refs ───────────────────────────────────────────────────────────────────
+var elComp  = document.getElementById('completed');
+var elTimer = document.getElementById('timer');
+var elMsg   = document.getElementById('msg');
+var btnRst  = document.getElementById('reset');
+
+// ── Game state ────────────────────────────────────────────────────────────────
+var walls, bots, completedCount, startTime, endTime, simStep, rafId, lastTick;
+
+// ── Maze: iterative DFS (recursive backtracker) — generates a perfect maze ───
+function buildMaze() {
+  // walls[row][col] = { n, e, s, w }  true = wall present
+  var G = [];
+  for (var r = 0; r < ROWS; r++) {
+    G[r] = [];
+    for (var c = 0; c < COLS; c++) {
+      G[r][c] = { n: true, e: true, s: true, w: true };
+    }
+  }
+  var vis = [];
+  for (var r = 0; r < ROWS; r++) {
+    vis[r] = new Uint8Array(COLS);
+  }
+
+  var DIRS = [
+    { dx:  0, dy: -1, a: 'n', b: 's' },
+    { dx:  1, dy:  0, a: 'e', b: 'w' },
+    { dx:  0, dy:  1, a: 's', b: 'n' },
+    { dx: -1, dy:  0, a: 'w', b: 'e' },
+  ];
+
+  var stack = [{ x: 0, y: 0 }];
+  vis[0][0] = 1;
+
+  while (stack.length > 0) {
+    var cur = stack[stack.length - 1];
+    var nb  = [];
+    for (var di = 0; di < DIRS.length; di++) {
+      var d  = DIRS[di];
+      var nx = cur.x + d.dx, ny = cur.y + d.dy;
+      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && !vis[ny][nx]) {
+        nb.push({ nx: nx, ny: ny, d: d });
+      }
+    }
+    if (nb.length === 0) {
+      stack.pop();
+    } else {
+      var pick = nb[Math.floor(Math.random() * nb.length)];
+      G[cur.y][cur.x][pick.d.a] = false;
+      G[pick.ny][pick.nx][pick.d.b] = false;
+      vis[pick.ny][pick.nx] = 1;
+      stack.push({ x: pick.nx, y: pick.ny });
+    }
+  }
+  return G;
+}
+
+// ── BFS path from (sx,sy) to (ex,ey) ─────────────────────────────────────────
+function findPath(sx, sy, ex, ey) {
+  var DIRS = [
+    { dx:  0, dy: -1, w: 'n' },
+    { dx:  1, dy:  0, w: 'e' },
+    { dx:  0, dy:  1, w: 's' },
+    { dx: -1, dy:  0, w: 'w' },
+  ];
+
+  var par = [];
+  var vis = [];
+  for (var r = 0; r < ROWS; r++) {
+    par[r] = new Array(COLS).fill(null);
+    vis[r] = new Uint8Array(COLS);
+  }
+
+  var q = [{ x: sx, y: sy }];
+  vis[sy][sx] = 1;
+  var found = false;
+
+  outer:
+  while (q.length > 0 && !found) {
+    var cur = q.shift();
+    for (var di = 0; di < DIRS.length; di++) {
+      var d  = DIRS[di];
+      var nx = cur.x + d.dx, ny = cur.y + d.dy;
+      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS
+          && !walls[cur.y][cur.x][d.w] && !vis[ny][nx]) {
+        vis[ny][nx] = 1;
+        par[ny][nx] = { x: cur.x, y: cur.y };
+        if (nx === ex && ny === ey) { found = true; break outer; }
+        q.push({ x: nx, y: ny });
+      }
+    }
+  }
+
+  // Reconstruct path from exit back to spawn
+  var path = [];
+  var c = { x: ex, y: ey };
+  while (c !== null) {
+    path.unshift({ x: c.x, y: c.y });
+    c = par[c.y][c.x];
+  }
+  return path;
+}
+
+// ── One simulation step ───────────────────────────────────────────────────────
+function doTick() {
+  simStep++;
+  for (var i = 0; i < bots.length; i++) {
+    var b = bots[i];
+    if (b.done) continue;
+    if (simStep <= b.startStep) continue;
+    var ni = b.pi + 1;
+    if (ni < b.path.length) {
+      b.pi = ni;
+      b.x  = b.path[ni].x;
+      b.y  = b.path[ni].y;
+    }
+    if (b.x === EXIT.x && b.y === EXIT.y && !b.done) {
+      b.done = true;
+      completedCount++;
+      if (completedCount === N_BOTS && !endTime) {
+        endTime = performance.now();
+      }
+    }
+  }
+}
+
+// ── HUD update ────────────────────────────────────────────────────────────────
+function updateHUD() {
+  elComp.textContent  = completedCount;
+  var ms = (endTime || performance.now()) - startTime;
+  elTimer.textContent = (ms / 1000).toFixed(1) + 's';
+}
+
+// ── Render frame ──────────────────────────────────────────────────────────────
+function draw(ts) {
+  var W = canvas.width, H = canvas.height;
+  var pulse = 0.55 + 0.45 * Math.sin((ts || 0) * 0.0025);
+
+  // Background
+  ctx.fillStyle = '#080814';
+  ctx.fillRect(0, 0, W, H);
+
+  // Cell fills
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      var px = c * CS, py = r * CS;
+      ctx.fillStyle =
+        (c === SPAWN.x && r === SPAWN.y) ? '#061b0f' :
+        (c === EXIT.x  && r === EXIT.y ) ? '#1c0606' : '#0a0a18';
+      ctx.fillRect(px + WW, py + WW, CS - WW, CS - WW);
+    }
+  }
+
+  // Walls (single path for performance)
+  ctx.lineWidth   = WW;
+  ctx.lineCap     = 'square';
+  ctx.strokeStyle = '#22224a';
+  ctx.beginPath();
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      var px = c * CS, py = r * CS;
+      var w = walls[r][c];
+      if (w.n) { ctx.moveTo(px,      py     ); ctx.lineTo(px + CS, py     ); }
+      if (w.e) { ctx.moveTo(px + CS, py     ); ctx.lineTo(px + CS, py + CS); }
+      if (w.s) { ctx.moveTo(px,      py + CS); ctx.lineTo(px + CS, py + CS); }
+      if (w.w) { ctx.moveTo(px,      py     ); ctx.lineTo(px,      py + CS); }
+    }
+  }
+  ctx.stroke();
+
+  // Outer border
+  ctx.strokeStyle = '#38285a';
+  ctx.lineWidth   = WW;
+  ctx.strokeRect(WW / 2, WW / 2, W - WW, H - WW);
+
+  // Fonts for markers
+  var fontSize = Math.round(CS * 0.52);
+  ctx.font         = 'bold ' + fontSize + 'px monospace';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Spawn marker
+  var spx = SPAWN.x * CS + CS / 2 + WW / 2;
+  var spy = SPAWN.y * CS + CS / 2 + WW / 2;
+  ctx.shadowColor = 'rgba(52,211,153,' + pulse + ')';
+  ctx.shadowBlur  = 14;
+  ctx.fillStyle   = '#34d399';
+  ctx.fillText('S', spx, spy + 1);
+
+  // Exit marker (show count when bots arrive, else E)
+  var epx = EXIT.x * CS + CS / 2 + WW / 2;
+  var epy = EXIT.y * CS + CS / 2 + WW / 2;
+  ctx.shadowColor = completedCount > 0
+    ? 'rgba(251,191,36,' + pulse + ')'
+    : 'rgba(248,113,113,' + pulse + ')';
+  ctx.shadowBlur  = 18;
+  ctx.fillStyle   = completedCount > 0 ? '#fbbf24' : '#f87171';
+  ctx.fillText(completedCount > 0 ? completedCount : 'E', epx, epy + 1);
+  ctx.shadowBlur  = 0;
+
+  // Active bots — draw back to front so bot 0 lands on top
+  for (var i = N_BOTS - 1; i >= 0; i--) {
+    var b = bots[i];
+    if (b.done) continue;
+    var cx = b.x * CS + CS / 2 + WW / 2;
+    var cy = b.y * CS + CS / 2 + WW / 2;
+    var br = 4.5;
+
+    // Glow halo
+    ctx.shadowColor = b.col;
+    ctx.shadowBlur  = 10;
+    ctx.fillStyle   = b.col;
+    ctx.beginPath();
+    ctx.arc(cx, cy, br, 0, 6.2832);
+    ctx.fill();
+
+    // Bright core
+    ctx.shadowBlur  = 0;
+    ctx.fillStyle   = 'rgba(255,255,255,0.72)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, br * 0.4, 0, 6.2832);
+    ctx.fill();
+  }
+
+  ctx.shadowBlur = 0;
+}
+
+// ── Animation loop ────────────────────────────────────────────────────────────
+function animLoop(ts) {
+  updateHUD();
+
+  if (lastTick === null) lastTick = ts;
+  if (completedCount < N_BOTS && ts - lastTick >= TICK_MS) {
+    doTick();
+    lastTick = ts;
+  }
+
+  draw(ts);
+
+  if (completedCount < N_BOTS) {
+    rafId = requestAnimationFrame(animLoop);
+  } else {
+    updateHUD();
+    draw(ts);
+    elMsg.textContent = 'All 24 bots reached the exit!';
+    elMsg.className   = 'win';
+  }
+}
+
+// ── Initialise / reset ────────────────────────────────────────────────────────
+function initGame() {
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+
+  walls = buildMaze();
+  var path = findPath(SPAWN.x, SPAWN.y, EXIT.x, EXIT.y);
+
+  bots = [];
+  for (var i = 0; i < N_BOTS; i++) {
+    bots.push({
+      x:         SPAWN.x,
+      y:         SPAWN.y,
+      pi:        0,           // index into path array
+      path:      path,
+      startStep: i * STAGGER,
+      done:      false,
+      col:       'hsl(' + ((i / N_BOTS) * 280 + 160) + ',90%,63%)',
+    });
+  }
+
+  completedCount = 0;
+  simStep        = 0;
+  startTime      = performance.now();
+  endTime        = null;
+  lastTick       = null;
+
+  updateHUD();
+  elMsg.textContent = '24 bots racing through the maze';
+  elMsg.className   = '';
+
+  rafId = requestAnimationFrame(animLoop);
+}
+
+// ── Public window API ─────────────────────────────────────────────────────────
+window.game = {
+  get bots()      { return bots; },
+  get completed() { return completedCount; },
+  get elapsedMs() { return (endTime || performance.now()) - startTime; },
+
+  tick: function(n) {
+    for (var i = 0; i < n; i++) doTick();
+    updateHUD();
+    draw(performance.now());
+  },
+
+  reset: function() { initGame(); },
+};
+
+btnRst.addEventListener('click', function() { window.game.reset(); });
+
+initGame();
+</script>
+</body>
+</html>

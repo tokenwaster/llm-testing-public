@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+* { box-sizing: border-box; }
+body {
+  font-family: Arial, sans-serif;
+  margin: 20px;
+  background: #f0f2f5;
+}
+#app {
+  min-width: 640px;
+  min-height: 420px;
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+}
+h1 { margin-top: 0; font-size: 22px; color: #333; }
+
+table#grid {
+  border-collapse: collapse;
+  margin-bottom: 16px;
+}
+table#grid th, table#grid td {
+  border: 1px solid #c0c0c0;
+  padding: 0;
+  text-align: center;
+}
+table#grid thead th {
+  background: #e2e4e8;
+  font-weight: bold;
+  color: #444;
+  user-select: none;
+  height: 28px;
+  min-width: 70px;
+}
+table#grid td.row-header {
+  background: #e2e4e8;
+  font-weight: bold;
+  color: #444;
+  width: 36px;
+  height: 28px;
+  user-select: none;
+}
+
+.cell-input {
+  width: 100%;
+  height: 100%;
+  border: none;
+  text-align: center;
+  font-size: 13px;
+  padding: 2px 4px;
+  outline: none;
+  background: transparent;
+  min-width: 70px;
+}
+.cell-input.editing {
+  border: 2px solid #3b82f6;
+  background: #eff6ff;
+  z-index: 1;
+  position: relative;
+}
+
+.controls { margin-bottom: 12px; }
+#export {
+  padding: 8px 18px;
+  font-size: 14px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+#export:hover { background: #2563eb; }
+
+#csv {
+  width: 100%;
+  min-height: 80px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  resize: vertical;
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet (10×10)</h1>
+  <div class="controls">
+    <button id="export">Export CSV</button>
+  </div>
+  <table id="grid"></table>
+  <textarea id="csv" readonly placeholder="CSV output will appear here…"></textarea>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── Data store: cellId → raw text ─────────────────────── */
+  var data = {};
+
+  /* ── Helpers ───────────────────────────────────────────── */
+  var COLS = "ABCDEFGHIJ";
+  var ROWS = 10;
+
+  function isValidCell(ref) {
+    var u = ref.toUpperCase();
+    var m = u.match(/^([A-J])(\d+)$/);
+    if (!m) return false;
+    return parseInt(m[2], 10) >= 1 && parseInt(m[2], 10) <= ROWS;
+  }
+
+  function isNumericString(s) {
+    if (!s || s.trim() === "") return false;
+    return /^-?(\d+\.?\d*|\.\d+)$/.test(s.trim());
+  }
+
+  /* ── Tokeniser ─────────────────────────────────────────── */
+  function tokenizeFormula(s) {
+    var tokens = [], i = 0, ch;
+    while (i < s.length) {
+      ch = s[i];
+      if (ch === " ") { i++; continue; }
+
+      if (ch >= "0" && ch <= "9") {
+        var num = "";
+        while (i < s.length && ((s[i] >= "0" && s[i] <= "9") || s[i] === ".")) {
+          num += s[i++];
+        }
+        tokens.push({ type: "NUMBER", value: parseFloat(num) });
+      } else if ((ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z")) {
+        var ref = "";
+        while (i < s.length && (((s[i] >= "A" && s[i] <= "Z") || (s[i] >= "a" && s[i] <= "z")) || (s[i] >= "0" && s[i] <= "9"))) {
+          ref += s[i++];
+        }
+        tokens.push({ type: "CELL_REF", value: ref.toUpperCase() });
+      } else if (ch === "+") { tokens.push({ type: "PLUS" }); i++; }
+      else if (ch === "-") { tokens.push({ type: "MINUS" }); i++; }
+      else if (ch === "*") { tokens.push({ type: "STAR" }); i++; }
+      else if (ch === "/") { tokens.push({ type: "SLASH" }); i++; }
+      else if (ch === "(") { tokens.push({ type: "LPAREN" }); i++; }
+      else if (ch === ")") { tokens.push({ type: "RPAREN" }); i++; }
+      else return null;                       // invalid character
+    }
+    return tokens.length ? tokens : null;
+  }
+
+  /* ── Recursive-descent parser ──────────────────────────── */
+  function FormulaParser(tokens, evaluator) {
+    this.tokens = tokens;
+    this.pos = 0;
+    this.evaluator = evaluator;
+  }
+  FormulaParser.prototype.peek = function () { return this.tokens[this.pos]; };
+  FormulaParser.prototype.consume = function () { return this.tokens[this.pos++]; };
+
+  FormulaParser.prototype.parse = function () {
+    var result = this.expr();
+    if (this.pos < this.tokens.length) throw new Error("#ERR");
+    return result;
+  };
+
+  FormulaParser.prototype.expr = function () {
+    var left = this.term();
+    while (this.peek() &&
+           (this.peek().type === "PLUS" || this.peek().type === "MINUS")) {
+      var op = this.consume().type;
+      var right = this.term();
+      if (op === "PLUS") left += right; else left -= right;
+    }
+    return left;
+  };
+
+  FormulaParser.prototype.term = function () {
+    var left = this.factor();
+    while (this.peek() &&
+           (this.peek().type === "STAR" || this.peek().type === "SLASH")) {
+      var op = this.consume().type;
+      var right = this.factor();
+      if (op === "STAR") left *= right;
+      else {
+        if (right === 0) throw new Error("#ERR");
+        left /= right;
+      }
+    }
+    return left;
+  };
+
+  FormulaParser.prototype.factor = function () {
+    if (this.peek() && this.peek().type === "MINUS") {
+      this.consume();
+      return -this.factor();
+    }
+    if (this.peek() && this.peek().type === "PLUS") {
+      this.consume();
+      return this.factor();
+    }
+    return this.atom();
+  };
+
+  FormulaParser.prototype.atom = function () {
+    var tok = this.peek();
+    if (!tok) throw new Error("#ERR");
+
+    if (tok.type === "NUMBER") {
+      this.consume();
+      return tok.value;
+    }
+
+    if (tok.type === "CELL_REF") {
+      this.consume();
+      /* evaluateCell throws #CYCLE / #ERR which propagate naturally */
+      var val = this.evaluator.evaluate(tok.value);
+      var n = parseFloat(val);
+      return isNaN(n) ? 0 : n;
+    }
+
+    if (tok.type === "LPAREN") {
+      this.consume();
+      var inner = this.expr();
+      if (!this.peek() || this.peek().type !== "RPAREN") throw new Error("#ERR");
+      this.consume();
+      return inner;
+    }
+
+    throw new Error("#ERR");
+  };
+
+  /* ── Evaluator (with cycle detection) ─────────────────── */
+  var visiting = {};   // cellId → true
+  var cache = {};      // cellId → computed value or '#CYCLE' / '#ERR'
+
+  function evaluateCell(cellId) {
+    if (cache[cellId] !== undefined) {
+      if (cache[cellId] === "#CYCLE") throw new Error("#CYCLE");
+      if (cache[cellId] === "#ERR")   throw new Error("#ERR");
+      return cache[cellId];
+    }
+
+    if (!isValidCell(cellId)) throw new Error("#ERR");
+    if (visiting[cellId])     throw new Error("#CYCLE");
+
+    visiting[cellId] = true;
+
+    var raw = data[cellId] || "";
+    var result;
+
+    try {
+      if (raw.charAt(0) !== "=") {
+        /* plain value */
+        if (raw === "") {
+          result = "";
+        } else if (isNumericString(raw)) {
+          result = parseFloat(raw);
+        } else {
+          result = raw;            // non-numeric text → display as-is
+        }
+      } else {
+        /* formula */
+        var tokens = tokenizeFormula(raw.slice(1));
+        if (!tokens) throw new Error("#ERR");
+        var parser = new FormulaParser(tokens, evaluator);
+        result = parser.parse();
+      }
+    } catch (e) {
+      delete visiting[cellId];
+      if (e.message === "#CYCLE" || e.message === "#ERR") {
+        cache[cellId] = e.message;
+        throw e;                       /* propagate */
+      }
+      cache[cellId] = "#ERR";
+      throw new Error("#ERR");
+    }
+
+    delete visiting[cellId];
+    cache[cellId] = result;
+    return result;
+  }
+
+  var evaluator = { evaluate: evaluateCell };
+
+  function clearCache() { cache = {}; visiting = {}; }
+
+  /* ── UI helpers ────────────────────────────────────────── */
+  var focusedCell = null;
+
+  function buildGrid() {
+    var table = document.getElementById("grid");
+
+    /* header row */
+    var thead = document.createElement("thead");
+    var hrow = document.createElement("tr");
+    var corner = document.createElement("th");
+    corner.style.width = "36px";
+    hrow.appendChild(corner);
+    for (var c = 0; c < 10; c++) {
+      var th = document.createElement("th");
+      th.textContent = COLS[c];
+      th.style.minWidth = "70px";
+      hrow.appendChild(th);
+    }
+    thead.appendChild(hrow);
+    table.appendChild(thead);
+
+    /* body */
+    var tbody = document.createElement("tbody");
+    for (var r = 1; r <= ROWS; r++) {
+      var tr = document.createElement("tr");
+
+      var rh = document.createElement("td");
+      rh.className = "row-header";
+      rh.textContent = r;
+      tr.appendChild(rh);
+
+      for (c = 0; c < 10; c++) {
+        var cellId = COLS[c] + r;
+        var td = document.createElement("td");
+
+        var inp = document.createElement("input");
+        inp.type = "text";
+        inp.className = "cell-input";
+        inp.id = "cell-" + cellId;
+        inp.dataset.cellId = cellId;
+
+        /* focus → show raw text */
+        inp.addEventListener("focus", function () {
+          focusedCell = this.dataset.cellId;
+          this.value = data[this.dataset.cellId] || "";
+          this.classList.add("editing");
+        });
+
+        /* blur → commit */
+        inp.addEventListener("blur", function () {
+          commitCell(this.dataset.cellId, this);
+        });
+
+        /* Enter → commit & move on; Escape → revert */
+        inp.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commitCell(this.dataset.cellId, this);
+            this.blur();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            focusedCell = null;
+            this.classList.remove("editing");
+            refreshCellDisplay(this);
+          }
+        });
+
+        td.appendChild(inp);
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+  }
+
+  function commitCell(cellId, input) {
+    var newVal = input.value;
+    if (data[cellId] !== newVal) {
+      data[cellId] = newVal;
+      clearCache();
+    }
+    input.classList.remove("editing");
+    focusedCell = null;
+    refreshAllDisplays();
+  }
+
+  function refreshCellDisplay(input) {
+    var cellId = input.dataset.cellId;
+    if (focusedCell === cellId) return;
+    var v = evaluateCell(cellId);
+    if (v === undefined || v === null) input.value = "";
+    else input.value = String(v);
+  }
+
+  function refreshAllDisplays() {
+    for (var c = 0; c < 10; c++) {
+      for (var r = 1; r <= ROWS; r++) {
+        var cid = COLS[c] + r;
+        var inp = document.getElementById("cell-" + cid);
+        if (!inp) continue;
+        if (focusedCell === cid) {
+          inp.value = data[cid] || "";
+        } else {
+          refreshCellDisplay(inp);
+        }
+      }
+    }
+  }
+
+  /* ── Export CSV ────────────────────────────────────────── */
+  document.getElementById("export").addEventListener("click", function () {
+    var lines = [];
+    for (var r = 1; r <= ROWS; r++) {
+      var cells = [];
+      for (var c = 0; c < 10; c++) {
+        var cid = COLS[c] + r;
+        var v = evaluateCell(cid);
+        var s = (v === undefined || v === null) ? "" : String(v);
+        if (s.indexOf(",") >= 0 || s.indexOf('"') >= 0 || s.indexOf("\n") >= 0) {
+          s = '"' + s.replace(/"/g, '""') + '"';
+        }
+        cells.push(s);
+      }
+      lines.push(cells.join(","));
+    }
+    document.getElementById("csv").value = lines.join("\n");
+  });
+
+  /* ── Scripting API ─────────────────────────────────────── */
+  window.sheet = {
+    set: function (cellId, value) {
+      data[cellId] = value;
+      clearCache();
+      var inp = document.getElementById("cell-" + cellId);
+      if (!inp) return;
+      if (focusedCell === cellId) {
+        inp.value = value || "";
+      } else {
+        refreshCellDisplay(inp);
+      }
+    },
+
+    get: function (cellId) {
+      var v = evaluateCell(cellId);
+      if (v === undefined || v === null) return "";
+      return String(v);
+    },
+
+    raw: function (cellId) {
+      return data[cellId] || "";
+    }
+  };
+
+  /* ── Init ──────────────────────────────────────────────── */
+  buildGrid();
+  refreshAllDisplays();
+})();
+</script>
+</body>
+</html>

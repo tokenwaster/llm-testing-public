@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Maze Exploration Bots</title>
+    <style>
+        body {
+            background: #222;
+            color: #eee;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            margin: 0;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #ui {
+            margin-bottom: 10px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            font-size: 18px;
+            font-weight: bold;
+        }
+        #maze-container {
+            position: relative;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            background: #333;
+        }
+        canvas {
+            display: block;
+            background: #111;
+        }
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 16px;
+            background: #444;
+            color: white;
+            border: 1px solid #666;
+            border-radius: 4px;
+        }
+        button:hover { background: #555; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div>Ticks: <span id="timer">0</span></div>
+    <div>Completed: <span id="completed">0</span>/24</div>
+    <button id="reset">Reset Maze</button>
+</div>
+<div id="maze-container">
+    <canvas id="maze" width="600" height="600"></canvas>
+</div>
+
+<script>
+/** 
+ * Seeded Random Number Generator for determinism 
+ */
+class RNG {
+    constructor(seed) { this.seed = seed; }
+    next() {
+        this.seed = (this.seed * 1664525 + 1013904223) % 4294967296;
+        return this.seed / 4294967296;
+    }
+    shuffle(array) {
+        for (let i = array.length - 1; i > 0; i--) {
+            const j = Math.floor(this.next() * (i + 1));
+            [array[i], array[j]] = [array[j], array[i]];
+        }
+        return array;
+    }
+}
+
+const ROWS = 20, COLS = 20;
+const BOT_COUNT = 24;
+const COLORS = Array.from({length: BOT_COUNT}, (_, i) => `hsl(${(i * 360 / BOT_COUNT)}, 80%, 60%)`);
+
+const game = {
+    elapsed: 0,
+    size: { rows: ROWS, cols: COLS },
+    spawn: { r: 0, c: 0 },
+    exit: { r: ROWS - 1, c: COLS - 1 },
+    grid: [], // Stores walls for each cell
+    bots: [],
+    rng: null,
+
+    reset(seed = Math.floor(Math.random() * 1000000)) {
+        this.rng = new RNG(seed);
+        this.elapsed = 0;
+        this.grid = [];
+        
+        // Initialize grid walls
+        for (let r = 0; r < ROWS; r++) {
+            this.grid[r] = [];
+            for (let c = 0; c < COLS; c++) {
+                this.grid[r][c] = { n: true, e: true, s: true, w: true };
+            }
+        }
+
+        // Generate perfect maze using Recursive Backtracker
+        const visited = Array.from({length: ROWS}, () => Array(COLS).fill(false));
+        const stack = [{r: 0, c: 0}];
+        visited[0][0] = true;
+        let cellsVisited = 1;
+
+        while (cellsVisited < ROWS * COLS) {
+            const curr = stack[stack.length - 1];
+            const neighbors = this._getAvailableNeighbors(curr.r, curr.c, visited);
+            
+            if (neighbors.length > 0) {
+                const nextIdx = Math.floor(this.rng.next() * neighbors.length);
+                const next = neighbors[nextIdx];
+                
+                // Remove walls between current and next
+                if (next.r < curr.r) { this.grid[curr.r][curr.c].n = false; this.grid[next.r][next.c].s = false; }
+                else if (next.r > curr.r) { this.grid[curr.r][curr.c].s = false; this.grid[next.r][next.c].n = false; }
+                else if (next.c < curr.c) { this.grid[curr.r][curr.c].w = false; this.grid[next.r][next.c].e = false; }
+                else if (next.c > curr.c) { this.grid[curr.r][curr.c].e = false; this.grid[next.r][next.c].w = false; }
+
+                visited[next.r][next.c] = true;
+                stack.push(next);
+                cellsVisited++;
+            } else {
+                stack.pop();
+            }
+        }
+
+        // Initialize Bots
+        this.bots = [];
+        for (let i = 0; i < BOT_COUNT; i++) {
+            const pref = this.rng.shuffle(['N', 'E', 'S', 'W']);
+            this.bots.push({
+                id: i,
+                pos: { r: 0, c: 0 },
+                path: [{ r: 0, c: 0 }],
+                visited: new Set(["0,0"]),
+                deadEnds: [], // API requires array
+                finishTick: null,
+                pref: pref,
+                color: COLORS[i]
+            });
+        }
+    },
+
+    _getAvailableNeighbors(r, c, visited) {
+        const res = [];
+        if (r > 0 && !visited[r-1][c]) res.push({r: r-1, c: c, dir: 'N'});
+        if (c < COLS-1 && !visited[r][c+1]) res.push({r: r, c: c+1, dir: 'E'});
+        if (r < ROWS-1 && !visited[r+1][c]) res.push({r: r+1, c: c, dir: 'S'});
+        if (c > 0 && !visited[r][c-1]) res.push({r: r, c: c-1, dir: 'W'});
+        return res;
+    },
+
+    walls(r, c) {
+        return this.grid[r][c];
+    },
+
+    tick(n) {
+        for (let i = 0; i < n; i++) {
+            const allFinished = this.bots.every(b => b.finishTick !== null);
+            if (allFinished) break;
+
+            this.elapsed++;
+            this.bots.forEach(bot => {
+                if (bot.finishTick !== null) return;
+
+                // Check if arrived at exit
+                if (bot.pos.r === this.exit.r && bot.pos.c === this.exit.c) {
+                    bot.finishTick = this.elapsed;
+                    return;
+                }
+
+                const { r, c } = bot.pos;
+                const walls = this.walls(r, c);
+                
+                // Find possible moves (not blocked by wall and not marked as dead end)
+                const options = [];
+                if (!walls.n && r > 0) options.push({r: r-1, c: c, dir: 'N'});
+                if (!walls.e && c < COLS-1) options.push({r: r, c: c+1, dir: 'E'});
+                if (!walls.s && r < ROWS-1) options.push({r: r+1, c: c, dir: 'S'});
+                if (!walls.w && c > 0) options.push({r: r, c: c-1, dir: 'W'});
+
+                // Filter out cells this bot has already marked as dead ends or visited (for forward move)
+                const validForward = options.filter(opt => {
+                    const key = `${opt.r},${opt.c}`;
+                    return !bot.visited.has(key) && !bot.deadEnds.some(de => de.r === opt.r && de.c === opt.c);
+                });
+
+                if (validForward.length > 0) {
+                    // Pick based on preference order
+                    let next = null;
+                    for (const dir of bot.pref) {
+                        next = validForward.find(o => o.dir === dir);
+                        if (next) break;
+                    }
+                    bot.pos = { r: next.r, c: next.c };
+                    bot.path.push({ ...bot.pos });
+                    bot.visited.add(`${next.r},${next.c}`);
+                } else {
+                    // Backtrack
+                    if (bot.path.length > 1) {
+                        // Mark current as dead end unless it's spawn or exit
+                        if (!(r === this.spawn.r && c === this.spawn.c) && !(r === this.exit.r && c === this.exit.c)) {
+                            bot.deadEnds.push({ r, c });
+                        }
+                        bot.pos = bot.path.pop();
+                    }
+                }
+            });
+        }
+    }
+};
+
+window.game = game;
+
+// --- Rendering Logic ---
+const canvas = document.getElementById('maze');
+const ctx = canvas.getContext('2d');
+const timerEl = document.getElementById('timer');
+const completedEl = document.getElementById('completed');
+const resetBtn = document.getElementById('reset');
+
+let visualTick = 0;
+const CELL_SIZE = canvas.width / COLS;
+
+function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw Walls
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            const w = game.walls(r, c);
+            const x = c * CELL_SIZE;
+            const y = r * CELL_SIZE;
+            if (w.n) { ctx.moveTo(x, y); ctx.lineTo(x + CELL_SIZE, y); }
+            if (w.e) { ctx.moveTo(x + CELL_SIZE, y); ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE); }
+            if (w.s) { ctx.moveTo(x, y + CELL_SIZE); ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE); }
+            if (w.w) { ctx.moveTo(x, y); ctx.lineTo(x, y + CELL_SIZE); }
+        }
+    }
+    ctx.stroke();
+
+    // Draw Spawn and Exit
+    ctx.fillStyle = 'rgba(0, 255, 0, 0.3)';
+    ctx.fillRect(game.spawn.c * CELL_SIZE + 4, game.spawn.r * CELL_SIZE + 4, CELL_SIZE - 8, CELL_SIZE - 8);
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+    ctx.fillRect(game.exit.c * CELL_SIZE + 4, game.exit.r * CELL_SIZE + 4, CELL_SIZE - 8, CELL_SIZE - 8);
+
+    // Draw Bots with interpolation
+    const t = visualTick;
+    const floorT = Math.floor(t);
+    const frac = t - floorT;
+
+    game.bots.forEach(bot => {
+        let currPos = { r: bot.pos.r, c: bot.pos.c };
+        if (bot.path.length > 0) {
+            const p1 = bot.path[Math.min(floorT, bot.path.length - 1)];
+            const p2 = bot.path[Math.min(floorT + 1, bot.path.length - 1)];
+            if (p1 && p2) {
+                currPos = {
+                    r: p1.r + (p2.r - p1.r) * frac,
+                    c: p1.c + (p2.c - p1.c) * frac
+                };
+            } else if (p1) {
+                currPos = { r: p1.r, c: p1.c };
+            }
+        }
+
+        ctx.fillStyle = bot.color;
+        ctx.beginPath();
+        ctx.arc(
+            currPos.c * CELL_SIZE + CELL_SIZE / 2,
+            currPos.r * CELL_SIZE + CELL_SIZE / 2,
+            CELL_SIZE * 0.3, 0, Math.PI * 2
+        );
+        ctx.fill();
+    });
+
+    // Update UI
+    timerEl.innerText = game.elapsed;
+    completedEl.innerText = game.bots.filter(b => b.finishTick !== null).length;
+}
+
+function loop() {
+    // Advance simulation automatically
+    game.tick(1);
+    
+    // Smoothly advance visual clock to catch up with elapsed ticks
+    const step = 0.1; // speed of interpolation
+    if (visualTick < game.elapsed) {
+        visualTick += step;
+    } else {
+        visualTick = game.elapsed;
+    }
+
+    render();
+    requestAnimationFrame(loop);
+}
+
+resetBtn.addEventListener('click', () => {
+    game.reset();
+    visualTick = 0;
+});
+
+// Start the app
+game.reset();
+setInterval(() => {
+    // We call tick inside requestAnimationFrame for smoother timing, 
+    // but we can also use a fixed interval if preferred.
+}, 100);
+
+// To ensure game.tick(n) is called at a steady pace independent of frame rate:
+let lastTickTime = 0;
+function simulationLoop(time) {
+    if (time - lastTickTime > 200) { // Tick every 200ms
+        game.tick(1);
+        lastTickTime = time;
+    }
+    
+    // Interpolate visual clock
+    const delta = (time - (window.lastFrame || time)) / 200;
+    window.lastFrame = time;
+    visualTick += delta;
+    if (visualTick > game.elapsed) visualTick = game.elapsed;
+
+    render();
+    requestAnimationFrame(simulationLoop);
+}
+
+// Override the loop to use simulationLoop
+function start() {
+    window.lastFrame = performance.now();
+    requestAnimationFrame(simulationLoop);
+}
+start();
+
+</script>
+</body>
+</html>

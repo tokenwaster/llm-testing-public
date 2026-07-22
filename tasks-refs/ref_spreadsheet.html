@@ -1,0 +1,150 @@
+<!doctype html><html><head><meta charset="utf-8"><title>MiniSheet</title>
+<style>
+body{font:14px system-ui;background:#16161d;color:#eee;padding:16px}
+table{border-collapse:collapse}
+th{background:#26262f;color:#9aa;font-weight:600;padding:4px 6px;font-size:11px}
+td{border:1px solid #333;padding:0}
+td input{width:74px;border:0;background:#1d1d26;color:#eee;padding:6px 6px;font:13px system-ui}
+td input:focus{background:#2a2a38;outline:1px solid #5a8de5}
+button{margin-top:12px;background:#2a5db0;color:#fff;border:0;border-radius:6px;padding:8px 16px;cursor:pointer}
+textarea{display:block;margin-top:10px;width:640px;height:140px;background:#101016;color:#cdc;border:1px solid #333}
+</style></head><body>
+<h3>MiniSheet</h3>
+<table id="grid"></table>
+<button id="export">Export CSV</button>
+<textarea id="csv" readonly></textarea>
+<script>
+const COLS = "ABCDEFGHIJ".split(""), ROWS = 10;
+const raw = {};                       // "A1" -> raw text
+const disp = {};                      // "A1" -> displayed string
+
+// ---- formula evaluation -------------------------------------------------
+function tokenize(f){
+  const t = []; let i = 0;
+  while (i < f.length){
+    const c = f[i];
+    if (c === " "){ i++; continue; }
+    if ("+-*/()".includes(c)){ t.push(c); i++; continue; }
+    let m = /^[A-Ja-j](10|[1-9])\b/.exec(f.slice(i)) ||
+            /^[A-Ja-j](10|[1-9])/.exec(f.slice(i));
+    if (/[A-Za-z]/.test(c)){
+      const r = /^[A-Za-z]+[0-9]+/.exec(f.slice(i));
+      if (!r) throw 0;
+      t.push({ref: r[0].toUpperCase()}); i += r[0].length; continue;
+    }
+    const n = /^[0-9]*\.?[0-9]+/.exec(f.slice(i));
+    if (!n) throw 0;
+    t.push({num: parseFloat(n[0])}); i += n[0].length;
+  }
+  return t;
+}
+// recursive descent: expr -> term (+- term)*; term -> factor (*/ factor)*
+function parseExpr(t, refs, values){
+  let pos = 0;
+  function factor(){
+    const tok = t[pos];
+    if (tok === "("){ pos++; const v = expr();
+      if (t[pos] !== ")") throw 0; pos++; return v; }
+    if (tok === "-"){ pos++; return -factor(); }
+    if (tok && tok.num !== undefined){ pos++; return tok.num; }
+    if (tok && tok.ref){
+      pos++;
+      const col = tok.ref[0], row = tok.ref.slice(1);
+      if (!COLS.includes(col) || +row < 1 || +row > 10) throw 0;
+      refs.push(tok.ref);
+      return values(tok.ref);
+    }
+    throw 0;
+  }
+  function term(){ let v = factor();
+    while (t[pos] === "*" || t[pos] === "/"){
+      const op = t[pos++]; const r = factor();
+      v = op === "*" ? v * r : v / r; } return v; }
+  function expr(){ let v = term();
+    while (t[pos] === "+" || t[pos] === "-"){
+      const op = t[pos++]; const r = term();
+      v = op === "+" ? v + r : v - r; } return v; }
+  const v = expr();
+  if (pos !== t.length) throw 0;
+  return v;
+}
+
+// ---- recalc with cycle detection ----------------------------------------
+function recalcAll(){
+  const state = {};      // cell -> 'visiting' | 'done'
+  const val = {};        // numeric value for formulas
+  const cyc = new Set();
+  function numeric(cell){
+    if (state[cell] === "visiting"){ cyc.add(cell); throw {cycle: cell}; }
+    if (state[cell] === "done") return val[cell];
+    state[cell] = "visiting";
+    const r = raw[cell] || "";
+    let v = 0;
+    if (r.startsWith("=")){
+      const refs = [];
+      v = parseExpr(tokenize(r.slice(1)), refs, numeric);
+    } else if (r.trim() !== "" && !isNaN(parseFloat(r)) && isFinite(r)){
+      v = parseFloat(r);
+    } else { v = 0; }
+    state[cell] = "done"; val[cell] = v; return v;
+  }
+  for (const c of COLS) for (let rw = 1; rw <= ROWS; rw++){
+    const cell = c + rw;
+    const r = raw[cell] || "";
+    if (!r.startsWith("=")){ disp[cell] = r; continue; }
+    try {
+      // fresh pass per cell so cycles taint only their members
+      for (const k in state) delete state[k];
+      const v = numeric(cell);
+      disp[cell] = String(+v.toFixed(10));
+    } catch (e) {
+      disp[cell] = (e && e.cycle !== undefined) ? "#CYCLE" : "#ERR";
+    }
+  }
+  render();
+}
+function render(){
+  for (const c of COLS) for (let rw = 1; rw <= ROWS; rw++){
+    const el = document.getElementById("cell-" + c + rw);
+    if (document.activeElement !== el) el.value = disp[c + rw] || "";
+  }
+}
+
+// ---- grid construction ---------------------------------------------------
+const grid = document.getElementById("grid");
+let html = "<tr><th></th>" + COLS.map(c => `<th>${c}</th>`).join("") + "</tr>";
+for (let rw = 1; rw <= ROWS; rw++){
+  html += `<tr><th>${rw}</th>` + COLS.map(c =>
+    `<td><input id="cell-${c}${rw}" data-cell="${c}${rw}"></td>`).join("") + "</tr>";
+}
+grid.innerHTML = html;
+grid.addEventListener("focusin", e => {
+  const cell = e.target.dataset && e.target.dataset.cell;
+  if (cell) e.target.value = raw[cell] || "";
+});
+grid.addEventListener("focusout", e => {
+  const cell = e.target.dataset && e.target.dataset.cell;
+  if (cell){ raw[cell] = e.target.value; recalcAll(); }
+});
+grid.addEventListener("keydown", e => {
+  if (e.key === "Enter" && e.target.dataset && e.target.dataset.cell){
+    raw[e.target.dataset.cell] = e.target.value;
+    e.target.blur();
+    recalcAll();
+  }
+});
+
+document.getElementById("export").addEventListener("click", () => {
+  const lines = [];
+  for (let rw = 1; rw <= ROWS; rw++)
+    lines.push(COLS.map(c => (disp[c + rw] ?? "")).join(","));
+  document.getElementById("csv").value = lines.join("\n");
+});
+
+window.sheet = {
+  set(cell, text){ raw[cell.toUpperCase()] = String(text); recalcAll(); },
+  get(cell){ return disp[cell.toUpperCase()] ?? ""; },
+  raw(cell){ return raw[cell.toUpperCase()] ?? ""; },
+};
+recalcAll();
+</script></body></html>

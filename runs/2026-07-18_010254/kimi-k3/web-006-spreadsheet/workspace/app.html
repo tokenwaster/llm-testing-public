@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: #f6f7f9; color: #222; }
+  .app { min-width: 600px; min-height: 400px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  .toolbar { display: flex; align-items: center; gap: 8px; }
+  button { padding: 6px 10px; border: 1px solid #888; background: #fff; cursor: pointer; font: inherit; }
+  button:hover { background: #eee; }
+  .grid {
+    flex: 1;
+    min-height: 330px;
+    display: grid;
+    grid-template-columns: 44px repeat(10, minmax(56px, 1fr));
+    grid-template-rows: 28px repeat(10, minmax(28px, 1fr));
+    gap: 1px;
+    background: #999;
+    border: 1px solid #999;
+  }
+  .head { background: #e9edf3; display: flex; align-items: center; justify-content: center; font-weight: 700; user-select: none; }
+  .corner { background: #dde3ec; }
+  .cell {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    margin: 0;
+    border: 0;
+    padding: 0 6px;
+    background: #fff;
+    font: inherit;
+    outline: none;
+  }
+  .cell:focus { background: #fff8d6; box-shadow: inset 0 0 0 2px #3a7afe; }
+  .err { color: #b00020; font-weight: 700; }
+  #csv { width: 100%; min-height: 110px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="toolbar">
+    <button id="export" type="button">Export CSV</button>
+  </div>
+  <div class="grid" id="grid" aria-label="spreadsheet"></div>
+  <textarea id="csv" aria-label="CSV output"></textarea>
+</div>
+
+<script>
+"use strict";
+
+const COLS = "ABCDEFGHIJ".split("");
+const ROWS = Array.from({ length: 10 }, (_, i) => i + 1);
+const ERR = "#ERR";
+const CYCLE = "#CYCLE";
+
+const cells = [];
+const raw = Object.create(null);
+const shown = Object.create(null);
+const state = Object.create(null);
+const cache = Object.create(null);
+let active = null;
+
+class CellError extends Error {
+  constructor(kind) {
+    super(kind);
+    this.kind = kind;
+  }
+}
+const isCellError = x => x instanceof CellError;
+
+const grid = document.getElementById("grid");
+
+function addHead(text, extra) {
+  const d = document.createElement("div");
+  d.className = "head" + (extra ? " " + extra : "");
+  d.textContent = text;
+  grid.appendChild(d);
+}
+
+addHead("", "corner");
+for (const c of COLS) addHead(c);
+
+for (const r of ROWS) {
+  addHead(String(r));
+  for (const c of COLS) {
+    const ref = c + r;
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.id = "cell-" + ref;
+    inp.className = "cell";
+    inp.dataset.cell = ref;
+    inp.autocomplete = "off";
+    inp.spellcheck = false;
+    grid.appendChild(inp);
+    cells.push(ref);
+    raw[ref] = "";
+    inp.addEventListener("focus", onFocus);
+    inp.addEventListener("blur", onBlur);
+    inp.addEventListener("keydown", onKey);
+  }
+}
+
+function onFocus(e) {
+  const ref = e.target.dataset.cell;
+  active = ref;
+  e.target.value = raw[ref];
+  e.target.classList.remove("err");
+  e.target.select();
+}
+
+function onBlur(e) {
+  const ref = e.target.dataset.cell;
+  if (active === ref) active = null;
+  commit(ref, e.target.value);
+}
+
+function onKey(e) {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    e.target.blur();
+  }
+}
+
+function commit(ref, text) {
+  raw[ref] = String(text);
+  computeAll();
+  renderAll();
+}
+
+function tokenize(src) {
+  const toks = [];
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (/\s/.test(ch)) { i++; continue; }
+
+    if ((ch >= "0" && ch <= "9") || ch === ".") {
+      const m = /^(?:\d+(?:\.\d*)?|\.\d+)/.exec(src.slice(i));
+      if (!m) throw new CellError(ERR);
+      toks.push({ t: "num", v: parseFloat(m[0]) });
+      i += m[0].length;
+      continue;
+    }
+
+    if (ch >= "A" && ch <= "J") {
+      const m = /^[A-J](?:10|[1-9])(?![0-9])/.exec(src.slice(i));
+      if (!m) throw new CellError(ERR);
+      toks.push({ t: "ref", v: m[0] });
+      i += m[0].length;
+      continue;
+    }
+
+    if (ch === "+" || ch === "-" || ch === "*" || ch === "/" || ch === "(" || ch === ")") {
+      toks.push({ t: ch });
+      i++;
+      continue;
+    }
+
+    throw new CellError(ERR);
+  }
+  toks.push({ t: "end" });
+  return toks;
+}
+
+function evalFormula(src) {
+  const toks = tokenize(src);
+  let p = 0;
+  const peek = () => toks[p];
+  const eat = t => {
+    if (toks[p].t !== t) throw new CellError(ERR);
+    return toks[p++];
+  };
+
+  function parseExpr() {
+    let v = parseTerm();
+    while (peek().t === "+" || peek().t === "-") {
+      const op = toks[p++].t;
+      const rhs = parseTerm();
+      v = op === "+" ? v + rhs : v - rhs;
+    }
+    return v;
+  }
+
+  function parseTerm() {
+    let v = parseFactor();
+    while (peek().t === "*" || peek().t === "/") {
+      const op = toks[p++].t;
+      const rhs = parseFactor();
+      v = op === "*" ? v * rhs : v / rhs;
+    }
+    return v;
+  }
+
+  function parseFactor() {
+    const tk = peek();
+    if (tk.t === "+" || tk.t === "-") {
+      p++;
+      const v = parseFactor();
+      return tk.t === "-" ? -v : v;
+    }
+    if (tk.t === "num") { p++; return tk.v; }
+    if (tk.t === "ref") { p++; return numericValue(tk.v); }
+    if (tk.t === "(") {
+      p++;
+      const v = parseExpr();
+      eat(")");
+      return v;
+    }
+    throw new CellError(ERR);
+  }
+
+  const v = parseExpr();
+  if (peek().t !== "end") throw new CellError(ERR);
+  if (!Number.isFinite(v)) throw new CellError(ERR);
+  return v;
+}
+
+function numericValue(ref) {
+  if (state[ref] === 2) {
+    const v = cache[ref];
+    if (isCellError(v)) throw v;
+    return v;
+  }
+  if (state[ref] === 1) throw new CellError(CYCLE);
+
+  state[ref] = 1;
+  try {
+    const r = raw[ref];
+    let v;
+    if (r.startsWith("=")) {
+      v = evalFormula(r.slice(1));
+    } else if (r.trim() === "") {
+      v = 0;
+    } else {
+      const n = Number(r.trim());
+      if (!Number.isFinite(n)) throw new CellError(ERR);
+      v = n;
+    }
+    if (!Number.isFinite(v)) throw new CellError(ERR);
+    cache[ref] = v;
+    state[ref] = 2;
+    return v;
+  } catch (e) {
+    const err = isCellError(e) ? e : new CellError(ERR);
+    cache[ref] = err;
+    state[ref] = 2;
+    throw err;
+  }
+}
+
+function formatNumber(n) {
+  if (!Number.isFinite(n)) throw new CellError(ERR);
+  const s = String(Number(n.toPrecision(12)));
+  return s === "-0" ? "0" : s;
+}
+
+function displayValue(ref) {
+  const r = raw[ref];
+  if (r.startsWith("=")) {
+    try {
+      return formatNumber(numericValue(ref));
+    } catch (e) {
+      return isCellError(e) ? e.kind : ERR;
+    }
+  }
+  return r;
+}
+
+function computeAll() {
+  for (const ref of cells) {
+    state[ref] = 0;
+    cache[ref] = undefined;
+    shown[ref] = undefined;
+  }
+  for (const ref of cells) shown[ref] = displayValue(ref);
+}
+
+function renderAll() {
+  for (const ref of cells) {
+    const inp = document.getElementById("cell-" + ref);
+    if (!inp) continue;
+    if (active !== ref) inp.value = shown[ref];
+    inp.classList.toggle("err", typeof shown[ref] === "string" && shown[ref].startsWith("#"));
+  }
+}
+
+function checkRef(ref) {
+  if (!/^[A-J](?:10|[1-9])$/.test(ref)) throw new Error("Unknown cell: " + ref);
+  return ref;
+}
+
+function csvEscape(s) {
+  s = String(s);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+document.getElementById("export").addEventListener("click", () => {
+  computeAll();
+  renderAll();
+  const lines = [];
+  for (const r of ROWS) {
+    const vals = [];
+    for (const c of COLS) vals.push(csvEscape(shown[c + r] ?? ""));
+    lines.push(vals.join(","));
+  }
+  document.getElementById("csv").value = lines.join("\n");
+});
+
+computeAll();
+renderAll();
+
+window.sheet = {
+  set(ref, text) {
+    checkRef(ref);
+    commit(ref, String(text));
+  },
+  get(ref) {
+    checkRef(ref);
+    return shown[ref];
+  },
+  raw(ref) {
+    checkRef(ref);
+    return raw[ref];
+  }
+};
+</script>
+</body>
+</html>

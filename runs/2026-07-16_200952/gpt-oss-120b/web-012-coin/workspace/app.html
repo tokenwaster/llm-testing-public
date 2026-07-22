@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WastedToken Mint</title>
+<style>
+  body{margin:0;font-family:sans-serif;background:#111;color:#eee;display:flex;flex-direction:column;align-items:center;}
+  header{padding:20px;text-align:center;}
+  h1{margin:0;font-size:2.5em;color:#ffcc00;}
+  #coin-hero{background:#222;display:block;margin:20px auto;border-radius:8px;}
+  section{max-width:900px;width:100%;padding:20px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;}
+  .edition{background:#222;padding:10px;border-radius:8px;position:relative;display:flex;flex-direction:column;align-items:center;}
+  .edition canvas{background:#111;display:block;border-radius:4px;}
+  .edition button{margin-top:10px;padding:5px 10px;background:#28a745;color:#fff;border:none;border-radius:4px;cursor:pointer;}
+  .edition button:disabled{background:#555;cursor:default;}
+  .sold-out .status{position:absolute;top:8px;right:8px;background:#c00;color:#fff;padding:2px 6px;border-radius:3px;font-size:0.8em;}
+  .coming-soon .status{position:absolute;top:8px;right:8px;background:#006;color:#fff;padding:2px 6px;border-radius:3px;font-size:0.8em;}
+</style>
+</head>
+<body>
+<header>
+  <h1>WastedToken Mint</h1>
+  <p>Crafting collectible challenge coins for the bold and the brave.</p>
+</header>
+
+<canvas id="coin-hero" width="400" height="400"></canvas>
+
+<section>
+  <h2>About Us</h2>
+  <p>At WastedToken Mint we blend tradition with cutting‑edge design to create
+  physical challenge coins that tell a story. Each token is minted with precision,
+  featuring a raised emblem on the front and a clear denomination on the back.
+  Our limited editions become treasured keepsakes for missions, events, and
+  achievements.</p>
+</section>
+
+<section>
+  <h2>Our Collection</h2>
+  <div class="grid">
+    <div class="edition" data-edition="bronze" data-state="available">
+      <canvas class="edition-canvas" width="200" height="200"></canvas>
+      <button class="buy">Add to cart</button>
+    </div>
+    <div class="edition" data-edition="silver" data-state="available">
+      <canvas class="edition-canvas" width="200" height="200"></canvas>
+      <button class="buy">Add to cart</button>
+    </div>
+    <div class="edition sold-out" data-edition="gold" data-state="sold-out">
+      <canvas class="edition-canvas" width="200" height="200"></canvas>
+      <div class="status">SOLD OUT</div>
+    </div>
+    <div class="edition coming-soon" data-edition="black" data-state="coming-soon">
+      <canvas class="edition-canvas" width="200" height="200"></canvas>
+      <div class="status">Minting Next Season: Autumn</div>
+    </div>
+  </div>
+</section>
+
+<script>
+(() => {
+  // ---------- WebGL utilities ----------
+  const glsl = (s) => s;
+  const createShader = (gl, type, src) => {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(sh));
+      gl.deleteShader(sh);
+      return null;
+    }
+    return sh;
+  };
+  const createProgram = (gl, vsSrc, fsSrc) => {
+    const vs = createShader(gl, gl.VERTEX_SHADER, vsSrc);
+    const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.error(gl.getProgramInfoLog(prog));
+      return null;
+    }
+    return prog;
+  };
+  const deg = Math.PI / 180;
+  const perspective = (fov, aspect, near, far) => {
+    const f = 1.0 / Math.tan(fov / 2);
+    return [
+      f / aspect, 0, 0, 0,
+      0, f, 0, 0,
+      0, 0, (far + near) / (near - far), -1,
+      0, 0, (2 * far * near) / (near - far), 0
+    ];
+  };
+  const multiply = (a, b) => {
+    const out = new Float32Array(16);
+    for (let i = 0; i < 4; ++i) for (let j = 0; j < 4; ++j) {
+      out[i*4+j] = 0;
+      for (let k = 0; k < 4; ++k) out[i*4+j] += a[i*4+k]*b[k*4+j];
+    }
+    return out;
+  };
+  const rotateX = (a) => {
+    const c = Math.cos(a), s = Math.sin(a);
+    return [1,0,0,0, 0,c,-s,0, 0,s,c,0, 0,0,0,1];
+  };
+  const rotateY = (a) => {
+    const c = Math.cos(a), s = Math.sin(a);
+    return [c,0,s,0, 0,1,0,0, -s,0,c,0, 0,0,0,1];
+  };
+  const translate = (x,y,z) => [1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1];
+  const normalize = (v) => {
+    const len = Math.hypot(...v);
+    return v.map(c=>c/len);
+  };
+  // ---------- Shader sources ----------
+  const vsSrc = glsl`
+    attribute vec2 a_position;
+    varying vec2 v_uv;
+    uniform mat4 u_mvp;
+    void main(){
+      v_uv = a_position*0.5+0.5;
+      gl_Position = u_mvp*vec4(a_position,0.0,1.0);
+    }
+  `;
+  const fsSrc = glsl`
+    precision highp float;
+    varying vec2 v_uv;
+    uniform float u_time;
+    uniform vec3 u_baseColor;
+    uniform sampler2D u_frontTex;
+    uniform sampler2D u_backTex;
+    uniform vec3 u_lightDir;
+    void main(){
+      // disc coordinates
+      vec2 centered = v_uv - vec2(0.5);
+      float r = length(centered);
+      float radius = 0.48;
+      if(r>radius){
+        discard;
+      }
+      // normal approximation (flat disc)
+      vec3 normal = vec3(0.0,0.0,1.0);
+      // simulate edge ridges
+      float edge = smoothstep(radius, radius-0.02, r);
+      float ridges = sin(30.0*atan(centered.y,centered.x)+u_time*6.2831);
+      edge *= 0.5+0.5*ridges;
+      // lighting
+      vec3 viewDir = vec3(0.0,0.0,1.0);
+      vec3 light = normalize(u_lightDir);
+      float diff = max(dot(normal,light),0.0);
+      vec3 reflectDir = reflect(-light,normal);
+      float spec = pow(max(dot(viewDir,reflectDir),0.0),64.0);
+      // choose texture based on facing
+      vec4 texColor = texture2D(u_frontTex, v_uv);
+      // simple back texture (use same UV)
+      vec4 backColor = texture2D(u_backTex, v_uv);
+      // blend front/back by normal Z (here always front, but we flip with rotation)
+      // We'll flip by using a varying sign from vertex shader (not needed for flat disc)
+      // Instead we simulate flipping by using u_time to toggle.
+      float flip = step(0.5, fract(u_time*2.0));
+      texColor = mix(texColor, backColor, flip);
+      // final color
+      vec3 color = u_baseColor * texColor.rgb * diff + spec*vec3(1.0);
+      color = mix(color, vec3(0.2), edge); // darken edge a bit
+      gl_FragColor = vec4(color,1.0);
+    }
+  `;
+  // ---------- Texture creation ----------
+  const createFrontTexture = (gl) => {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#222';
+    ctx.fillRect(0,0,size,size);
+    // draw a simple "W" emblem
+    ctx.strokeStyle = '#ffcc00';
+    ctx.lineWidth = 12;
+    ctx.beginPath();
+    ctx.moveTo(size*0.2, size*0.7);
+    ctx.lineTo(size*0.35, size*0.3);
+    ctx.lineTo(size*0.5, size*0.5);
+    ctx.lineTo(size*0.65, size*0.3);
+    ctx.lineTo(size*0.8, size*0.7);
+    ctx.stroke();
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,size,size,0,gl.RGBA,gl.UNSIGNED_BYTE,canvas);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    return tex;
+  };
+  const createBackTexture = (gl) => {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#222';
+    ctx.fillRect(0,0,size,size);
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = 'bold 32px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('10,000', size/2, size/2 - 12);
+    ctx.font = '20px sans-serif';
+    ctx.fillText('TOKENS', size/2, size/2 + 24);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,size,size,0,gl.RGBA,gl.UNSIGNED_BYTE,canvas);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    return tex;
+  };
+  // ---------- Core rendering function ----------
+  const initCoinCanvas = (canvas, baseColor) => {
+    const gl = canvas.getContext('webgl');
+    if(!gl){return null;}
+    const prog = createProgram(gl, vsSrc, fsSrc);
+    gl.useProgram(prog);
+    // quad
+    const posBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1,-1,  1,-1, -1,1,
+      -1,1,   1,-1, 1,1
+    ]), gl.STATIC_DRAW);
+    const posLoc = gl.getAttribLocation(prog,'a_position');
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc,2,gl.FLOAT,false,0,0);
+    // uniforms
+    const uMvp = gl.getUniformLocation(prog,'u_mvp');
+    const uTime = gl.getUniformLocation(prog,'u_time');
+    const uBase = gl.getUniformLocation(prog,'u_baseColor');
+    const uFront = gl.getUniformLocation(prog,'u_frontTex');
+    const uBack = gl.getUniformLocation(prog,'u_backTex');
+    const uLight = gl.getUniformLocation(prog,'u_lightDir');
+    // textures
+    const frontTex = createFrontTexture(gl);
+    const backTex = createBackTexture(gl);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, frontTex);
+    gl.uniform1i(uFront,0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, backTex);
+    gl.uniform1i(uBack,1);
+    // set static uniforms
+    gl.uniform3fv(uBase, baseColor);
+    gl.uniform3fv(uLight, normalize([0.5,0.8,1.0]));
+    const aspect = canvas.width / canvas.height;
+    const proj = perspective(45*deg, aspect, 0.1, 10);
+    const view = multiply(translate(0,0,-2), rotateX(0));
+    const render = (t) => {
+      // model rotation: Y full turn, X half turn
+      const rotY = rotateY(t*2*Math.PI);
+      const rotX = rotateX(t*Math.PI);
+      const model = multiply(rotY, rotX);
+      const mvp = multiply(multiply(proj, view), model);
+      gl.viewport(0,0,canvas.width,canvas.height);
+      gl.clearColor(0.13,0.13,0.13,1);
+      gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+      gl.uniformMatrix4fv(uMvp,false,mvp);
+      gl.uniform1f(uTime, t);
+      gl.drawArrays(gl.TRIANGLES,0,6);
+    };
+    return {gl, render, prog};
+  };
+  // ---------- Hero canvas ----------
+  const heroCanvas = document.getElementById('coin-hero');
+  const hero = initCoinCanvas(heroCanvas, [0.9,0.85,0.7]); // light gold base
+  let animId = null;
+  let start = null;
+  const loop = (ts) => {
+    if(!start) start = ts;
+    const elapsed = (ts-start)/1000;
+    const t = (elapsed%4)/4; // 4‑second loop
+    hero.render(t);
+    animId = requestAnimationFrame(loop);
+  };
+  if(hero){ animId = requestAnimationFrame(loop); }
+  // ---------- Edition canvases ----------
+  const editionColors = {
+    bronze: [0.8,0.5,0.2],
+    silver: [0.75,0.75,0.75],
+    gold:   [1.0,0.84,0.0],
+    black:  [0.05,0.05,0.05]
+  };
+  document.querySelectorAll('.edition').forEach(div=>{
+    const edition = div.dataset.edition;
+    const canvas = div.querySelector('canvas');
+    const coin = initCoinCanvas(canvas, editionColors[edition]||[0.5,0.5,0.5]);
+    if(coin){
+      // static render at t=0 (front side)
+      coin.render(0);
+    }
+    // handle button availability
+    const state = div.dataset.state;
+    const btn = div.querySelector('button.buy');
+    if(state!=='available' && btn){ btn.remove(); }
+  });
+  // ---------- Demo API ----------
+  window.demo = {
+    canvas: heroCanvas,
+    setTime(t){
+      if(hero){ hero.render(t%1); }
+    },
+    pause(){
+      if(animId){ cancelAnimationFrame(animId); animId=null; }
+    }
+  };
+})();
+</script>
+</body>
+</html>

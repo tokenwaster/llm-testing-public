@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Falling Sand Sandbox</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --panel-color: #1e1e1e;
+            --text-color: #e0e0e0;
+            --accent-color: #3d5afe;
+            --btn-hover: #536dfe;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            padding: 20px;
+            background: var(--panel-color);
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        canvas {
+            border: 2px solid #333;
+            border-radius: 8px;
+            image-rendering: pixelated;
+            cursor: crosshair;
+            background-color: #000;
+            max-width: 90vw;
+            max-height: 70vh;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 10px;
+            max-width: 500px;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            background: #333;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-transform: uppercase;
+            font-size: 12px;
+            letter-spacing: 1px;
+        }
+
+        button:hover {
+            background: #444;
+            transform: translateY(-2px);
+        }
+
+        button.active {
+            background: var(--accent-color);
+            box-shadow: 0 0 15px rgba(61, 90, 254, 0.5);
+        }
+
+        #clear {
+            background: #cf6679;
+        }
+
+        #clear:hover {
+            background: #ff8a9d;
+        }
+
+        .instructions {
+            font-size: 12px;
+            color: #888;
+            text-align: center;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2 style="margin:0">Sand Sandbox</h2>
+    <canvas id="sand" width="400" height="400"></canvas>
+    
+    <div class="controls">
+        <button id="mat-sand" class="active">Sand</button>
+        <button id="mat-water">Water</button>
+        <button id="mat-wall">Wall</button>
+        <button id="mat-acid">Acid</button>
+        <button id="mat-empty">Eraser</button>
+        <button id="clear">Clear All</button>
+    </div>
+    <div class="instructions">Click and drag to paint. Acid dissolves walls/sand.</div>
+</div>
+
+<script>
+/**
+ * SIMULATION CONSTANTS & TYPES
+ */
+const EMPTY = 0;
+const SAND = 1;
+const WATER = 2;
+const WALL = 3;
+const ACID = 4;
+
+const COLORS = {
+    [EMPTY]: [0, 0, 0],
+    [SAND]: [227, 192, 141],
+    [WATER]: [74, 144, 226],
+    [WALL]: [85, 85, 85],
+    [ACID]: [163, 255, 0]
+};
+
+const GRID_SIZE = 120; // Sufficiently > 80x80
+let grid = Array.from({ length: GRID_SIZE }, () => new Uint8Array(GRID_SIZE));
+let nextGrid = Array.from({ length: GRID_SIZE }, () => new Uint8Array(GRID_SIZE));
+
+/**
+ * SIMULATION CORE
+ */
+const sim = {
+    w: GRID_SIZE,
+    h: GRID_SIZE,
+
+    get(x, y) {
+        if (x < 0 || x >= this.w || y < 0 || y >= this.h) return EMPTY;
+        return grid[y][x];
+    },
+
+    set(x, y, material) {
+        if (x >= 0 && x < this.w && y >= 0 && y < this.h) {
+            grid[y][x] = material;
+        }
+    },
+
+    clear() {
+        for (let y = 0; y < this.h; y++) {
+            grid[y].fill(EMPTY);
+        }
+    },
+
+    tick(n) {
+        for (let i = 0; i < n; i++) {
+            this._update();
+        }
+    },
+
+    _update() {
+        // Copy current grid to nextGrid for double buffering
+        for (let y = 0; y < this.h; y++) {
+            nextGrid[y].set(grid[y]);
+        }
+
+        // Pass 1: Acid Dissolution
+        for (let y = 0; y < this.h; y++) {
+            for (let x = 0; x < this.w; x++) {
+                if (grid[y][x] === ACID) {
+                    const neighbors = [[0, 1], [1, 0], [-1, 0]]; // Down, Right, Left
+                    neighbors.forEach(([dx, dy]) => {
+                        let nx = x + dx;
+                        let ny = y + dy;
+                        if (nx >= 0 && nx < this.w && ny >= 0 && ny < this.h) {
+                            const target = grid[ny][nx];
+                            if (target === WALL || target === SAND) {
+                                nextGrid[ny][nx] = EMPTY;
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        // Pass 2: Movement
+        for (let y = 0; y < this.h; y++) {
+            for (let x = 0; x < this.w; x++) {
+                const m = grid[y][x];
+                if (m === EMPTY || m === WALL) continue;
+
+                if (m === SAND) {
+                    // Sand: Down, then Diag Left/Right
+                    let moved = false;
+                    const dirs = [[0, 1], [Math.random() > 0.5 ? -1 : 1, 1], [Math.random() > 0.5 ? -1 : 1, 1]];
+                    for (let [dx, dy] of dirs) {
+                        let nx = x + dx;
+                        let ny = y + dy;
+                        if (nx >= 0 && nx < this.w && ny >= 0 && ny < this.h) {
+                            const target = grid[ny][nx];
+                            if (target === EMPTY || target === WATER || target === ACID) {
+                                nextGrid[ny][nx] = SAND;
+                                // Sinking logic: if sand moves into water/acid, the liquid stays in current cell
+                                // but since we are using double buffering and "last write wins", 
+                                // we handle swapping by setting the old position to the displaced material.
+                                nextGrid[y][x] = (target === WATER || target === ACID) ? target : EMPTY;
+                                moved = true;
+                                break;
+                            }
+                        }
+                    }
+                } else if (m === WATER) {
+                    // Water: Down, then Side Left/Right
+                    let moved = false;
+                    // Try down
+                    let ny = y + 1;
+                    let nx = x;
+                    if (ny < this.h && (grid[ny][nx] === EMPTY || grid[ny][nx] === WATER || grid[ny][nx] === ACID)) {
+                        nextGrid[ny][nx] = WATER;
+                        nextGrid[y][x] = EMPTY;
+                        moved = true;
+                    } else {
+                        // Try sides (only into empty)
+                        const sideDirs = [Math.random() > 0.5 ? -1 : 1, Math.random() > 0.5 ? -1 : 1];
+                        for (let dx of sideDirs) {
+                            let tx = x + dx;
+                            if (tx >= 0 && tx < this.w && grid[y][tx] === EMPTY) {
+                                nextGrid[y][tx] = WATER;
+                                nextGrid[y][x] = EMPTY;
+                                moved = true;
+                                break;
+                            }
+                        }
+                    }
+                } else if (m === ACID) {
+                    // Acid: Down, then Side Left/Right (moves like water)
+                    let moved = false;
+                    let ny = y + 1;
+                    let nx = x;
+                    if (ny < this.h && (grid[ny][nx] === EMPTY || grid[ny][nx] === WATER || grid[ny][nx] === ACID)) {
+                        nextGrid[ny][nx] = ACID;
+                        nextGrid[y][x] = EMPTY;
+                        moved = true;
+                    } else {
+                        const sideDirs = [Math.random() > 0.5 ? -1 : 1, Math.random() > 0.5 ? -1 : 1];
+                        for (let dx of sideDirs) {
+                            let tx = x + dx;
+                            if (tx >= 0 && tx < this.w && grid[y][tx] === EMPTY) {
+                                nextGrid[y][tx] = ACID;
+                                nextGrid[y][x] = EMPTY;
+                                moved = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Swap buffers
+        let temp = grid;
+        grid = nextGrid;
+        nextGrid = temp;
+    }
+};
+
+/**
+ * UI & RENDERING
+ */
+const canvas = document.getElementById('sand');
+const ctx = canvas.getContext('2d', { alpha: false });
+let currentMaterial = SAND;
+let isMouseDown = false;
+
+// Initialize grid with some walls for fun
+for(let i=0; i<GRID_SIZE; i++) {
+    sim.set(i, 10, WALL);
+    sim.set(i, GRID_SIZE-11, WALL);
+}
+
+function render() {
+    const cellW = canvas.width / sim.w;
+    const cellH = canvas.height / sim.h;
+
+    // Clear background
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let y = 0; y < sim.h; y++) {
+        for (let x = 0; x < sim.w; x++) {
+            const m = sim.get(x, y);
+            if (m !== EMPTY) {
+                ctx.fillStyle = `rgb(${COLORS[m][0]}, ${COLORS[m][1]}, ${COLORS[m][2]})`;
+                ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
+            }
+        }
+    }
+}
+
+function loop() {
+    sim.tick(1);
+    render();
+    requestAnimationFrame(loop);
+}
+
+/**
+ * INPUT HANDLING
+ */
+const buttons = document.querySelectorAll('.controls button:not(#clear)');
+buttons.forEach(btn => {
+    btn.addEventListener('click', () => {
+        buttons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const matStr = btn.id.replace('mat-', '');
+        if (matStr === 'sand') currentMaterial = SAND;
+        else if (matStr === 'water') currentMaterial = WATER;
+        else if (matStr === 'wall') currentMaterial = WALL;
+        else if (matStr === 'acid') currentMaterial = ACID;
+        else if (matStr === 'empty') currentMaterial = EMPTY;
+    });
+});
+
+document.getElementById('clear').addEventListener('click', () => sim.clear());
+
+const handlePaint = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = sim.w / rect.width;
+    const scaleY = sim.h / rect.height;
+    const x = Math.floor((e.clientX - rect.left) * scaleX);
+    const y = Math.floor((e.clientY - rect.top) * scaleY);
+    
+    // Paint a small brush area
+    for(let dy=-1; dy<=1; dy++) {
+        for(let dx=-1; dx<=1; dx++) {
+            sim.set(x+dx, y+dy, currentMaterial);
+        }
+    }
+};
+
+canvas.addEventListener('mousedown', (e) => {
+    isMouseDown = true;
+    handlePaint(e);
+});
+window.addEventListener('mouseup', () => isMouseDown = false);
+canvas.addEventListener('mousemove', (e) => {
+    if (isMouseDown) handlePaint(e);
+});
+
+// Start the engine
+loop();
+
+</script>
+</body>
+</html>

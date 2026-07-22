@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Spreadsheet</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .container { min-width: 600px; min-height: 400px; background: #f9f9f9; border: 1px solid #ccc; padding: 10px; }
+        table { border-collapse: collapse; table-layout: fixed; width: 100%; }
+        th, td { border: 1px solid #aaa; text-align: center; width: 50px; height: 30px; overflow: hidden; }
+        th { background: #eee; font-weight: bold; }
+        input { width: 100%; height: 100%; border: none; text-align: right; padding: 2px; box-sizing: border-box; font-size: 14px; outline: none; }
+        input:focus { background: #e8f0fe; outline: 2px solid #1a73e8; z-index: 10; position: relative; }
+        .controls { margin-top: 20px; width: 600px; display: flex; flex-direction: column; gap: 10px; }
+        #csv { width: 100%; height: 150px; font-family: monospace; font-size: 12px; }
+        button { padding: 8px 16px; cursor: pointer; align-self: flex-start; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <table id="spreadsheet">
+        <thead>
+            <tr id="header-row"></tr>
+        </thead>
+        <tbody id="grid-body"></tbody>
+    </table>
+</div>
+
+<div class="controls">
+    <button id="export">Export CSV</button>
+    <textarea id="csv" readonly placeholder="CSV output will appear here..."></textarea>
+</div>
+
+<script>
+    const allCells = [];
+    for (let r = 1; r <= 10; r++) {
+        for (let c = 0; c < 10; c++) {
+            allCells.push(String.fromCharCode(65 + c) + r);
+        }
+    }
+
+    const rawValues = {};
+    const computedValues = {};
+    allCells.forEach(id => {
+        rawHTML_ID = 'cell-' + id;
+        rawValues[id] = "";
+        computedValues[id] = "";
+    });
+
+    // Initialize UI
+    const headerRow = document.getElementById('header-row');
+    headerRow.innerHTML = '<th></th>'; // Corner cell
+    for (let c = 0; c < 10; c++) {
+        const th = document.createElement('th');
+        th.textContent = String.fromCharCode(65 + c);
+        headerRow.appendChild(th);
+    }
+
+    const gridBody = document.getElementById('grid-body');
+    for (let r = 1; r <= 10; r++) {
+        const tr = document.createElement('tr');
+        const th = document.createElement('th');
+        th.textContent = r;
+        tr.appendChild(th);
+        for (let c = 0; c < 10; c++) {
+            const id = String.fromCharCode(65 + c) + r;
+            const td = document.createElement('td');
+            const input = document.createElement('input');
+            input.id = 'cell-' + id;
+            input.type = 'text';
+            
+            input.onfocus = () => {
+                input.value = rawValues[id];
+            };
+            input.onblur = () => {
+                rawValues[id] = input.value;
+                recalculate();
+                updateAllDisplays();
+            };
+            // Handle Enter key
+            input.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    input.blur();
+                }
+            };
+
+            td.appendChild(input);
+            tr.appendChild(td);
+        }
+        gridBody.appendChild(tr);
+    }
+
+    function getDependencies(formula) {
+        if (typeof formula !== 'string' || !formula.startsWith('=')) return [];
+        const regex = /\b([A-J](?:[1-9]|10))\b/g;
+        const matches = [];
+        let m;
+        while ((m = regex.exec(formula)) !== null) {
+            matches.push(m[1]);
+        }
+        return matches;
+    }
+
+    function evaluateFormula(id, formula, context) {
+        if (!formula.startsWith('=')) return formula;
+        let expr = formula.substring(1);
+        const refs = getDependencies(formula);
+        
+        // Sort refs by length descending to prevent partial replacement (e.g., A10 before A1)
+        const sortedRefs = [...new Set(refs)].sort((a, b) => b.length - a.length);
+
+        for (const ref of sortedRefs) {
+            const val = context[ref];
+            if (val === '#ERR' || val === '#CYCLE') return '#ERR';
+            let num;
+            if (typeof val === 'number') {
+                num = val;
+            } else {
+                const parsed = parseFloat(val);
+                num = isNaN(parsed) ? 0 : parsed;
+            }
+            // Use regex with word boundary to replace only the exact cell ID
+            const re = new RegExp(`\\b${ref}\\b`, 'g');
+            expr = expr.replace(re, num);
+        }
+
+        try {
+            // Using Function constructor as a safe-ish way for this mini app context
+            const result = new Function(`return ${expr}`)();
+            if (typeof result === 'number' && isNaN(result)) return '#ERR';
+            return result;
+        } catch (e) {
+            return '#ERR';
+        }
+    }
+
+    function recalculate() {
+        const inDegree = {};
+        const adj = {}; // ref -> dependents
+        allCells.forEach(id => {
+            inDegree[id] = 0;
+            adj[id] = [];
+        });
+
+        // Build dependency graph
+        allCells.forEach(id => {
+            const refs = getDependencies(rawValues[id]);
+            refs.forEach(ref => {
+                if (adj[ref]) {
+                    adj[ref].push(id);
+                    inDegree[id]++;
+                }
+            });
+        });
+
+        // Kahn's Algorithm for topological sort
+        const queue = allCells.filter(id => inDegree[id] === 0);
+        const topoOrder = [];
+        while (queue.length > 0) {
+            const u = queue.shift();
+            topoOrder.push(u);
+            if (adj[u]) {
+                adj[u].forEach(v => {
+                    inDegree[v]--;
+                    if (inDegree[v] === 0) queue.push(v);
+                });
+            }
+        }
+
+        // Identify nodes that are part of a cycle or depend on one
+        const cycleOrDependent = new Set();
+        allCells.forEach(id => {
+            if (!topoOrder.includes(id)) {
+                cycleOrDependent.add(id);
+            }
+        });
+
+        // Evaluate cells in topological order
+        topoOrder.forEach(id => {
+            computedValues[id] = evaluateFormula(id, rawValues[id], computedValues);
+        });
+
+        // For nodes not in topoOrder (cycles and their descendants), mark as #CYCLE or #ERR
+        allCells.forEach(id => {
+            if (!topoOrder.includes(id)) {
+                // Check if it's actually part of a cycle using DFS
+                const isCycleNode = checkIsCycle(id);
+                computedValues[id] = isCycleNode ? '#CYCLE' : '#ERR';
+            }
+        });
+    }
+
+    function checkIsCycle(startNode) {
+        // Check if startNode can reach itself in the dependency graph (ref -> dependent)
+        const stack = [...getDependencies(rawValues[startNode])];
+        const visited = new Set();
+        while (stack.length > 0) {
+            const curr = stack.pop();
+            if (curr === startNode) return true;
+            if (!visited.has(curr)) {
+                visited.add(curr);
+                const refs = getDependencies(rawValues[curr]);
+                refs.forEach(r => stack.push(r));
+            }
+        }
+        return false;
+    }
+
+    function updateAllDisplays() {
+        allCells.forEach(id => {
+            const el = document.getElementById('cell-' + id);
+            if (el) {
+                // We only update the display if the user isn't currently editing this specific cell
+                if (document.activeElement !== el) {
+                    el.value = String(computedValues[id]);
+                }
+            }
+        });
+    }
+
+    // API implementation
+    window.sheet = {
+        set: (id, val) => {
+            rawValues[id] = val;
+            const el = document.getElementById('cell-' + id);
+            if (el) {
+                el.value = val;
+                recalculate();
+                updateAllDisplays();
+            }
+        },
+        get: (id) => String(computedValues[id]),
+        raw: (id) => rawValues[id]
+    };
+
+    // Export functionality
+    document.getElementById('export').onclick = () => {
+        let csvContent = "";
+        for (let r = 1; r <= 10; r++) {
+            let row = [];
+            for (let c = 0; c < 10; c++) {
+                const id = String.fromCharCode(65 + c) + r;
+                row.push(computedValues[id]);
+            }
+            csvContent += row.join(",") + "\n";
+        }
+        document.getElementById('csv').value = csvContent.trim();
+    };
+
+    // Initial run
+    recalculate();
+    updateAllDisplays();
+
+</script>
+</body>
+</html>

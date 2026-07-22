@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body {
+    font-family: system-ui, "Segoe UI", Arial, sans-serif;
+    margin: 16px;
+    background: #f6f7f9;
+  }
+  h1 { font-size: 18px; margin: 0 0 10px; }
+  #app { min-width: 600px; min-height: 400px; }
+  table {
+    border-collapse: collapse;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,.15);
+  }
+  th {
+    background: #e9ecf1;
+    border: 1px solid #c9ced6;
+    font-weight: 600;
+    font-size: 12px;
+    color: #444;
+    padding: 2px 4px;
+    min-width: 28px;
+    text-align: center;
+  }
+  td {
+    border: 1px solid #d5d9e0;
+    padding: 0;
+  }
+  td input {
+    width: 64px;
+    height: 24px;
+    border: none;
+    outline: none;
+    padding: 0 4px;
+    font: 13px/24px monospace;
+    box-sizing: border-box;
+    background: transparent;
+  }
+  td input:focus {
+    background: #fffbe6;
+    box-shadow: inset 0 0 0 2px #4a90d9;
+  }
+  #toolbar { margin: 12px 0; }
+  #export {
+    padding: 6px 14px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  #csv {
+    display: block;
+    width: 600px;
+    height: 130px;
+    margin-top: 8px;
+    font: 12px/1.4 monospace;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <table id="grid"><tbody id="gridBody"></tbody></table>
+  <div id="toolbar">
+    <button id="export" type="button">Export CSV</button>
+    <textarea id="csv" spellcheck="false" placeholder="CSV output appears here"></textarea>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var COLS = ["A","B","C","D","E","F","G","H","I","J"];
+  var ROWS = [1,2,3,4,5,6,7,8,9,10];
+
+  var raw = {};      // cell name -> raw text
+  var results = {};  // cell name -> {v: number} | {e: "#ERR"|"#CYCLE"} (formula-value semantics)
+  var display = {};  // cell name -> displayed string
+
+  // ---------- build grid ----------
+  var tbody = document.getElementById("gridBody");
+  var head = document.createElement("tr");
+  head.appendChild(document.createElement("th"));
+  COLS.forEach(function (c) {
+    var th = document.createElement("th");
+    th.textContent = c;
+    head.appendChild(th);
+  });
+  tbody.appendChild(head);
+
+  ROWS.forEach(function (r) {
+    var tr = document.createElement("tr");
+    var th = document.createElement("th");
+    th.textContent = r;
+    tr.appendChild(th);
+    COLS.forEach(function (c) {
+      var td = document.createElement("td");
+      var inp = document.createElement("input");
+      var name = c + r;
+      inp.id = "cell-" + name;
+      inp.dataset.cell = name;
+      inp.autocomplete = "off";
+      td.appendChild(inp);
+      tr.appendChild(td);
+
+      inp.addEventListener("focus", function () {
+        inp.value = raw[name] || "";
+        inp.select();
+      });
+      inp.addEventListener("blur", function () {
+        commit(name, inp.value);
+      });
+      inp.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          inp.blur();
+        }
+      });
+      raw[name] = "";
+    });
+    tbody.appendChild(tr);
+  });
+
+  // ---------- formula parser (recursive descent) ----------
+  function tokenize(src) {
+    var toks = [], i = 0;
+    while (i < src.length) {
+      var ch = src[i];
+      if (ch === " " || ch === "\t") { i++; continue; }
+      if (ch >= "0" && ch <= "9" || ch === ".") {
+        var m = /^\d+(\.\d+)?|^\.\d+/.exec(src.slice(i));
+        if (!m) throw "#ERR";
+        toks.push({ t: "num", v: parseFloat(m[0]) });
+        i += m[0].length;
+        continue;
+      }
+      if (/[A-Za-z]/.test(ch)) {
+        var m2 = /^[A-Za-z]+[0-9]+/.exec(src.slice(i));
+        if (!m2) throw "#ERR";
+        var ref = m2[0].toUpperCase();
+        var rm = /^([A-Z]+)([0-9]+)$/.exec(ref);
+        if (!rm || COLS.indexOf(rm[1]) === -1) throw "#ERR";
+        var rowNum = parseInt(rm[2], 10);
+        if (rowNum < 1 || rowNum > 10) throw "#ERR";
+        toks.push({ t: "ref", v: rm[1] + rowNum });
+        i += m2[0].length;
+        continue;
+      }
+      if ("+-*/()".indexOf(ch) !== -1) {
+        toks.push({ t: ch });
+        i++;
+        continue;
+      }
+      throw "#ERR";
+    }
+    return toks;
+  }
+
+  function parse(src) {
+    var toks = tokenize(src), pos = 0;
+    function peek() { return toks[pos]; }
+    function next() { return toks[pos++]; }
+
+    function expr() {
+      var node = term();
+      while (peek() && (peek().t === "+" || peek().t === "-")) {
+        var op = next().t;
+        node = { t: "bin", op: op, l: node, r: term() };
+      }
+      return node;
+    }
+    function term() {
+      var node = factor();
+      while (peek() && (peek().t === "*" || peek().t === "/")) {
+        var op = next().t;
+        node = { t: "bin", op: op, l: node, r: factor() };
+      }
+      return node;
+    }
+    function factor() {
+      var tk = peek();
+      if (!tk) throw "#ERR";
+      if (tk.t === "+" || tk.t === "-") {
+        next();
+        return { t: "un", op: tk.t, a: factor() };
+      }
+      if (tk.t === "num") { next(); return { t: "num", v: tk.v }; }
+      if (tk.t === "ref") { next(); return { t: "ref", v: tk.v }; }
+      if (tk.t === "(") {
+        next();
+        var node = expr();
+        if (!peek() || peek().t !== ")") throw "#ERR";
+        next();
+        return node;
+      }
+      throw "#ERR";
+    }
+
+    var ast = expr();
+    if (pos !== toks.length) throw "#ERR";
+    return ast;
+  }
+
+  function evalAst(node, stack) {
+    switch (node.t) {
+      case "num": return node.v;
+      case "ref": return evalCell(node.v, stack);
+      case "un": {
+        var a = evalAst(node.a, stack);
+        return node.op === "-" ? -a : a;
+      }
+      case "bin": {
+        var l = evalAst(node.l, stack);
+        var r = evalAst(node.r, stack);
+        switch (node.op) {
+          case "+": return l + r;
+          case "-": return l - r;
+          case "*": return l * r;
+          case "/": return l / r;
+        }
+      }
+    }
+    throw "#ERR";
+  }
+
+  // ---------- evaluation with cycle detection ----------
+  function evalCell(name, stack) {
+    var r = results[name];
+    if (r) {
+      if (r.e) throw r.e;
+      return r.v;
+    }
+    var idx = stack.indexOf(name);
+    if (idx !== -1) {
+      // every cell from the first occurrence onward is part of the cycle
+      for (var j = idx; j < stack.length; j++) results[stack[j]] = { e: "#CYCLE" };
+      throw "#CYCLE";
+    }
+
+    var text = raw[name] || "";
+    var res;
+    if (text.charAt(0) === "=") {
+      stack.push(name);
+      try {
+        var v = evalAst(parse(text.slice(1)), stack);
+        res = (typeof v === "number" && isFinite(v)) ? { v: v } : { e: "#ERR" };
+      } catch (e) {
+        res = { e: (e === "#CYCLE" || e === "#ERR") ? e : "#ERR" };
+      }
+      stack.pop();
+    } else if (text.trim() === "") {
+      res = { v: 0 };
+    } else {
+      var n = Number(text);
+      res = isNaN(n) ? { e: "#ERR" } : { v: n };
+    }
+
+    // a cycle discovered deeper may already have assigned #CYCLE to this cell
+    if (!results[name]) results[name] = res;
+    var fin = results[name];
+    if (fin.e) throw fin.e;
+    return fin.v;
+  }
+
+  function fmt(v) {
+    if (typeof v !== "number") return String(v);
+    if (Number.isInteger(v)) return String(v);
+    return String(parseFloat(v.toPrecision(12)));
+  }
+
+  function recompute() {
+    results = {};
+    COLS.forEach(function (c) {
+      ROWS.forEach(function (rw) {
+        var name = c + rw;
+        try { evalCell(name, []); } catch (e) { /* recorded in results */ }
+      });
+    });
+    COLS.forEach(function (c) {
+      ROWS.forEach(function (rw) {
+        var name = c + rw;
+        var text = raw[name] || "";
+        var out;
+        if (text.charAt(0) === "=") {
+          var r = results[name];
+          out = r.e ? r.e : fmt(r.v);
+        } else {
+          out = text; // plain values (numbers or text) display as themselves
+        }
+        display[name] = out;
+        var inp = document.getElementById("cell-" + name);
+        if (document.activeElement !== inp) inp.value = out;
+      });
+    });
+  }
+
+  function commit(name, text) {
+    raw[name] = String(text);
+    recompute();
+  }
+
+  // ---------- CSV export ----------
+  document.getElementById("export").addEventListener("click", function () {
+    var lines = ROWS.map(function (rw) {
+      return COLS.map(function (c) { return display[c + rw]; }).join(",");
+    });
+    document.getElementById("csv").value = lines.join("\n");
+  });
+
+  // ---------- scripting API ----------
+  window.sheet = {
+    set: function (name, text) {
+      name = String(name).toUpperCase();
+      commit(name, text);
+    },
+    get: function (name) {
+      return display[String(name).toUpperCase()];
+    },
+    raw: function (name) {
+      return raw[String(name).toUpperCase()];
+    }
+  };
+
+  recompute();
+})();
+</script>
+</body>
+</html>

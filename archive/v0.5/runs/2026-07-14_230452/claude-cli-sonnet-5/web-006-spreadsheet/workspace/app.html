@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body { font-family: Arial, Helvetica, sans-serif; padding: 20px; background:#f5f5f5; }
+  #controls { margin-bottom: 10px; }
+  #controls button { padding: 6px 14px; font-size: 14px; cursor: pointer; }
+  .grid {
+    display: grid;
+    grid-template-columns: 40px repeat(10, 65px);
+    grid-template-rows: 30px repeat(10, 36px);
+    gap: 2px;
+    background: #999;
+    border: 1px solid #999;
+    width: fit-content;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #ddd;
+    font-weight: bold;
+    font-size: 12px;
+    box-sizing: border-box;
+  }
+  .grid input {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    border: 1px solid #ccc;
+    text-align: center;
+    font-size: 12px;
+    padding: 0;
+    background: #fff;
+  }
+  .grid input.err { color: #c00; font-weight: bold; }
+  #csv { width: 660px; height: 150px; margin-top: 12px; display: block; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <button id="export">Export CSV</button>
+</div>
+<div id="app">
+  <div class="grid" id="grid"></div>
+</div>
+<textarea id="csv" readonly></textarea>
+
+<script>
+(function () {
+  const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  const ROWS = [];
+  for (let r = 1; r <= 10; r++) ROWS.push(r);
+
+  const cellsData = {};
+  COLS.forEach(c => ROWS.forEach(r => { cellsData[c + r] = ''; }));
+
+  let displayMap = {};
+  let cache, stack, cycleCells;
+
+  function isValidRef(ref) {
+    return /^[A-J](10|[1-9])$/.test(ref);
+  }
+
+  function tokenize(s) {
+    const tokens = [];
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if ('+-*/()'.includes(c)) { tokens.push({ type: c }); i++; continue; }
+      if (/[0-9.]/.test(c)) {
+        let j = i, numStr = '';
+        while (j < s.length && /[0-9.]/.test(s[j])) { numStr += s[j]; j++; }
+        if (!/^\d+(\.\d+)?$|^\.\d+$/.test(numStr)) throw new Error('ERR');
+        tokens.push({ type: 'num', value: parseFloat(numStr) });
+        i = j; continue;
+      }
+      if (/[A-Za-z]/.test(c)) {
+        let j = i, ref = '';
+        while (j < s.length && /[A-Za-z0-9]/.test(s[j])) { ref += s[j]; j++; }
+        tokens.push({ type: 'ref', value: ref.toUpperCase() });
+        i = j; continue;
+      }
+      throw new Error('ERR');
+    }
+    return tokens;
+  }
+
+  function parseFormula(str) {
+    const tokens = tokenize(str);
+    let pos = 0;
+    function peek() { return tokens[pos]; }
+    function consume() { return tokens[pos++]; }
+
+    function parseFactor() {
+      const t = peek();
+      if (!t) throw new Error('ERR');
+      if (t.type === '-') { consume(); return -parseFactor(); }
+      if (t.type === '+') { consume(); return parseFactor(); }
+      if (t.type === '(') {
+        consume();
+        const v = parseExpr();
+        if (!peek() || peek().type !== ')') throw new Error('ERR');
+        consume();
+        return v;
+      }
+      if (t.type === 'num') { consume(); return t.value; }
+      if (t.type === 'ref') {
+        consume();
+        if (!isValidRef(t.value)) throw new Error('ERR');
+        const r = evaluate(t.value);
+        if (!r.ok) throw new Error('ERR');
+        if (r.text) throw new Error('ERR');
+        return r.value;
+      }
+      throw new Error('ERR');
+    }
+    function parseTerm() {
+      let v = parseFactor();
+      while (peek() && (peek().type === '*' || peek().type === '/')) {
+        const op = consume().type;
+        const v2 = parseFactor();
+        if (op === '*') v = v * v2;
+        else { if (v2 === 0) throw new Error('ERR'); v = v / v2; }
+      }
+      return v;
+    }
+    function parseExpr() {
+      let v = parseTerm();
+      while (peek() && (peek().type === '+' || peek().type === '-')) {
+        const op = consume().type;
+        const v2 = parseTerm();
+        v = op === '+' ? v + v2 : v - v2;
+      }
+      return v;
+    }
+    const val = parseExpr();
+    if (pos !== tokens.length) throw new Error('ERR');
+    return val;
+  }
+
+  function evaluate(id) {
+    if (cache.has(id)) return cache.get(id);
+    const sidx = stack.indexOf(id);
+    if (sidx !== -1) {
+      stack.slice(sidx).forEach(c => cycleCells.add(c));
+      return { ok: false, error: 'CYCLE' };
+    }
+    const raw = cellsData[id] || '';
+    const trimmed = raw.trim();
+    let result;
+    if (trimmed === '') {
+      result = { ok: true, value: 0, empty: true };
+    } else if (trimmed[0] === '=') {
+      stack.push(id);
+      try {
+        const val = parseFormula(trimmed.slice(1));
+        result = { ok: true, value: val };
+      } catch (e) {
+        result = { ok: false, error: 'ERR' };
+      }
+      stack.pop();
+    } else {
+      const num = Number(trimmed);
+      if (trimmed !== '' && !isNaN(num)) {
+        result = { ok: true, value: num };
+      } else {
+        result = { ok: true, value: NaN, text: true };
+      }
+    }
+    cache.set(id, result);
+    return result;
+  }
+
+  function formatNum(n) {
+    if (!isFinite(n)) return '#ERR';
+    let r = Math.round(n * 1e9) / 1e9;
+    if (Object.is(r, -0)) r = 0;
+    return String(r);
+  }
+
+  function recalcAll() {
+    cache = new Map();
+    stack = [];
+    cycleCells = new Set();
+    COLS.forEach(c => ROWS.forEach(r => { evaluate(c + r); }));
+    displayMap = {};
+    COLS.forEach(c => ROWS.forEach(r => {
+      const id = c + r;
+      if (cycleCells.has(id)) { displayMap[id] = '#CYCLE'; return; }
+      const res = cache.get(id);
+      if (!res.ok) { displayMap[id] = '#ERR'; return; }
+      if (res.empty) { displayMap[id] = ''; return; }
+      if (res.text) { displayMap[id] = cellsData[id]; return; }
+      displayMap[id] = formatNum(res.value);
+    }));
+  }
+
+  const grid = document.getElementById('grid');
+  const corner = document.createElement('div');
+  corner.className = 'header';
+  grid.appendChild(corner);
+  COLS.forEach(c => {
+    const h = document.createElement('div');
+    h.className = 'header';
+    h.textContent = c;
+    grid.appendChild(h);
+  });
+  ROWS.forEach(r => {
+    const rh = document.createElement('div');
+    rh.className = 'header';
+    rh.textContent = r;
+    grid.appendChild(rh);
+    COLS.forEach(c => {
+      const id = c + r;
+      const input = document.createElement('input');
+      input.id = 'cell-' + id;
+      input.type = 'text';
+      input.dataset.id = id;
+      input.addEventListener('focus', () => {
+        input.value = cellsData[id];
+        input.select();
+      });
+      input.addEventListener('blur', () => {
+        commit(id, input.value);
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+      });
+      grid.appendChild(input);
+    });
+  });
+
+  function updateDisplays() {
+    COLS.forEach(c => ROWS.forEach(r => {
+      const id = c + r;
+      const input = document.getElementById('cell-' + id);
+      if (document.activeElement !== input) {
+        input.value = displayMap[id];
+        input.classList.toggle('err', displayMap[id] === '#ERR' || displayMap[id] === '#CYCLE');
+      }
+    }));
+  }
+
+  function commit(id, value) {
+    cellsData[id] = value;
+    recalcAll();
+    updateDisplays();
+  }
+
+  recalcAll();
+  updateDisplays();
+
+  document.getElementById('export').addEventListener('click', () => {
+    recalcAll();
+    const lines = [];
+    ROWS.forEach(r => {
+      const row = COLS.map(c => displayMap[c + r]);
+      lines.push(row.join(','));
+    });
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  window.sheet = {
+    set: function (id, text) {
+      id = String(id).toUpperCase();
+      cellsData[id] = text;
+      recalcAll();
+      updateDisplays();
+    },
+    get: function (id) {
+      id = String(id).toUpperCase();
+      return displayMap[id];
+    },
+    raw: function (id) {
+      id = String(id).toUpperCase();
+      return cellsData[id] || '';
+    }
+  };
+})();
+</script>
+</body>
+</html>

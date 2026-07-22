@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Maze Game</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            text-align: center;
+        }
+        canvas {
+            border: 1px solid #000;
+            margin-top: 20px;
+        }
+        #completed, #timer {
+            font-size: 18px;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="completed">0/24</div>
+    <div id="timer">0</div>
+    <button id="reset">Reset</button>
+    <canvas id="maze" width="400" height="400"></canvas>
+
+    <script>
+        const seedRandom = (seed) => {
+            let state = seed;
+            return {
+                next: () => {
+                    state = Math.sin(state) * 10000;
+                    return state - Math.floor(state);
+                }
+            };
+        };
+
+        function getCorridorKey(r1, c1, r2, c2) {
+            const a = [r1, c1];
+            const b = [r2, c2];
+            if (a[0] < b[0] || (a[0] === b[0] && a[1] < b[1])) {
+                return `${a[0]},${a[1]}-${b[0]},${b[1]}`;
+            } else {
+                return `${b[0]},${b[1]}-${a[0]},${a[1]}`;
+            }
+        }
+
+        function generateMaze(rows, cols, prng) {
+            const walls = new Array(rows);
+            for (let r = 0; r < rows; r++) {
+                walls[r] = new Array(cols).fill().map(() => ({ n: true, e: true, s: true, w: true }));
+            }
+            const visited = new Array(rows).fill(false).map(() => new Array(cols).fill(false));
+            const stack = [];
+            let startR = Math.floor(prng.next() * rows);
+            let startC = Math.floor(prng.next() * cols);
+
+            function getUnvisitedNeighbors(r, c) {
+                const neighbors = [];
+                for (const [dr, dc] of [[-1,0],[0,1],[1,0],[0,-1]]) {
+                    const nr = r + dr;
+                    const nc = c + dc;
+                    if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) {
+                        neighbors.push([nr, nc]);
+                    }
+                }
+                return neighbors;
+            }
+
+            visited[startR][startC] = true;
+            stack.push({ r: startR, c: startC });
+
+            while (stack.length > 0) {
+                const current = { ...stack[stack.length - 1] };
+                const neighbors = getUnvisitedNeighbors(current.r, current.c);
+                if (neighbors.length === 0) {
+                    stack.pop();
+                } else {
+                    const [nr, nc] = neighbors[Math.floor(prng.next() * neighbors.length)];
+                    visited[nr][nc] = true;
+                    stack.push({ r: nr, c: nc });
+                    if (current.r === nr) {
+                        if (current.c < nc) {
+                            walls[current.r][current.c].e = false;
+                            walls[nr][nc].w = false;
+                        } else {
+                            walls[current.r][current.c].w = false;
+                            walls[nr][nc].e = false;
+                        }
+                    } else if (current.c === nc) {
+                        if (current.r < nr) {
+                            walls[current.r][current.c].s = false;
+                            walls[nr][nc].n = false;
+                        } else {
+                            walls[current.r][current.c].n = false;
+                            walls[nr][nc].s = false;
+                        }
+                    }
+                }
+            }
+
+            return walls;
+        }
+
+        const canvas = document.getElementById('maze');
+        const ctx = canvas.getContext('2d');
+        let game;
+
+        function reset(seed) {
+            const rows = 20, cols = 20;
+            const prng = seedRandom(seed || Math.random());
+            const walls = generateMaze(rows, cols, prng);
+            const exitR = Math.floor(prng.next() * rows);
+            const exitC = Math.floor(prng.next() * cols);
+            while (exitR === 0 && exitC === 0) {
+                exitR = Math.floor(prng.next() * rows);
+                exitC = Math.floor(prng.next() * cols);
+            }
+
+            const bots = [];
+            for (let i = 0; i < 24; i++) {
+                const dirOrder = [0,1,2,3].sort(() => prng.next() - 0.5); // Random direction order
+                bots.push({
+                    path: [{ r: 0, c: 0 }],
+                    deadEnds: [],
+                    finishTick: null,
+                    currentCell: { r: 0, c: 0 },
+                    visited: new Set([`0,0`]),
+                    traversalCounts: new Map(),
+                    directionOrder: dirOrder
+                });
+            }
+
+            game = {
+                elapsed: 0,
+                size: { rows, cols },
+                spawn: { r: 0, c: 0 },
+                exit: { r: exitR, c: exitC },
+                walls(r, c) {
+                    return walls[r][c];
+                },
+                bots
+            };
+
+            draw();
+        }
+
+        function moveBot(bot) {
+            if (bot.finishTick !== null) return;
+
+            const current = bot.currentCell;
+            if (current.r === game.exit.r && current.c === game.exit.c) {
+                bot.finishTick = game.elapsed + 1;
+                return;
+            }
+
+            let moved = false;
+            const directions = [];
+            for (let i = 0; i < 4; i++) {
+                const dirIndex = bot.directionOrder[i];
+                const [dr, dc] = [[-1,0],[0,1],[1,0],[0,-1]][dirIndex];
+                const nr = current.r + dr;
+                const nc = current.c + dc;
+
+                if (nr < 0 || nr >= game.size.rows || nc < 0 || nc >= game.size.cols) continue;
+
+                const wallKey = ['n', 'e', 's', 'w'][dirIndex];
+                if (!game.walls(current.r, current.c)[wallKey]) {
+                    const corridorKey = getCorridorKey(current.r, current.c, nr, nc);
+                    const count = bot.traversalCounts.get(corridorKey) || 0;
+                    if (count < 2) directions.push({ dirIndex, nr, nc });
+                }
+            }
+
+            let chosenDir = null;
+            for (let d of directions) {
+                const key = `${d.nr},${d.nc}`;
+                if (!bot.visited.has(key)) {
+                    chosenDir = d;
+                    break;
+                }
+            }
+
+            if (!chosenDir && directions.length > 0) {
+                chosenDir = directions[0];
+            }
+
+            if (chosenDir) {
+                bot.traversalCounts.set(getCorridorKey(current.r, current.c, chosenDir.nr, chosenDir.nc), 
+                    (bot.traversalCounts.get(getCorridorKey(current.r, current.c, chosenDir.nr, chosenDir.nc)) || 0) + 1);
+                bot.visited.add(`${chosenDir.nr},${chosenDir.nc}`);
+                bot.path.push({ r: chosenDir.nr, c: chosenDir.nc });
+                bot.currentCell = { r: chosenDir.nr, c: chosenDir.nc };
+                moved = true;
+            } else if (bot.path.length > 1) {
+                const prev = bot.path[bot.path.length - 2];
+                const corridorKey = getCorridorKey(current.r, current.c, prev.r, prev.c);
+                const count = bot.traversalCounts.get(corridorKey) || 0;
+                if (count < 2) {
+                    bot.path.pop();
+                    bot.currentCell = { r: prev.r, c: prev.c };
+                    moved = true;
+                }
+            }
+
+            return moved;
+        }
+
+        function draw() {
+            const cellSize = canvas.width / game.size.cols;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (let r = 0; r < game.size.rows; r++) {
+                for (let c = 0; c < game.size.cols; c++) {
+                    const w = game.walls(r, c);
+                    if (w.n) ctx.beginPath(), ctx.moveTo(c * cellSize, r * cellSize), ctx.lineTo((c + 1) * cellSize, r * cellSize), ctx.stroke();
+                    if (w.e) ctx.beginPath(), ctx.moveTo((c + 1) * cellSize, r * cellSize), ctx.lineTo((c + 1) * cellSize, (r + 1) * cellSize), ctx.stroke();
+                    if (w.s) ctx.beginPath(), ctx.moveTo(c * cellSize, (r + 1) * cellSize), ctx.lineTo((c + 1) * cellSize, (r + 1) * cellSize), ctx.stroke();
+                    if (w.w) ctx.beginPath(), ctx.moveTo(c * cellSize, r * cellSize), ctx.lineTo(c * cellSize, (r + 1) * cellSize), ctx.stroke();
+                }
+            }
+
+            const exit = game.exit;
+            ctx.fillStyle = 'red';
+            ctx.fillRect(exit.c * cellSize + cellSize / 4, exit.r * cellSize + cellSize / 4, cellSize / 2, cellSize / 2);
+
+            for (const bot of game.bots) {
+                if (bot.finishTick !== null) continue;
+                const { r, c } = bot.currentCell;
+                ctx.fillStyle = `hsl(${Math.random() * 360}, 100%, 50%)`;
+                ctx.beginPath();
+                ctx.arc(c * cellSize + cellSize / 2, r * cellSize + cellSize / 2, cellSize / 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        window.game = {
+            tick(n) {
+                if (!game || game.bots.every(b => b.finishTick !== null)) return;
+                for (let i = 0; i < n; i++) {
+                    const activeBots = game.bots.filter(b => b.finishTick === null);
+                    if (activeBots.length === 0) break;
+
+                    for (const bot of game.bots) {
+                        moveBot(bot);
+                    }
+
+                    game.elapsed += 1;
+                    draw();
+                }
+            },
+            reset(seed) {
+                reset(seed);
+                document.getElementById('completed').textContent = '0/24';
+                document.getElementById('timer').textContent = '0';
+            },
+            get elapsed() {
+                return game ? game.elapsed : 0;
+            },
+            get size() {
+                return game ? { ...game.size } : {};
+            },
+            get spawn() {
+                return game ? { r: 0, c: 0 } : {};
+            },
+            get exit() {
+                return game ? { ...game.exit } : {};
+            },
+            walls(r, c) {
+                if (!game) return { n: true, e: true, s: true, w: true };
+                return { ...game.walls(r, c) };
+            },
+            get bots() {
+                return game ? [...game.bots].map(b => ({
+                    path: [...b.path],
+                    deadEnds: [...b.deadEnds],
+                    finishTick: b.finishTick
+                })) : [];
+            }
+        };
+
+        document.getElementById('reset').addEventListener('click', () => window.game.reset());
+
+        reset();
+    </script>
+</body>
+</html>

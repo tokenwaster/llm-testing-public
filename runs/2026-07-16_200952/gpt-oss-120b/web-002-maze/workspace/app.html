@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Bots</title>
+<style>
+  body {font-family:Arial,sans-serif;margin:0;padding:0;display:flex;flex-direction:column;align-items:center;background:#fafafa;}
+  #controls {margin:10px;}
+  #timer, #completed {margin:0 10px;font-weight:bold;}
+  #maze {border:1px solid #333;background:#fff;}
+  button {padding:5px 10px;}
+</style>
+</head>
+<body>
+<div id="controls">
+  <span id="timer">Time: 0</span>
+  <span id="completed">Completed: 0 / 24</span>
+  <button id="reset">Reset</button>
+</div>
+<canvas id="maze" width="500" height="500"></canvas>
+
+<script>
+(() => {
+  // ---------- PRNG ----------
+  function mulberry32(a) {
+    return function() {
+      let t = a += 0x6D2B79F5;
+      t = Math.imul(t ^ t >>> 15, t | 1);
+      t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    }
+  }
+
+  // ---------- Maze Generation ----------
+  function generateMaze(rows, cols, rng) {
+    const walls = Array.from({length: rows}, () => Array.from({length: cols}, () => ({n:true,e:true,s:true,w:true})));
+    const visited = Array.from({length: rows}, () => Array(cols).fill(false));
+    const dirs = [
+      {dr:-1, dc:0, name:'n', opposite:'s'},
+      {dr:0, dc:1, name:'e', opposite:'w'},
+      {dr:1, dc:0, name:'s', opposite:'n'},
+      {dr:0, dc:-1, name:'w', opposite:'e'}
+    ];
+
+    function shuffle(array) {
+      for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+      }
+      return array;
+    }
+
+    function carve(r, c) {
+      visited[r][c] = true;
+      const order = shuffle(dirs.slice());
+      for (const d of order) {
+        const nr = r + d.dr, nc = c + d.dc;
+        if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+        if (visited[nr][nc]) continue;
+        walls[r][c][d.name] = false;
+        walls[nr][nc][d.opposite] = false;
+        carve(nr, nc);
+      }
+    }
+
+    carve(0,0);
+    return walls;
+  }
+
+  // ---------- Game ----------
+  const game = {
+    size: {rows:15, cols:15},
+    spawn: {r:0, c:0},
+    exit: null,
+    _walls: null,
+    bots: [],
+    elapsed:0,
+    _tickDuration:200, // ms per logical tick for animation
+    _lastTickTime:0,
+    _rngSeed:0,
+    walls(r,c){ return this._walls[r][c]; },
+    reset(seed){
+      const seedVal = (typeof seed === 'number') ? seed : Math.floor(Math.random()*1e9);
+      this._rngSeed = seedVal;
+      const rng = mulberry32(seedVal);
+      this._walls = generateMaze(this.size.rows, this.size.cols, rng);
+      this.exit = {r:this.size.rows-1, c:this.size.cols-1};
+      this.elapsed = 0;
+      this.bots = [];
+      const baseColors = [
+        "#e6194b","#3cb44b","#ffe119","#0082c8","#f58231","#911eb4","#46f0f0","#f032e6",
+        "#d2f53c","#fabebe","#008080","#e6beff","#aa6e28","#800000","#808000","#ffd8b1",
+        "#000080","#808080","#FFFFFF","#000000","#FF5733","#33FF57","#3357FF","#FF33A1"
+      ];
+      for (let i=0;i<24;i++){
+        const botRng = mulberry32(seedVal + i + 1);
+        const pref = ['n','e','s','w'].sort(()=>botRng()-0.5);
+        this.bots.push({
+          id:i,
+          color:baseColors[i%baseColors.length],
+          pos:{r:this.spawn.r, c:this.spawn.c},
+          prevPos:{r:this.spawn.r, c:this.spawn.c},
+          targetPos:null,
+          moveStart:0,
+          stack:[{r:this.spawn.r, c:this.spawn.c}],
+          visitedEdges:new Map(),
+          pref,
+          path:[],
+          deadEnds:[],
+          finishTick:null
+        });
+        this.bots[i].path.push({r:this.spawn.r, c:this.spawn.c});
+      }
+      document.getElementById('timer').textContent = 'Time: 0';
+      document.getElementById('completed').textContent = 'Completed: 0 / 24';
+      this._lastTickTime = performance.now();
+      render(); // redraw
+    },
+    tick(n){
+      for(let i=0;i<n;i++) this._stepOne();
+    },
+    _stepOne(){
+      if (this.bots.every(b=>b.finishTick!==null)) return; // all done
+      this.elapsed++;
+      const dirs = {
+        n:{dr:-1, dc:0, name:'n', opposite:'s'},
+        e:{dr:0, dc:1, name:'e', opposite:'w'},
+        s:{dr:1, dc:0, name:'s', opposite:'n'},
+        w:{dr:0, dc:-1, name:'w', opposite:'e'}
+      };
+      for(const bot of this.bots){
+        if (bot.finishTick!==null) continue; // already finished
+        // If currently moving (animation not finished), we consider it already at target for logic.
+        const cur = bot.pos;
+        // Check if at exit
+        if (cur.r===this.exit.r && cur.c===this.exit.c){
+          bot.finishTick = this.elapsed;
+          continue;
+        }
+        // Determine possible moves
+        const cellWalls = this._walls[cur.r][cur.c];
+        let chosenDir = null;
+        // Helper to get edge key
+        const edgeKey = (r,c,dir)=>`${r},${c}-${dir}`;
+        // First look for untraversed (count 0)
+        for(const dName of bot.pref){
+          const d = dirs[dName];
+          if (cellWalls[d.name]) continue; // wall present
+          const key = edgeKey(cur.r,cur.c,d.name);
+          const cnt = bot.visitedEdges.get(key)||0;
+          if (cnt===0){ chosenDir = d; break; }
+        }
+        // If none, look for traversed once (backtrack)
+        if (!chosenDir){
+          for(const dName of bot.pref){
+            const d = dirs[dName];
+            if (cellWalls[d.name]) continue;
+            const key = edgeKey(cur.r,cur.c,d.name);
+            const cnt = bot.visitedEdges.get(key)||0;
+            if (cnt===1){ chosenDir = d; break; }
+          }
+        }
+        // If still none, stay (should not happen)
+        if (!chosenDir){
+          // dead end, mark it
+          const deadKey = `${cur.r},${cur.c}`;
+          if (!bot.deadEnds.some(c=>c.r===cur.r && c.c===cur.c)){
+            bot.deadEnds.push({r:cur.r,c:cur.c});
+          }
+          continue;
+        }
+        const nr = cur.r + chosenDir.dr;
+        const nc = cur.c + chosenDir.dc;
+        // Update visited edges counts both ways
+        const key1 = edgeKey(cur.r,cur.c,chosenDir.name);
+        const key2 = edgeKey(nr,nc,chosenDir.opposite);
+        bot.visitedEdges.set(key1,(bot.visitedEdges.get(key1)||0)+1);
+        bot.visitedEdges.set(key2,(bot.visitedEdges.get(key2)||0)+1);
+        // Record path
+        bot.prevPos = {...bot.pos};
+        bot.pos = {r:nr,c:nc};
+        bot.moveStart = performance.now();
+        bot.path.push({r:nr,c:nc});
+        // Stack handling
+        if (bot.visitedEdges.get(key1)===1){ // first time forward
+          bot.stack.push({r:nr,c:nc});
+        }else{
+          // backtrack
+          bot.stack.pop();
+          // If we just left a dead end, record it
+          const prev = bot.prevPos;
+          const deadKeyPrev = `${prev.r},${prev.c}`;
+          const hasUnvisited = Object.entries(this._walls[prev.r][prev.c]).some(([dir,hasWall])=>{
+            if (hasWall) return false;
+            const ek = edgeKey(prev.r,prev.c,dir);
+            return (bot.visitedEdges.get(ek)||0)===0;
+          });
+          if (!hasUnvisited && !bot.deadEnds.some(c=>c.r===prev.r && c.c===prev.c)){
+            bot.deadEnds.push({r:prev.r,c:prev.c});
+          }
+        }
+        // Check if reached exit after move
+        if (nr===this.exit.r && nc===this.exit.c){
+          bot.finishTick = this.elapsed;
+        }
+      }
+      // Update UI
+      const completed = this.bots.filter(b=>b.finishTick!==null).length;
+      document.getElementById('completed').textContent = `Completed: ${completed} / 24`;
+      if (completed===24){
+        // freeze timer
+        document.getElementById('timer').textContent = `Time: ${this.elapsed}`;
+      }else{
+        document.getElementById('timer').textContent = `Time: ${this.elapsed}`;
+      }
+    }
+  };
+  window.game = game;
+  // ---------- Rendering ----------
+  const canvas = document.getElementById('maze');
+  const ctx = canvas.getContext('2d');
+  const cellSize = Math.min(canvas.width/game.size.cols, canvas.height/game.size.rows);
+  const offsetX = (canvas.width - cellSize*game.size.cols)/2;
+  const offsetY = (canvas.height - cellSize*game.size.rows)/2;
+
+  function drawMaze(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    for(let r=0;r<game.size.rows;r++){
+      for(let c=0;c<game.size.cols;c++){
+        const x = offsetX + c*cellSize;
+        const y = offsetY + r*cellSize;
+        const w = game.walls(r,c);
+        if (w.n) { ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+cellSize,y); ctx.stroke(); }
+        if (w.w) { ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x,y+cellSize); ctx.stroke(); }
+        // Draw south and east walls only for last row/col to avoid double drawing
+        if (r===game.size.rows-1 && w.s){ ctx.beginPath(); ctx.moveTo(x,y+cellSize); ctx.lineTo(x+cellSize,y+cellSize); ctx.stroke(); }
+        if (c===game.size.cols-1 && w.e){ ctx.beginPath(); ctx.moveTo(x+cellSize,y); ctx.lineTo(x+cellSize,y+cellSize); ctx.stroke(); }
+      }
+    }
+    // Draw exit marker
+    ctx.fillStyle = '#ff0';
+    const ex = offsetX + game.exit.c*cellSize + cellSize/2;
+    const ey = offsetY + game.exit.r*cellSize + cellSize/2;
+    ctx.beginPath(); ctx.arc(ex,ey,cellSize*0.2,0,2*Math.PI); ctx.fill();
+  }
+
+  function render(){
+    drawMaze();
+    const now = performance.now();
+    for(const bot of game.bots){
+      // Determine interpolation factor
+      let t = 1;
+      if (bot.finishTick===null){
+        const elapsedSinceMove = now - bot.moveStart;
+        t = Math.min(elapsedSinceMove / game._tickDuration, 1);
+      }
+      const from = bot.prevPos;
+      const to = bot.pos;
+      const fx = offsetX + (from.c + 0.5)*cellSize;
+      const fy = offsetY + (from.r + 0.5)*cellSize;
+      const tx = offsetX + (to.c + 0.5)*cellSize;
+      const ty = offsetY + (to.r + 0.5)*cellSize;
+      const x = fx + (tx - fx)*t;
+      const y = fy + (ty - fy)*t;
+      ctx.fillStyle = bot.color;
+      ctx.beginPath(); ctx.arc(x,y,cellSize*0.3,0,2*Math.PI); ctx.fill();
+    }
+    requestAnimationFrame(render);
+  }
+
+  // ---------- UI ----------
+  document.getElementById('reset').addEventListener('click',()=>game.reset());
+
+  // Initial reset
+  game.reset();
+
+})();
+</script>
+</body>
+</html>

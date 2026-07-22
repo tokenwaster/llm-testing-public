@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        #spreadsheet {
+            border-collapse: collapse;
+            width: 600px;
+            height: 400px;
+            table-layout: fixed;
+            margin-bottom: 10px;
+        }
+        #spreadsheet th, #spreadsheet td {
+            padding: 4px;
+            border: 1px solid #ccc;
+            text-align: center;
+        }
+        #spreadsheet input[type="text"] {
+            width: 50px;
+            height: 25px;
+            box-sizing: border-box;
+            text-align: right;
+        }
+        #export {
+            margin-top: 10px;
+        }
+        textarea#csv {
+            width: 600px;
+            height: 200px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <table id="spreadsheet">
+        <thead>
+            <tr><th></th></tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+    <button id="export">Export CSV</button>
+    <textarea id="csv"></textarea>
+    <script>
+        const cells = {};
+        const dependentsMap = new Map();
+        const dependenciesMap = new Map();
+        let evaluating = new Set();
+
+        function evaluateCell(cellId) {
+            if (evaluating.has(cellId)) {
+                throw new Error('Cycle');
+            }
+            evaluating.add(cellId);
+            try {
+                const cell = cells[cellId];
+                let formulaText = cell.raw;
+                if (!formulaText.startsWith('=')) {
+                    if (formulaText === '') {
+                        cell.computed = 0;
+                    } else if (!isNaN(formulaText)) {
+                        cell.computed = Number(formulaText);
+                    } else {
+                        cell.computed = formulaText;
+                    }
+                } else {
+                    let expr = formulaText.slice(1).trim();
+                    const regex = /[A-J]\d+/g;
+                    let matches = [...expr.matchAll(regex)].map(m => m[0]);
+                    for (let dep of matches) {
+                        if (!cells[dep]) throw new Error('Invalid reference');
+                        evaluateCell(dep);
+                    }
+                    let evaluatedExpr = expr.replace(regex, match => cells[match].computed);
+                    try {
+                        const result = eval(evaluatedExpr);
+                        cell.computed = !isNaN(result) ? result : '#ERR';
+                    } catch (e) {
+                        cell.computed = '#ERR';
+                    }
+                }
+            } catch (e) {
+                if (e.message === 'Cycle') {
+                    cells[cellId].computed = '#CYCLE';
+                } else {
+                    cells[cellId].computed = '#ERR';
+                }
+            } finally {
+                evaluating.delete(cellId);
+            }
+            const dependents = dependentsMap.get(cellId) || [];
+            for (let dependent of dependents) {
+                evaluateCell(dependent);
+            }
+        }
+
+        function updateDependencies(cellId) {
+            let oldDeps = dependenciesMap.get(cellId) || [];
+            for (let dep of oldDeps) {
+                let depsList = dependentsMap.get(dep) || [];
+                depsList = depsList.filter(c => c !== cellId);
+                if (depsList.length === 0) {
+                    dependentsMap.delete(dep);
+                } else {
+                    dependentsMap.set(dep, depsList);
+                }
+            }
+
+            const formulaText = cells[cellId].raw;
+            let newDeps = [];
+            if (formulaText.startsWith('=')) {
+                const regex = /[A-J]\d+/g;
+                let matches = [...formulaText.slice(1).matchAll(regex)].map(m => m[0]);
+                newDeps = matches.filter(dep => cells[dep]);
+            }
+            dependenciesMap.set(cellId, newDeps);
+            for (let dep of newDeps) {
+                let depsList = dependentsMap.get(dep) || [];
+                if (!depsList.includes(cellId)) {
+                    depsList.push(cellId);
+                    dependentsMap.set(dep, depsList);
+                }
+            }
+        }
+
+        function updateDisplays() {
+            for (const cellId in cells) {
+                const el = document.getElementById('cell-' + cellId);
+                if (el && !el.matches(':focus')) {
+                    el.value = cells[cellId].computed !== undefined ? 
+                        (typeof cells[cellId].computed === 'number' ? cells[cellId].computed : cells[cellId].computed) :
+                        '';
+                }
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const gridBody = document.querySelector('#spreadsheet tbody');
+            for (let row = 1; row <= 10; row++) {
+                const tr = document.createElement('tr');
+                const thRow = document.createElement('th');
+                thRow.textContent = row;
+                tr.appendChild(thRow);
+                for (let col of ['A','B','C','D','E','F','G','H','I','J']) {
+                    const cellId = col + row;
+                    cells[cellId] = { raw: '', computed: '' };
+                    const input = document.createElement('input');
+                    input.id = 'cell-' + cellId;
+                    input.type = 'text';
+                    tr.appendChild(document.createElement('td')).appendChild(input);
+                    
+                    input.addEventListener('focus', () => {
+                        input.value = cells[cellId].raw;
+                    });
+                    
+                    input.addEventListener('blur', () => {
+                        const newValue = input.value.trim();
+                        if (newValue !== cells[cellId].raw) {
+                            cells[cellId].raw = newValue;
+                            updateDependencies(cellId);
+                            evaluateCell(cellId);
+                            updateDisplays();
+                        }
+                    });
+                    
+                    input.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const newValue = input.value.trim();
+                            if (newValue !== cells[cellId].raw) {
+                                cells[cellId].raw = newValue;
+                                updateDependencies(cellId);
+                                evaluateCell(cellId);
+                                updateDisplays();
+                            }
+                            input.blur();
+                        }
+                    });
+                }
+                gridBody.appendChild(tr);
+            }
+
+            document.querySelector('#spreadsheet thead tr').appendChild(document.createElement('th'));
+            for (let col of ['A','B','C','D','E','F','G','H','I','J']) {
+                const th = document.createElement('th');
+                th.textContent = col;
+                document.querySelector('#spreadsheet thead tr').appendChild(th);
+            }
+
+            updateDisplays();
+
+            document.getElementById('export').addEventListener('click', () => {
+                let csv = '';
+                for (let row = 1; row <= 10; row++) {
+                    let line = [];
+                    for (let col of ['A','B','C','D','E','F','G','H','I','J']) {
+                        const cellId = col + row;
+                        line.push(window.sheet.get(cellId));
+                    }
+                    csv += line.join(',') + '\n';
+                }
+                document.getElementById('csv').value = csv.trim();
+            });
+
+            window.sheet = {
+                set: function(id, value) {
+                    const el = document.getElementById('cell-' + id);
+                    if (!el) return;
+                    cells[id].raw = value;
+                    updateDependencies(id);
+                    evaluateCell(id);
+                    updateDisplays();
+                },
+                get: function(id) {
+                    return cells[id] && cells[id].computed !== undefined ? 
+                        (typeof cells[id].computed === 'number' ? cells[id].computed.toString() : cells[id].computed) :
+                        '';
+                },
+                raw: function(id) {
+                    return cells[id] ? cells[id].raw : '';
+                }
+            };
+        });
+    </script>
+</body>
+</html>

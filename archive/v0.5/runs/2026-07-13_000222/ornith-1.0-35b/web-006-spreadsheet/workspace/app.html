@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mini Spreadsheet</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; padding: 20px; background: #e8ecf1; min-height: 100vh; }
+#app { min-width: 640px; min-height: 420px; background: #fff; padding: 20px 24px; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,.12); }
+h1 { margin-bottom: 14px; font-size: 18px; color: #333; }
+table { border-collapse: collapse; margin-bottom: 16px; }
+th, td { border: 1px solid #bbb; padding: 0; text-align: center; vertical-align: middle; }
+th { background: #d4dae4; font-weight: bold; color: #333; min-width: 42px; width: 68px; height: 28px; user-select: none; }
+td.row-header { text-align: center; background: #d4dae4; font-weight: bold; color: #333; width: 36px; min-width: 36px; height: 28px; user-select: none; }
+td input { width: 100%; border: none; outline: none; text-align: right; padding: 4px 6px; font-family: monospace; font-size: 13px; background: transparent; color: #222; }
+td input:focus { background: #dce6ff; }
+#controls { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+#export { padding: 8px 18px; cursor: pointer; font-size: 14px; font-family: monospace; background: #4a7fc4; color: #fff; border: none; border-radius: 4px; }
+#export:hover { background: #3a6aa8; }
+#csv { width: 100%; height: 120px; font-family: monospace; font-size: 12px; padding: 6px; border: 1px solid #bbb; border-radius: 4px; resize: vertical; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet (10×10)</h1>
+  <table id="grid"></table>
+  <div id="controls">
+    <button id="export">Export CSV</button>
+    <textarea id="csv" readonly placeholder="CSV output will appear here…"></textarea>
+  </div>
+</div>
+
+<script>
+(function() {
+  "use strict";
+
+  var COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  var ROWS = [1,2,3,4,5,6,7,8,9,10];
+
+  /* ── State ─────────────────────────────────────────────── */
+  var rawValues = {};
+  for (var ri = 0; ri < ROWS.length; ri++) {
+    for (var ci = 0; ci < COLS.length; ci++) {
+      rawValues[COLS[ci] + ROWS[ri]] = '';
+    }
+  }
+
+  var evalCache = {};
+  var cyclicSet = new Set();
+
+  /* ── Helpers ───────────────────────────────────────────── */
+  function isValidCellRef(ref) {
+    if (!/^[A-Za-z]+\d+$/.test(ref)) return false;
+    var m = ref.match(/^([A-Za-z]+)(\d+)$/);
+    if (!m) return false;
+    var colPart = m[1].toUpperCase();
+    var rowNum  = parseInt(m[2], 10);
+    if (colPart.length !== 1 || colPart < 'A' || colPart > 'J') return false;
+    if (rowNum < 1 || rowNum > 10) return false;
+    return true;
+  }
+
+  function extractRefs(formula) {
+    var refs = [];
+    var i = 0;
+    while (i < formula.length) {
+      if (/[A-Za-z]/.test(formula[i])) {
+        var s = '';
+        while (i < formula.length && /[A-Za-z0-9]/.test(formula[i])) s += formula[i++];
+        var u = s.toUpperCase();
+        if (/^[A-J]\d+$/.test(u)) refs.push(u);
+      } else { i++; }
+    }
+    return refs;
+  }
+
+  /* ── Cycle detection (DFS) ─────────────────────────────── */
+  function findCyclicCells() {
+    var adj = {};
+    for (var ri = 0; ri < ROWS.length; ri++) {
+      for (var ci = 0; ci < COLS.length; ci++) {
+        var cid = COLS[ci] + ROWS[ri];
+        var raw = rawValues[cid];
+        if (raw && raw.charAt(0) === '=') {
+          adj[cid] = extractRefs(raw.substring(1)).filter(function(r){ return isValidCellRef(r); });
+        }
+      }
+    }
+
+    var WHITE=0, GRAY=1, BLACK=2;
+    var color = {};
+    var inCycle = new Set();
+
+    for (var ri = 0; ri < ROWS.length; ri++) {
+      for (var ci = 0; ci < COLS.length; ci++) {
+        var id = COLS[ci] + ROWS[ri];
+        if (!(id in color)) color[id] = WHITE;
+      }
+    }
+
+    function dfs(node, path) {
+      color[node] = GRAY;
+      path.push(node);
+      var nbrs = adj[node] || [];
+      for (var ni = 0; ni < nbrs.length; ni++) {
+        var nb = nbrs[ni];
+        if (!isValidCellRef(nb) || !(nb in rawValues)) continue;
+        if (color[nb] === GRAY) {
+          var idx = path.indexOf(nb);
+          for (var k = idx; k < path.length; k++) inCycle.add(path[k]);
+        } else if (color[nb] === WHITE) {
+          dfs(nb, path);
+        }
+      }
+      path.pop();
+      color[node] = BLACK;
+    }
+
+    for (var ri2 = 0; ri2 < ROWS.length; ri2++) {
+      for (var ci2 = 0; ci2 < COLS.length; ci2++) {
+        var id2 = COLS[ci2] + ROWS[ri2];
+        if (color[id2] === WHITE && adj[id2]) dfs(id2, []);
+      }
+    }
+
+    return inCycle;
+  }
+
+  /* ── Formula tokenizer & parser ────────────────────────── */
+  function tokenize(str) {
+    var tokens = [];
+    var i = 0;
+    while (i < str.length) {
+      if (/\s/.test(str[i])) { i++; continue; }
+      if ('+-*/()'.indexOf(str[i]) !== -1) {
+        tokens.push({t:'op', v: str[i]}); i++;
+      } else if (/[A-Za-z]/.test(str[i])) {
+        var s = '';
+        while (i < str.length && /[A-Za-z0-9]/.test(str[i])) s += str[i++];
+        tokens.push({t:'ref', v: s.toUpperCase()});
+      } else if (/[0-9]/.test(str[i]) || (str[i]==='.' && i+1<str.length && /[0-9]/.test(str[i+1]))) {
+        var ns = '';
+        while (i < str.length && /[0-9.]/.test(str[i])) ns += str[i++];
+        tokens.push({t:'num', v: parseFloat(ns)});
+      } else { return null; }
+    }
+    return tokens;
+  }
+
+  function parseAndEval(formulaStr) {
+    var tokens = tokenize(formulaStr);
+    if (!tokens || tokens.length === 0) return '#ERR';
+
+    var pos = 0;
+    function peek() { return pos < tokens.length ? tokens[pos] : null; }
+    function advance() { return tokens[pos++]; }
+
+    function parseExpr() {
+      var left = parseTerm();
+      if (left === '#CYCLE' || left === '#ERR') return left;
+      while (pos < tokens.length) {
+        var tok = peek();
+        if (!tok || tok.t !== 'op' || (tok.v !== '+' && tok.v !== '-')) break;
+        advance();
+        var right = parseTerm();
+        if (right === '#CYCLE' || right === '#ERR') return right;
+        left = tok.v === '+' ? left + right : left - right;
+      }
+      return left;
+    }
+
+    function parseTerm() {
+      var left = parseFactor();
+      if (left === '#CYCLE' || left === '#ERR') return left;
+      while (pos < tokens.length) {
+        var tok = peek();
+        if (!tok || tok.t !== 'op' || (tok.v !== '*' && tok.v !== '/')) break;
+        advance();
+        var right = parseFactor();
+        if (right === '#CYCLE' || right === '#ERR') return right;
+        if (right === 0) return '#ERR';
+        left = tok.v === '*' ? left * right : left / right;
+      }
+      return left;
+    }
+
+    function parseFactor() {
+      var tok = peek();
+      if (!tok) return '#ERR';
+
+      if (tok.t === 'op' && (tok.v === '+' || tok.v === '-')) {
+        advance();
+        var v = parseFactor();
+        if (v === '#CYCLE' || v === '#ERR') return v;
+        return tok.v === '-' ? -v : v;
+      }
+
+      if (tok.t === 'op' && tok.v === '(') {
+        advance();
+        var inner = parseExpr();
+        if (inner === '#CYCLE' || inner === '#ERR') return inner;
+        var close = peek();
+        if (!close || close.t !== 'op' || close.v !== ')') return '#ERR';
+        advance();
+        return inner;
+      }
+
+      if (tok.t === 'num') { advance(); return tok.v; }
+
+      if (tok.t === 'ref') {
+        advance();
+        var ref = tok.v;
+        if (!isValidCellRef(ref)) return '#ERR';
+        var val = evaluateCell(ref);
+        if (val === '#CYCLE' || val === '#ERR') return val;
+        var n = parseFloat(val);
+        return isNaN(n) ? 0 : n;
+      }
+
+      return '#ERR';
+    }
+
+    var result = parseExpr();
+    if (pos !== tokens.length) return '#ERR';
+    return result;
+  }
+
+  /* ── Cell evaluation ───────────────────────────────────── */
+  function evaluateCell(cellId) {
+    if (cyclicSet.has(cellId)) { evalCache[cellId] = '#CYCLE'; return '#CYCLE'; }
+    var cached = evalCache[cellId];
+    if (cached !== undefined) return cached;
+
+    var raw = rawValues[cellId];
+    if (!raw || raw.charAt(0) !== '=') { evalCache[cellId] = raw; return raw; }
+
+    try {
+      var result = parseAndEval(raw.substring(1));
+      evalCache[cellId] = result;
+      return result;
+    } catch(e) {
+      evalCache[cellId] = '#ERR';
+      return '#ERR';
+    }
+  }
+
+  /* ── Formatting ────────────────────────────────────────── */
+  function formatValue(val) {
+    if (val === '#CYCLE' || val === '#ERR') return val;
+    if (val === undefined || val === null) return '';
+    if (typeof val === 'number') {
+      if (Number.isInteger(val)) return String(val);
+      var s = parseFloat(val.toPrecision(12));
+      return String(s);
+    }
+    return String(val);
+  }
+
+  /* ── Recalculation ─────────────────────────────────────── */
+  function recalculate() {
+    cyclicSet = findCyclicCells();
+    evalCache = {};
+    updateAllDisplays();
+  }
+
+  function updateAllDisplays() {
+    for (var ri = 0; ri < ROWS.length; ri++) {
+      for (var ci = 0; ci < COLS.length; ci++) {
+        var cid = COLS[ci] + ROWS[ri];
+        var inp = document.getElementById('cell-' + cid);
+        if (!inp || document.activeElement === inp) continue;
+        inp.value = formatValue(evaluateCell(cid));
+      }
+    }
+  }
+
+  function updateCellDisplay(cellId) {
+    var inp = document.getElementById('cell-' + cellId);
+    if (!inp || document.activeElement === inp) return;
+    inp.value = formatValue(evaluateCell(cellId));
+  }
+
+  /* ── Commit helper ─────────────────────────────────────── */
+  function commitCell(cellId) {
+    var inp = document.getElementById('cell-' + cellId);
+    if (!inp) return;
+    rawValues[cellId] = inp.value;
+    evalCache = {};
+    recalculate();
+  }
+
+  /* ── Build grid DOM ────────────────────────────────────── */
+  function buildGrid() {
+    var table = document.getElementById('grid');
+
+    // Header row
+    var thead = document.createElement('thead');
+    var hrow = document.createElement('tr');
+    var corner = document.createElement('th');
+    corner.textContent = '';
+    hrow.appendChild(corner);
+    for (var ci = 0; ci < COLS.length; ci++) {
+      var th = document.createElement('th');
+      th.textContent = COLS[ci];
+      hrow.appendChild(th);
+    }
+    thead.appendChild(hrow);
+    table.appendChild(thead);
+
+    // Body rows
+    var tbody = document.createElement('tbody');
+    for (var ri = 0; ri < ROWS.length; ri++) {
+      var row = document.createElement('tr');
+
+      var rh = document.createElement('td');
+      rh.className = 'row-header';
+      rh.textContent = ROWS[ri];
+      row.appendChild(rh);
+
+      for (var ci2 = 0; ci2 < COLS.length; ci2++) {
+        var cid = COLS[ci2] + ROWS[ri];
+        var td = document.createElement('td');
+        var inp = document.createElement('input');
+        inp.type = 'text';
+        inp.id = 'cell-' + cid;
+        inp.value = '';
+
+        (function(cellId) {
+          inp.addEventListener('focus', function() {
+            this.value = rawValues[cellId];
+          });
+          inp.addEventListener('blur', function() {
+            commitCell(cellId);
+          });
+          inp.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              commitCell(cellId);
+              this.blur();
+            }
+          });
+        })(cid);
+
+        td.appendChild(inp);
+        row.appendChild(td);
+      }
+      tbody.appendChild(row);
+    }
+    table.appendChild(tbody);
+  }
+
+  /* ── Export CSV ────────────────────────────────────────── */
+  document.getElementById('export').addEventListener('click', function() {
+    var lines = [];
+    for (var ri = 0; ri < ROWS.length; ri++) {
+      var cells = [];
+      for (var ci = 0; ci < COLS.length; ci++) {
+        var cid = COLS[ci] + ROWS[ri];
+        cells.push(formatValue(evaluateCell(cid)));
+      }
+      lines.push(cells.join(','));
+    }
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  /* ── Sheet API ─────────────────────────────────────────── */
+  window.sheet = {
+    set: function(cellId, value) {
+      rawValues[cellId] = value;
+      evalCache = {};
+      recalculate();
+      updateCellDisplay(cellId);
+    },
+    get: function(cellId) {
+      return formatValue(evaluateCell(cellId));
+    },
+    raw: function(cellId) {
+      return rawValues[cellId] !== undefined ? rawValues[cellId] : '';
+    }
+  };
+
+  /* ── Init ──────────────────────────────────────────────── */
+  buildGrid();
+})();
+</script>
+</body>
+</html>

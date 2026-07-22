@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Maze Game</title>
+<style>
+  body { margin: 0; padding: 20px; font-family: Arial, sans-serif; background: #f0f0f0; }
+  #container { max-width: 600px; margin: 0 auto; }
+  h1 { text-align: center; }
+  #maze { border: 2px solid #333; background: white; margin: 20px auto; display: block; }
+  .controls { text-align: center; margin: 20px 0; }
+  #reset { padding: 10px 20px; font-size: 16px; cursor: pointer; }
+  .stats { text-align: center; font-size: 18px; margin: 20px 0; }
+</style>
+</head>
+<body>
+<div id="container">
+  <h1>Maze Game</h1>
+  <div class="stats">
+    <div>Completed: <span id="completed">0</span>/24</div>
+    <div>Time: <span id="timer">0</span> ticks</div>
+  </div>
+  <canvas id="maze" width="400" height="400"></canvas>
+  <div class="controls">
+    <button id="reset">Reset</button>
+  </div>
+</div>
+
+<script>
+class SeededRandom {
+  constructor(seed) {
+    this.seed = seed || 1;
+  }
+  next() {
+    this.seed = (this.seed * 16807) % 2147483647;
+    return (this.seed - 1) / 2147483646;
+  }
+  nextInt(max) {
+    return Math.floor(this.next() * max);
+  }
+}
+
+function generateMaze(rows, cols, seed) {
+  const rng = new SeededRandom(seed);
+  const maze = Array(rows).fill(null).map(() => 
+    Array(cols).fill(null).map(() => ({n: true, e: true, s: true, w: true}))
+  );
+  
+  const visited = Array(rows).fill(null).map(() => Array(cols).fill(false));
+  
+  function carve(r, c) {
+    visited[r][c] = true;
+    const dirs = [{r: -1, c: 0, name: 'n'}, {r: 0, c: 1, name: 'e'}, 
+                  {r: 1, c: 0, name: 's'}, {r: 0, c: -1, name: 'w'}];
+    
+    for (let i = dirs.length - 1; i > 0; i--) {
+      const j = rng.nextInt(i + 1);
+      [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
+    }
+    
+    for (const dir of dirs) {
+      const nr = r + dir.r, nc = c + dir.c;
+      if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) {
+        maze[r][c][dir.name] = false;
+        const opposite = {n: 's', e: 'w', s: 'n', w: 'e'}[dir.name];
+        maze[nr][nc][opposite] = false;
+        carve(nr, nc);
+      }
+    }
+  }
+  
+  carve(0, 0);
+  return maze;
+}
+
+class Bot {
+  constructor(r, c, seed, botId) {
+    this.r = r;
+    this.c = c;
+    this.path = [{r, c}];
+    this.deadEnds = [];
+    this.finishTick = null;
+    this.edgeTraversals = new Map();
+    this.cellDeadEnds = new Set();
+    
+    const dirs = ['n', 'e', 's', 'w'];
+    const rng = new SeededRandom(seed + botId * 7919);
+    for (let i = dirs.length - 1; i > 0; i--) {
+      const j = rng.nextInt(i + 1);
+      [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
+    }
+    this.prefDirs = dirs;
+  }
+  
+  edgeKey(r1, c1, r2, c2) {
+    if (r1 > r2 || (r1 === r2 && c1 > c2)) [r1, c1, r2, c2] = [r2, c2, r1, c1];
+    return r1 + ',' + c1 + ',' + r2 + ',' + c2;
+  }
+  
+  cellKey(r, c) {
+    return r + ',' + c;
+  }
+  
+  step(maze, rows, cols, exitR, exitC) {
+    for (const dir of this.prefDirs) {
+      if (maze[this.r][this.c][dir]) continue;
+      
+      const nr = this.r + (dir === 'n' ? -1 : dir === 's' ? 1 : 0);
+      const nc = this.c + (dir === 'w' ? -1 : dir === 'e' ? 1 : 0);
+      
+      const ek = this.edgeKey(this.r, this.c, nr, nc);
+      const traversals = this.edgeTraversals.get(ek) || 0;
+      
+      if (traversals < 2) {
+        this.edgeTraversals.set(ek, traversals + 1);
+        
+        this.r = nr;
+        this.c = nc;
+        this.path.push({r: nr, c: nc});
+        
+        if (nr === exitR && nc === exitC) return true;
+        return false;
+      }
+    }
+    
+    const ck = this.cellKey(this.r, this.c);
+    if (!this.cellDeadEnds.has(ck)) {
+      this.cellDeadEnds.add(ck);
+      this.deadEnds.push({r: this.r, c: this.c});
+    }
+    
+    if (this.path.length > 1) {
+      const prev = this.path[this.path.length - 2];
+      const ek = this.edgeKey(this.r, this.c, prev.r, prev.c);
+      const traversals = this.edgeTraversals.get(ek) || 0;
+      this.edgeTraversals.set(ek, traversals + 1);
+      
+      this.path.pop();
+      this.r = prev.r;
+      this.c = prev.c;
+    }
+    return false;
+  }
+}
+
+class Game {
+  constructor() {
+    this.reset();
+  }
+  
+  reset(seed) {
+    this.seed = seed !== undefined ? seed : Math.floor(Math.random() * 1000000000);
+    this.rows = 25;
+    this.cols = 25;
+    this.maze = generateMaze(this.rows, this.cols, this.seed);
+    
+    this.spawn = {r: 0, c: 0};
+    this.exit = {r: this.rows - 1, c: this.cols - 1};
+    
+    this.bots = [];
+    for (let i = 0; i < 24; i++) {
+      this.bots.push(new Bot(0, 0, this.seed, i));
+    }
+    
+    this.elapsed = 0;
+    this.finished = false;
+  }
+  
+  walls(r, c) {
+    if (r < 0 || r >= this.rows || c < 0 || c >= this.cols) {
+      return {n: true, e: true, s: true, w: true};
+    }
+    return {...this.maze[r][c]};
+  }
+  
+  tick(n) {
+    for (let i = 0; i < n; i++) {
+      if (this.finished) break;
+      
+      let anyActive = false;
+      for (const bot of this.bots) {
+        if (bot.finishTick === null) {
+          anyActive = true;
+          const finished = bot.step(this.maze, this.rows, this.cols, this.exit.r, this.exit.c);
+          if (finished) {
+            bot.finishTick = this.elapsed;
+          }
+        }
+      }
+      
+      this.elapsed++;
+      
+      if (!anyActive) {
+        this.finished = true;
+      }
+    }
+  }
+  
+  render() {
+    const canvas = document.getElementById('maze');
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    const cellW = w / this.cols;
+    const cellH = h / this.rows;
+    
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, w, h);
+    
+    ctx.strokeStyle = '#999';
+    ctx.lineWidth = 1;
+    
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        const x = c * cellW;
+        const y = r * cellH;
+        
+        if (this.maze[r][c].n) {
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + cellW, y);
+          ctx.stroke();
+        }
+        if (this.maze[r][c].e) {
+          ctx.beginPath();
+          ctx.moveTo(x + cellW, y);
+          ctx.lineTo(x + cellW, y + cellH);
+          ctx.stroke();
+        }
+        if (this.maze[r][c].s) {
+          ctx.beginPath();
+          ctx.moveTo(x, y + cellH);
+          ctx.lineTo(x + cellW, y + cellH);
+          ctx.stroke();
+        }
+        if (this.maze[r][c].w) {
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x, y + cellH);
+          ctx.stroke();
+        }
+      }
+    }
+    
+    ctx.fillStyle = 'rgba(255, 100, 100, 0.3)';
+    ctx.fillRect(this.exit.c * cellW, this.exit.r * cellH, cellW, cellH);
+    
+    const colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c',
+                    '#e67e22', '#34495e', '#16a085', '#c0392b', '#2980b9', '#27ae60',
+                    '#d35400', '#8e44ad', '#00bcd4', '#ff6b9d', '#00e676', '#ffd600',
+                    '#ff3d00', '#2196f3', '#4caf50', '#ff9800', '#9c27b0', '#f44336'];
+    
+    for (let i = 0; i < this.bots.length; i++) {
+      const bot = this.bots[i];
+      const x = (bot.c + 0.5) * cellW;
+      const y = (bot.r + 0.5) * cellH;
+      
+      ctx.fillStyle = colors[i % colors.length];
+      ctx.beginPath();
+      ctx.arc(x, y, Math.min(cellW, cellH) * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    
+    const completed = this.bots.filter(b => b.finishTick !== null).length;
+    document.getElementById('completed').textContent = completed;
+    document.getElementById('timer').textContent = this.elapsed;
+  }
+}
+
+const game = new Game();
+
+window.game = {
+  tick(n) {
+    game.tick(n);
+    game.render();
+  },
+  reset(seed) {
+    game.reset(seed);
+    game.render();
+  },
+  get elapsed() {
+    return game.elapsed;
+  },
+  get size() {
+    return {rows: game.rows, cols: game.cols};
+  },
+  get spawn() {
+    return game.spawn;
+  },
+  get exit() {
+    return game.exit;
+  },
+  walls(r, c) {
+    return game.walls(r, c);
+  },
+  get bots() {
+    return game.bots.map(b => ({
+      path: b.path.map(p => ({...p})),
+      deadEnds: b.deadEnds.map(d => ({...d})),
+      finishTick: b.finishTick
+    }));
+  }
+};
+
+document.getElementById('reset').addEventListener('click', () => {
+  game.reset();
+  game.render();
+});
+
+function animate() {
+  game.render();
+  requestAnimationFrame(animate);
+}
+animate();
+</script>
+</body>
+</html>

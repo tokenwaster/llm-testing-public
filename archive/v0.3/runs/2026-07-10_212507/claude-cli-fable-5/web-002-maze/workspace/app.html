@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Bot Maze — 24 Pathfinders</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --accent: #58a6ff;
+    --wall: #8b949e;
+    --text: #e6edf3;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(ellipse at top, #1a2233 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    margin: 0 0 16px;
+    color: var(--accent);
+  }
+  #hud {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 10px 18px;
+    margin-bottom: 16px;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.4);
+  }
+  .stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 110px;
+  }
+  .stat .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #8b949e;
+  }
+  .stat .value {
+    font-size: 20px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  #completed { color: #3fb950; }
+  #timer { color: var(--accent); }
+  #reset {
+    background: linear-gradient(180deg, #2ea043, #238636);
+    color: #fff;
+    border: 1px solid rgba(240,246,252,0.1);
+    border-radius: 8px;
+    padding: 9px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.15s, transform 0.1s;
+  }
+  #reset:hover { filter: brightness(1.15); }
+  #reset:active { transform: scale(0.96); }
+  #maze {
+    width: 546px;
+    height: 546px;
+    max-width: 95vw;
+    max-height: 95vw;
+    border-radius: 10px;
+    border: 1px solid #30363d;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+    background: var(--panel);
+  }
+  #footer {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #8b949e;
+  }
+</style>
+</head>
+<body>
+  <h1>⚙ BOT MAZE — 24 PATHFINDERS</h1>
+  <div id="hud">
+    <div class="stat">
+      <span class="label">Finished</span>
+      <span class="value" id="completed">0 / 24</span>
+    </div>
+    <div class="stat">
+      <span class="label">Elapsed</span>
+      <span class="value" id="timer">0.0s</span>
+    </div>
+    <button id="reset">↻ Reset</button>
+  </div>
+  <canvas id="maze" width="546" height="546"></canvas>
+  <div id="footer">Bots spawn top-left and race to the glowing exit bottom-right.</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var COLS = 21, ROWS = 21;          // >= 15x15
+  var NUM_BOTS = 24;
+  var CELL = 26;                     // 21 * 26 = 546px canvas
+  var STEP_MS = 120;                 // real-time ms per simulation step
+
+  var canvas = document.getElementById("maze");
+  var ctx = canvas.getContext("2d");
+  var completedEl = document.getElementById("completed");
+  var timerEl = document.getElementById("timer");
+  var resetBtn = document.getElementById("reset");
+
+  // ---- Deterministic PRNG (mulberry32) so tick() is reproducible ----
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---- State ----
+  var grid;            // grid[y][x] = {walls:[top,right,bottom,left]}
+  var spawn = { x: 0, y: 0 };
+  var exit = { x: COLS - 1, y: ROWS - 1 };
+  var bots = [];
+  var completedCount = 0;
+  var startTime = 0;
+  var virtualMs = 0;   // time added synchronously by tick()
+  var frozen = false;  // stop the wall clock once all bots finish
+  var frozenMs = 0;
+  var stepAccum = 0;
+  var lastFrame = 0;
+  var seedCounter = 12345;
+
+  // ---- Maze generation: recursive backtracker => perfect maze (always solvable) ----
+  function generateMaze(rand) {
+    var g = [];
+    for (var y = 0; y < ROWS; y++) {
+      g.push([]);
+      for (var x = 0; x < COLS; x++) {
+        g[y].push({ walls: [true, true, true, true], visited: false });
+      }
+    }
+    var stack = [{ x: 0, y: 0 }];
+    g[0][0].visited = true;
+    var DIRS = [
+      { dx: 0, dy: -1, w: 0, o: 2 },
+      { dx: 1, dy: 0, w: 1, o: 3 },
+      { dx: 0, dy: 1, w: 2, o: 0 },
+      { dx: -1, dy: 0, w: 3, o: 1 }
+    ];
+    while (stack.length) {
+      var cur = stack[stack.length - 1];
+      var neighbors = [];
+      for (var i = 0; i < 4; i++) {
+        var nx = cur.x + DIRS[i].dx, ny = cur.y + DIRS[i].dy;
+        if (nx >= 0 && ny >= 0 && nx < COLS && ny < ROWS && !g[ny][nx].visited) {
+          neighbors.push(DIRS[i]);
+        }
+      }
+      if (neighbors.length) {
+        var d = neighbors[Math.floor(rand() * neighbors.length)];
+        var nx2 = cur.x + d.dx, ny2 = cur.y + d.dy;
+        g[cur.y][cur.x].walls[d.w] = false;
+        g[ny2][nx2].walls[d.o] = false;
+        g[ny2][nx2].visited = true;
+        stack.push({ x: nx2, y: ny2 });
+      } else {
+        stack.pop();
+      }
+    }
+    return g;
+  }
+
+  // ---- BFS shortest path from (sx,sy) to exit ----
+  function bfsPath(sx, sy) {
+    var prev = {};
+    var queue = [{ x: sx, y: sy }];
+    var seen = {};
+    seen[sx + "," + sy] = true;
+    var DIRS = [
+      { dx: 0, dy: -1, w: 0 },
+      { dx: 1, dy: 0, w: 1 },
+      { dx: 0, dy: 1, w: 2 },
+      { dx: -1, dy: 0, w: 3 }
+    ];
+    while (queue.length) {
+      var c = queue.shift();
+      if (c.x === exit.x && c.y === exit.y) break;
+      for (var i = 0; i < 4; i++) {
+        if (grid[c.y][c.x].walls[DIRS[i].w]) continue;
+        var nx = c.x + DIRS[i].dx, ny = c.y + DIRS[i].dy;
+        var key = nx + "," + ny;
+        if (!seen[key]) {
+          seen[key] = true;
+          prev[key] = c;
+          queue.push({ x: nx, y: ny });
+        }
+      }
+    }
+    var path = [];
+    var node = { x: exit.x, y: exit.y };
+    while (!(node.x === sx && node.y === sy)) {
+      path.push({ x: node.x, y: node.y });
+      node = prev[node.x + "," + node.y];
+    }
+    path.reverse();
+    return path;
+  }
+
+  var BOT_COLORS = [];
+  for (var h = 0; h < NUM_BOTS; h++) {
+    BOT_COLORS.push("hsl(" + Math.round((h * 360) / NUM_BOTS) + ", 85%, 62%)");
+  }
+
+  function initGame() {
+    var rand = mulberry32(seedCounter++);
+    grid = generateMaze(rand);
+    bots = [];
+    completedCount = 0;
+    virtualMs = 0;
+    frozen = false;
+    frozenMs = 0;
+    stepAccum = 0;
+    startTime = performance.now();
+    for (var i = 0; i < NUM_BOTS; i++) {
+      var path = bfsPath(spawn.x, spawn.y);
+      bots.push({
+        x: spawn.x,
+        y: spawn.y,
+        prevX: spawn.x,
+        prevY: spawn.y,
+        path: path,
+        pathIndex: 0,
+        delay: i * 2 + Math.floor(rand() * 3), // staggered start
+        done: false,
+        color: BOT_COLORS[i],
+        lerp: 1
+      });
+    }
+    updateHud();
+  }
+
+  // Advance every unfinished bot by one simulation step.
+  function stepOnce() {
+    for (var i = 0; i < bots.length; i++) {
+      var b = bots[i];
+      if (b.done) continue;
+      if (b.delay > 0) { b.delay--; continue; }
+      b.prevX = b.x;
+      b.prevY = b.y;
+      if (b.pathIndex < b.path.length) {
+        var next = b.path[b.pathIndex++];
+        b.x = next.x;
+        b.y = next.y;
+        b.lerp = 0;
+      }
+      if (b.x === exit.x && b.y === exit.y) {
+        b.done = true;
+        completedCount++;
+      }
+    }
+    if (completedCount === NUM_BOTS && !frozen) {
+      frozen = true;
+      frozenMs = elapsedNow();
+    }
+  }
+
+  function elapsedNow() {
+    if (frozen) return frozenMs;
+    return (performance.now() - startTime) + virtualMs;
+  }
+
+  function updateHud() {
+    completedEl.textContent = completedCount + " / " + NUM_BOTS;
+    timerEl.textContent = (elapsedNow() / 1000).toFixed(1) + "s";
+  }
+
+  // ---- Rendering ----
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // floor
+    ctx.fillStyle = "#161b22";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // spawn & exit highlights
+    ctx.fillStyle = "rgba(88,166,255,0.18)";
+    ctx.fillRect(spawn.x * CELL, spawn.y * CELL, CELL, CELL);
+    var pulse = 0.25 + 0.15 * Math.sin(performance.now() / 300);
+    ctx.fillStyle = "rgba(63,185,80," + pulse.toFixed(3) + ")";
+    ctx.fillRect(exit.x * CELL, exit.y * CELL, CELL, CELL);
+    ctx.strokeStyle = "#3fb950";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(exit.x * CELL + 4, exit.y * CELL + 4, CELL - 8, CELL - 8);
+
+    // walls
+    ctx.strokeStyle = "#8b949e";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    for (var y = 0; y < ROWS; y++) {
+      for (var x = 0; x < COLS; x++) {
+        var c = grid[y][x];
+        var px = x * CELL, py = y * CELL;
+        if (c.walls[0]) { ctx.moveTo(px, py); ctx.lineTo(px + CELL, py); }
+        if (c.walls[1]) { ctx.moveTo(px + CELL, py); ctx.lineTo(px + CELL, py + CELL); }
+        if (c.walls[2]) { ctx.moveTo(px, py + CELL); ctx.lineTo(px + CELL, py + CELL); }
+        if (c.walls[3]) { ctx.moveTo(px, py); ctx.lineTo(px, py + CELL); }
+      }
+    }
+    ctx.stroke();
+
+    // bots (interpolated positions for smooth motion)
+    for (var i = 0; i < bots.length; i++) {
+      var b = bots[i];
+      var t = Math.min(1, b.lerp);
+      var ix = (b.prevX + (b.x - b.prevX) * t) * CELL + CELL / 2;
+      var iy = (b.prevY + (b.y - b.prevY) * t) * CELL + CELL / 2;
+      var r = b.done ? 3.5 : 6;
+      ctx.beginPath();
+      ctx.arc(ix, iy, r, 0, Math.PI * 2);
+      ctx.fillStyle = b.done ? "rgba(63,185,80,0.5)" : b.color;
+      ctx.shadowColor = b.done ? "transparent" : b.color;
+      ctx.shadowBlur = b.done ? 0 : 8;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      if (!b.done) {
+        ctx.beginPath();
+        ctx.arc(ix - 2, iy - 2, 1.6, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.fill();
+      }
+    }
+  }
+
+  // ---- Real-time loop ----
+  function frame(now) {
+    if (!lastFrame) lastFrame = now;
+    var dt = now - lastFrame;
+    lastFrame = now;
+
+    if (completedCount < NUM_BOTS) {
+      stepAccum += dt;
+      while (stepAccum >= STEP_MS) {
+        stepAccum -= STEP_MS;
+        stepOnce();
+      }
+    }
+    for (var i = 0; i < bots.length; i++) {
+      bots[i].lerp = Math.min(1, bots[i].lerp + dt / STEP_MS);
+    }
+    updateHud();
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  resetBtn.addEventListener("click", function () { initGame(); });
+
+  // ---- Programmatic API ----
+  window.game = {
+    get bots() { return bots; },
+    get completed() { return completedCount; },
+    get elapsedMs() { return elapsedNow(); },
+    tick: function (n) {
+      n = n | 0;
+      for (var i = 0; i < n; i++) {
+        if (completedCount === NUM_BOTS) break;
+        stepOnce();
+        if (!frozen) virtualMs += STEP_MS;
+      }
+      // snap visuals to final positions
+      for (var j = 0; j < bots.length; j++) {
+        bots[j].prevX = bots[j].x;
+        bots[j].prevY = bots[j].y;
+        bots[j].lerp = 1;
+      }
+      updateHud();
+      draw();
+    },
+    reset: function () { initGame(); }
+  };
+
+  initGame();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

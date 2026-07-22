@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mini Spreadsheet</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 20px;
+      background-color: #f8f9fa;
+      color: #333;
+    }
+    h1 {
+      margin-bottom: 10px;
+      font-size: 24px;
+    }
+    .toolbar {
+      margin-bottom: 15px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    button {
+      padding: 8px 16px;
+      font-size: 14px;
+      font-weight: 600;
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+    .grid-container {
+      overflow-x: auto;
+      max-width: 100%;
+      background: white;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+      margin-bottom: 20px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      min-width: 800px;
+      table-layout: fixed;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      text-align: center;
+      padding: 0;
+    }
+    th {
+      background-color: #f1f3f4;
+      font-weight: bold;
+      font-size: 13px;
+      color: #5f6368;
+      height: 28px;
+      user-select: none;
+    }
+    .row-header {
+      width: 40px;
+      background-color: #f1f3f4;
+      font-weight: bold;
+    }
+    .cell-input {
+      width: 100%;
+      height: 28px;
+      border: none;
+      padding: 0 6px;
+      box-sizing: border-box;
+      font-size: 13px;
+      font-family: inherit;
+      background-color: transparent;
+    }
+    .cell-input:focus {
+      outline: 2px solid #1a73e8;
+      background-color: #fff;
+      z-index: 1;
+      position: relative;
+    }
+    .error-cell {
+      color: #d93025;
+      font-weight: 500;
+    }
+    .cycle-cell {
+      color: #b06000;
+      font-weight: bold;
+      background-color: #fef7e0;
+    }
+    .csv-section {
+      margin-top: 20px;
+    }
+    .csv-section h3 {
+      margin-bottom: 8px;
+      font-size: 16px;
+    }
+    textarea {
+      width: 100%;
+      max-width: 800px;
+      height: 120px;
+      font-family: monospace;
+      font-size: 13px;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      box-sizing: border-box;
+      resize: vertical;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Mini Spreadsheet</h1>
+  
+  <div class="toolbar">
+    <button id="export">Export CSV</button>
+  </div>
+
+  <div class="grid-container">
+    <table id="spreadsheet">
+      <thead>
+        <tr id="header-row">
+          <th class="row-header"></th>
+          <!-- Columns A-J will be inserted here -->
+        </tr>
+      </thead>
+      <tbody id="grid-body">
+        <!-- Rows 1-10 will be inserted here -->
+      </tbody>
+    </table>
+  </div>
+
+  <div class="csv-section">
+    <h3>Exported CSV</h3>
+    <textarea id="csv" readonly placeholder="Click 'Export CSV' to generate data..."></textarea>
+  </div>
+
+  <script>
+    const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+    const ROWS = 10;
+
+    // Data store: cellId -> raw text
+    const rawData = {};
+    // Computed cache: cellId -> computed value (string)
+    const computedData = {};
+    // Status cache: cellId -> 'OK' | 'ERR' | 'CYCLE'
+    const cellStatus = {};
+
+    // Initialize data structures
+    for (let r = 1; r <= ROWS; r++) {
+      for (let c of COLS) {
+        const id = `${c}${r}`;
+        rawData[id] = '';
+        computedData[id] = '';
+        cellStatus[id] = 'OK';
+      }
+    }
+
+    // Build DOM Grid
+    const headerRow = document.getElementById('header-row');
+    COLS.forEach(col => {
+      const th = document.createElement('th');
+      th.textContent = col;
+      headerRow.appendChild(th);
+    });
+
+    const gridBody = document.getElementById('grid-body');
+    for (let r = 1; r <= ROWS; r++) {
+      const tr = document.createElement('tr');
+      
+      const rowHeader = document.createElement('td');
+      rowHeader.className = 'row-header';
+      rowHeader.textContent = r;
+      tr.appendChild(rowHeader);
+
+      COLS.forEach(col => {
+        const td = document.createElement('td');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.id = `cell-${col}${r}`;
+        input.className = 'cell-input';
+        
+        // Event listeners for editing
+        input.addEventListener('focus', () => {
+          input.value = rawData[`${col}${r}`];
+        });
+
+        input.addEventListener('blur', () => {
+          updateCell(`${col}${r}`, input.value);
+        });
+
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            input.blur();
+          }
+        });
+
+        td.appendChild(input);
+        tr.appendChild(td);
+      });
+      gridBody.appendChild(tr);
+    }
+
+    // Parse and evaluate formulas
+    function updateCell(cellId, value) {
+      rawData[cellId] = value;
+      recalculate();
+    }
+
+    function recalculate() {
+      // Build dependency graph
+      const adj = {};
+      const formulas = {};
+      
+      for (let r = 1; r <= ROWS; r++) {
+        for (let c of COLS) {
+          const id = `${c}${r}`;
+          adj[id] = [];
+          const val = rawData[id];
+          if (val.startsWith('=')) {
+            formulas[id] = val.substring(1);
+            const refs = getReferences(formulas[id]);
+            for (let ref of refs) {
+              adj[id].push(ref);
+            }
+          } else {
+            formulas[id] = null;
+          }
+        }
+      }
+
+      // Detect cycles using DFS
+      const visited = {};
+      const recStack = {};
+      const cycles = new Set();
+
+      function detectCycle(u) {
+        visited[u] = true;
+        recStack[u] = true;
+        for (let v of adj[u]) {
+          if (!visited[v]) {
+            if (detectCycle(v)) {
+              cycles.add(u);
+              return true;
+            }
+          } else if (recStack[v]) {
+            cycles.add(u);
+            cycles.add(v);
+            return true;
+          }
+        }
+        recStack[u] = false;
+        return false;
+      }
+
+      for (let r = 1; r <= ROWS; r++) {
+        for (let c of COLS) {
+          const id = `${c}${r}`;
+          if (!visited[id]) {
+            detectCycle(id);
+          }
+        }
+      }
+
+      // Propagate cycle status to all nodes that can reach a cycle
+      const hasCycle = {};
+      for (let r = 1; r <= ROWS; r++) {
+        for (let c of COLS) {
+          const id = `${c}${r}`;
+          hasCycle[id] = cycles.has(id);
+        }
+      }
+
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (let r = 1; r <= ROWS; r++) {
+          for (let c of COLS) {
+            const id = `${c}${r}`;
+            if (!hasCycle[id]) {
+              for (let dep of adj[id]) {
+                if (hasCycle[dep]) {
+                  hasCycle[id] = true;
+                  changed = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Evaluate cells
+      const memo = {};
+      const evaluating = {};
+
+      function evaluate(id) {
+        if (hasCycle[id]) {
+          cellStatus[id] = 'CYCLE';
+          return '#CYCLE';
+        }
+        if (id in memo) return memo[id];
+        if (evaluating[id]) {
+          cellStatus[id] = 'CYCLE';
+          return '#CYCLE';
+        }
+
+        evaluating[id] = true;
+        const raw = rawData[id];
+
+        if (!raw.startsWith('=')) {
+          cellStatus[id] = 'OK';
+          memo[id] = raw;
+          evaluating[id] = false;
+          return raw;
+        }
+
+        // It's a formula
+        const expr = formulas[id];
+        try {
+          const result = evalFormula(expr, evaluate);
+          cellStatus[id] = 'OK';
+          memo[id] = String(result);
+        } catch (e) {
+          cellStatus[id] = 'ERR';
+          memo[id] = '#ERR';
+        }
+
+        evaluating[id] = false;
+        return memo[id];
+      }
+
+      for (let r = 1; r <= ROWS; r++) {
+        for (let c of COLS) {
+          const id = `${c}${r}`;
+          computedData[id] = evaluate(id);
+        }
+      }
+
+      // Update DOM
+      for (let r = 1; r <= ROWS; r++) {
+        for (let c of COLS) {
+          const id = `${c}${r}`;
+          const input = document.getElementById(`cell-${id}`);
+          if (document.activeElement !== input) {
+            input.value = computedData[id];
+          }
+          
+          // Apply styling based on status
+          input.classList.remove('error-cell', 'cycle-cell');
+          if (cellStatus[id] === 'ERR') {
+            input.classList.add('error-cell');
+          } else if (cellStatus[id] === 'CYCLE') {
+            input.classList.add('cycle-cell');
+          }
+        }
+      }
+    }
+
+    // Extract cell references (e.g. A1, B10) from formula string
+    function getReferences(expr) {
+      const refs = [];
+      const regex = /\b([A-J])(10|[1-9])\b/g;
+      let match;
+      while ((match = regex.exec(expr)) !== null) {
+        refs.push(match[0]);
+      }
+      return refs;
+    }
+
+    // Evaluate formula safely with operator precedence
+    function evalFormula(expr, evaluateCallback) {
+      // Tokenize the expression
+      const tokens = tokenize(expr);
+      if (!tokens) throw new Error('Invalid tokens');
+
+      // Replace references with their numeric values
+      const resolvedTokens = tokens.map(token => {
+        if (/^[A-J](10|[1-9])$/.test(token)) {
+          const valStr = evaluateCallback(token);
+          if (valStr === '#ERR' || valStr === '#CYCLE') {
+            throw new Error(valStr);
+          }
+          if (valStr.trim() === '') return 0;
+          const num = Number(valStr);
+          if (isNaN(num)) {
+            throw new Error('Non-numeric reference');
+          }
+          return num;
+        }
+        return token;
+      });
+
+      return parseAndEvalExpression(resolvedTokens);
+    }
+
+    function tokenize(expr) {
+      const regex = /\s*([A-J](?:10|[1-9])|[0-9]+(?:\.[0-9]+)?|[\+\-\*\/\(\)])\s*/g;
+      const tokens = [];
+      let match;
+      let lastIndex = 0;
+      while ((match = regex.exec(expr)) !== null) {
+        if (match.index !== lastIndex) {
+          // Found non-matching characters (invalid syntax)
+          return null;
+        }
+        tokens.push(match[1]);
+        lastIndex = regex.lastIndex;
+      }
+      if (lastIndex !== expr.length) return null;
+      return tokens;
+    }
+
+    function parseAndEvalExpression(tokens) {
+      let index = 0;
+
+      function parsePrimary() {
+        const token = tokens[index];
+        if (token === '(') {
+          index++; // consume '('
+          const val = parseExpression();
+          if (tokens[index] !== ')') {
+            throw new Error('Missing closing parenthesis');
+          }
+          index++; // consume ')'
+          return val;
+        }
+        if (typeof token === 'number') {
+          index++;
+          return token;
+        }
+        const num = Number(token);
+        if (!isNaN(num) && token !== undefined) {
+          index++;
+          return num;
+        }
+        throw new Error('Unexpected token: ' + token);
+      }
+
+      function parseMultiplicative() {
+        let val = parsePrimary();
+        while (index < tokens.length && (tokens[index] === '*' || tokens[index] === '/')) {
+          const op = tokens[index];
+          index++;
+          const nextVal = parsePrimary();
+          if (op === '*') {
+            val = val * nextVal;
+          } else {
+            if (nextVal === 0) throw new Error('Division by zero');
+            val = val / nextVal;
+          }
+        }
+        return val;
+      }
+
+      function parseExpression() {
+        let val = parseMultiplicative();
+        while (index < tokens.length && (tokens[index] === '+' || tokens[index] === '-')) {
+          const op = tokens[index];
+          index++;
+          const nextVal = parseMultiplicative();
+          if (op === '+') {
+            val = val + nextVal;
+          } else {
+            val = val - nextVal;
+          }
+        }
+        return val;
+      }
+
+      const result = parseExpression();
+      if (index < tokens.length) {
+        throw new Error('Extra tokens at end of expression');
+      }
+      return result;
+    }
+
+    // Export CSV functionality
+    document.getElementById('export').addEventListener('click', () => {
+      const rowsCsv = [];
+      for (let r = 1; r <= ROWS; r++) {
+        const rowCells = [];
+        COLS.forEach(col => {
+          let val = computedData[`${col}${r}`];
+          // Escape quotes if necessary
+          if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+            val = '"' + val.replace(/"/g, '""') + '"';
+          }
+          rowCells.push(val);
+        });
+        rowsCsv.push(rowCells.join(','));
+      }
+      document.getElementById('csv').value = rowsCsv.join('\n');
+    });
+
+    // Scripting API
+    window.sheet = {
+      set: function(cellId, text) {
+        const cleanId = cellId.toUpperCase().trim();
+        const input = document.getElementById(`cell-${cleanId}`);
+        if (input) {
+          updateCell(cleanId, text);
+        }
+      },
+      get: function(cellId) {
+        const cleanId = cellId.toUpperCase().trim();
+        return computedData[cleanId] !== undefined ? computedData[cleanId] : '';
+      },
+      raw: function(cellId) {
+        const cleanId = cellId.toUpperCase().trim();
+        return rawData[cleanId] !== undefined ? rawData[cleanId] : '';
+      }
+    };
+
+    // Initial calculation to set up empty grid state
+    recalculate();
+  </script>
+</body>
+</html>

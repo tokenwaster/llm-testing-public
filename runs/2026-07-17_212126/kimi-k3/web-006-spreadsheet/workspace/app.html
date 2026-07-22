@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font-family: Arial, Helvetica, sans-serif;
+    background: #eef1f4; color: #222;
+  }
+  #app {
+    min-width: 600px; min-height: 400px;
+    display: inline-block;
+    background: #fff; border: 1px solid #cfd4da; border-radius: 8px;
+    padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.10);
+  }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  table { border-collapse: collapse; }
+  th {
+    background: #e9edf1; border: 1px solid #c3c9cf;
+    min-width: 34px; padding: 3px 8px;
+    font-size: 12px; font-weight: 600; color: #444;
+  }
+  td { border: 1px solid #d3d8dd; padding: 0; height: 26px; }
+  tbody tr:nth-child(even) td { background: #fafbfc; }
+  input {
+    width: 74px; height: 26px; border: none; margin: 0;
+    padding: 2px 6px; background: transparent; color: #111;
+    font: 13px/1.4 "Courier New", monospace; text-align: right;
+  }
+  input:focus {
+    outline: 2px solid #1a73e8; outline-offset: -2px; background: #fff;
+  }
+  #export {
+    margin-top: 12px; padding: 6px 16px; font-size: 13px;
+    background: #1a73e8; color: #fff; border: none; border-radius: 4px;
+    cursor: pointer;
+  }
+  #export:hover { background: #1765cc; }
+  #csv {
+    display: block; margin-top: 10px; width: 100%; max-width: 800px; height: 110px;
+    font: 12px "Courier New", monospace;
+    border: 1px solid #c3c9cf; border-radius: 4px; padding: 6px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <table id="grid"></table>
+  <button id="export" type="button">Export CSV</button>
+  <textarea id="csv" placeholder="Computed CSV output appears here"></textarea>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var COLS = "ABCDEFGHIJ".split("");
+  var NROWS = 10;
+
+  var data = {};     // cell name -> raw text as typed
+  var inputs = {};   // cell name -> <input> element
+  var display = {};  // cell name -> displayed (computed) string
+
+  /* ---------- Build the grid ---------- */
+  var table = document.getElementById("grid");
+  var thead = table.createTHead();
+  var hr = thead.insertRow();
+  hr.appendChild(document.createElement("th")); // corner
+  COLS.forEach(function (c) {
+    var th = document.createElement("th");
+    th.textContent = c;
+    hr.appendChild(th);
+  });
+  var tbody = table.createTBody();
+  for (var r = 1; r <= NROWS; r++) {
+    var tr = tbody.insertRow();
+    var rowHead = document.createElement("th");
+    rowHead.textContent = r;
+    tr.appendChild(rowHead);
+    COLS.forEach(function (c) {
+      var name = c + r;
+      var td = tr.insertCell();
+      var inp = document.createElement("input");
+      inp.id = "cell-" + name;
+      inp.setAttribute("autocomplete", "off");
+      inp.setAttribute("spellcheck", "false");
+      inputs[name] = inp;
+      data[name] = "";
+      td.appendChild(inp);
+    });
+  }
+
+  /* ---------- Formula parser (recursive descent) ---------- */
+  // Grammar: expr := term (('+'|'-') term)*
+  //          term := factor (('*'|'/') factor)*
+  //          factor := number | ref | '(' expr ')' | ('-'|'+') factor
+  // Throws the string '#ERR' on any syntax problem.
+  function parse(src) {
+    var i = 0;
+    function ws() { while (i < src.length && /\s/.test(src[i])) i++; }
+    function peek() { ws(); return src[i]; }
+    function expr() {
+      var n = term();
+      for (;;) {
+        var c = peek();
+        if (c === "+" || c === "-") { i++; n = { t: "bin", op: c, l: n, r: term() }; }
+        else return n;
+      }
+    }
+    function term() {
+      var n = factor();
+      for (;;) {
+        var c = peek();
+        if (c === "*" || c === "/") { i++; n = { t: "bin", op: c, l: n, r: factor() }; }
+        else return n;
+      }
+    }
+    function factor() {
+      var c = peek();
+      if (c === undefined) throw "#ERR";
+      if (c === "(") {
+        i++;
+        var n = expr();
+        if (peek() !== ")") throw "#ERR";
+        i++;
+        return n;
+      }
+      if (c === "-") { i++; return { t: "neg", x: factor() }; }
+      if (c === "+") { i++; return factor(); }
+      if (/[0-9.]/.test(c)) {
+        var m = /^(\d+\.?\d*|\.\d+)/.exec(src.slice(i));
+        if (!m) throw "#ERR";
+        i += m[0].length;
+        return { t: "num", v: parseFloat(m[0]) };
+      }
+      if (/[A-Za-z]/.test(c)) {
+        var m2 = /^[A-Za-z]+[0-9]+/.exec(src.slice(i));
+        if (!m2) throw "#ERR";
+        i += m2[0].length;
+        var parts = /^([A-Za-z]+)([0-9]+)$/.exec(m2[0]);
+        var col = parts[1].toUpperCase();
+        var row = parseInt(parts[2], 10);
+        if (col.length !== 1 || col < "A" || col > "J" || row < 1 || row > 10) {
+          return { t: "badref" }; // reference to a non-cell
+        }
+        return { t: "ref", name: col + row };
+      }
+      throw "#ERR";
+    }
+    ws();
+    if (i >= src.length) throw "#ERR"; // empty formula
+    var node = expr();
+    ws();
+    if (i !== src.length) throw "#ERR"; // trailing garbage
+    return node;
+  }
+
+  /* ---------- Evaluation with transitive recalculation ---------- */
+  function fmt(v) {
+    if (typeof v !== "number" || !isFinite(v)) return "#ERR";
+    if (Number.isInteger(v)) return String(v);
+    return String(parseFloat(v.toPrecision(12)));
+  }
+
+  function recalc() {
+    var memo = {};   // name -> {kind, ...}
+    var state = {};  // name -> 1 (on stack) | 2 (done)
+    var names = Object.keys(inputs);
+
+    function refNumeric(name, stack) {
+      var res = visit(name, stack);
+      if (res.kind === "err") throw res.code;
+      if (res.kind === "empty") return 0;      // empty cells count as 0
+      if (res.kind === "num") return res.v;
+      throw "#ERR";                            // non-numeric text in a formula
+    }
+
+    function evalAst(node, stack) {
+      switch (node.t) {
+        case "num": return node.v;
+        case "badref": throw "#ERR";
+        case "ref": return refNumeric(node.name, stack);
+        case "neg": return -evalAst(node.x, stack);
+        case "bin": {
+          var a = evalAst(node.l, stack);
+          var b = evalAst(node.r, stack);
+          if (node.op === "+") return a + b;
+          if (node.op === "-") return a - b;
+          if (node.op === "*") return a * b;
+          return a / b;
+        }
+      }
+      throw "#ERR";
+    }
+
+    function visit(name, stack) {
+      if (state[name] === 2) return memo[name];
+      if (state[name] === 1) throw "#CYCLE"; // back-edge: circular reference
+      state[name] = 1;
+      stack.push(name);
+      var result;
+      try {
+        var rawText = data[name];
+        var t = rawText.trim();
+        if (t === "") {
+          result = { kind: "empty" };
+        } else if (t.charAt(0) === "=") {
+          var ast = parse(t.slice(1));
+          var v = evalAst(ast, stack);
+          if (typeof v !== "number" || !isFinite(v)) throw "#ERR";
+          result = { kind: "num", v: v };
+        } else {
+          var n = Number(t);
+          if (!isNaN(n)) result = { kind: "num", v: n };
+          else result = { kind: "text", s: t };
+        }
+      } catch (e) {
+        if (e === "#CYCLE" || e === "#ERR") result = { kind: "err", code: e };
+        else throw e;
+      }
+      stack.pop();
+      state[name] = 2;
+      memo[name] = result;
+      return result;
+    }
+
+    names.forEach(function (n) { visit(n, []); });
+
+    names.forEach(function (n) {
+      var res = memo[n];
+      var s;
+      if (res.kind === "empty") s = "";
+      else if (res.kind === "num") s = fmt(res.v);
+      else if (res.kind === "text") s = res.s;
+      else s = res.code; // '#CYCLE' or '#ERR'
+      display[n] = s;
+      var inp = inputs[n];
+      if (document.activeElement !== inp) inp.value = s;
+    });
+  }
+
+  /* ---------- Editing behaviour ---------- */
+  function commit(name, text) {
+    data[name] = text;
+    recalc();
+  }
+
+  Object.keys(inputs).forEach(function (name) {
+    var inp = inputs[name];
+    inp.addEventListener("focus", function () {
+      inp.value = data[name]; // show raw text while editing
+    });
+    inp.addEventListener("blur", function () {
+      commit(name, inp.value);
+    });
+    inp.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commit(name, inp.value);
+        inp.blur();
+      } else if (e.key === "Escape") {
+        inp.value = data[name];
+        inp.blur();
+      }
+    });
+  });
+
+  /* ---------- Export CSV ---------- */
+  document.getElementById("export").addEventListener("click", function () {
+    var lines = [];
+    for (var r = 1; r <= NROWS; r++) {
+      var cells = [];
+      for (var ci = 0; ci < COLS.length; ci++) {
+        cells.push(display[COLS[ci] + r]);
+      }
+      lines.push(cells.join(","));
+    }
+    document.getElementById("csv").value = lines.join("\n");
+  });
+
+  /* ---------- Scripting API ---------- */
+  window.sheet = {
+    set: function (name, text) {
+      name = String(name).toUpperCase();
+      if (!inputs[name]) return;
+      data[name] = String(text);
+      recalc();
+      var inp = inputs[name];
+      if (document.activeElement === inp) inp.value = data[name];
+    },
+    get: function (name) {
+      name = String(name).toUpperCase();
+      return display[name] !== undefined ? display[name] : "";
+    },
+    raw: function (name) {
+      name = String(name).toUpperCase();
+      return data[name] !== undefined ? data[name] : "";
+    }
+  };
+
+  recalc();
+})();
+</script>
+</body>
+</html>

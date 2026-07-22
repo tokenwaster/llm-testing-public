@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Falling Sand Sandbox</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --panel-bg: #1e1e1e;
+            --text-color: #e0e0e0;
+            --accent: #bb86fc;
+            --btn-bg: #333;
+            --btn-hover: #444;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+
+        h1 { margin: 0 0 15px 0; font-size: 1.2rem; text-transform: uppercase; letter-spacing: 2px; }
+
+        #controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            background: var(--panel-bg);
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.2s;
+            background-color: var(--btn-bg);
+            color: #aaa;
+            min-width: 80px;
+        }
+
+        button:hover { background-color: var(--btn-hover); color: white; }
+        
+        button.active {
+            background-color: var(--accent);
+            color: #000;
+            box-shadow: 0 0 10px rgba(187, 134, 252, 0.4);
+        }
+
+        #clear-btn {
+            background-color: #cf6679;
+            color: white;
+        }
+        #clear-btn:hover { background-color: #b0505e; }
+
+        #canvas-container {
+            position: relative;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.5);
+            border-radius: 4px;
+            overflow: hidden;
+            cursor: crosshair;
+        }
+
+        canvas {
+            display: block;
+            background-color: #000;
+        }
+
+        .legend {
+            margin-top: 10px;
+            font-size: 0.8rem;
+            color: #666;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Falling Sand Sandbox</h1>
+
+    <div id="controls">
+        <!-- Material Buttons -->
+        <button id="mat-sand" class="active" data-mat="sand">Sand</button>
+        <button id="mat-water" data-mat="water">Water</button>
+        <button id="mat-wall" data-mat="wall">Wall</button>
+        <button id="mat-acid" data-mat="acid">Acid</button>
+        <button id="mat-empty" data-mat="empty">Eraser</button>
+        
+        <!-- Clear Button -->
+        <button id="clear-btn">Clear All</button>
+    </div>
+
+    <div id="canvas-container">
+        <canvas id="sand"></canvas>
+    </div>
+
+    <div class="legend">Drag to paint. Walls are solid boundaries.</div>
+
+<script>
+/**
+ * Falling Sand Simulation Implementation
+ */
+
+// Configuration
+const WIDTH = 128; // Grid width (cells)
+const HEIGHT = 128; // Grid height (cells)
+const SCALE = 4;   // Visual scale factor (CSS pixels per cell)
+
+// Material Types
+const MAT_EMPTY = 0;
+const MAT_SAND = 1;
+const MAT_WATER = 2;
+const MAT_WALL = 3;
+const MAT_ACID = 4;
+
+// Color Map for rendering
+const COLORS = {
+    [MAT_EMPTY]: '#1a1a1a', // Dark background
+    [MAT_SAND]: '#c2b280',
+    [MAT_WATER]: '#4fc3f7',
+    [MAT_WALL]: '#9e9e9e',
+    [MAT_ACID]: '#b9f6ca'
+};
+
+// State
+let grid = new Uint8Array(WIDTH * HEIGHT); // 1D array for performance
+let currentMaterial = MAT_SAND;
+let isMouseDown = false;
+let lastMouseX = -1;
+let lastMouseY = -1;
+
+// DOM Elements
+const canvas = document.getElementById('sand');
+const ctx = canvas.getContext('2d', { alpha: false }); // Optimize for no transparency
+const buttons = {
+    sand: document.getElementById('mat-sand'),
+    water: document.getElementById('mat-water'),
+    wall: document.getElementById('mat-wall'),
+    acid: document.getElementById('mat-acid'),
+    empty: document.getElementById('mat-empty')
+};
+
+// Initialize Canvas Size
+canvas.width = WIDTH * SCALE;
+canvas.height = HEIGHT * SCALE;
+
+// --- API Implementation ---
+
+const sim = {
+    w: WIDTH,
+    h: HEIGHT,
+
+    tick: function(n) {
+        // We run the simulation synchronously n times.
+        // To ensure determinism and prevent teleportation, we iterate bottom-up.
+        
+        for (let t = 0; t < n; t++) {
+            // Iterate from bottom row up to top row
+            for (let y = HEIGHT - 2; y >= 0; y--) {
+                // Iterate columns left to right
+                for (let x = 0; x < WIDTH; x++) {
+                    const idx = y * WIDTH + x;
+                    const type = grid[idx];
+
+                    if (type === MAT_EMPTY || type === MAT_WALL) continue;
+
+                    // --- SAND LOGIC ---
+                    if (type === MAT_SAND) {
+                        const belowIdx = (y + 1) * WIDTH + x;
+                        const belowType = grid[belowIdx];
+
+                        // 1. Try falling straight down
+                        if (belowType === MAT_EMPTY || belowType === MAT_WATER || belowType === MAT_ACID) {
+                            // Swap: Sand goes down, whatever was there comes up
+                            grid[idx] = belowType;
+                            grid[belowIdx] = MAT_SAND;
+                        } 
+                        // 2. Try sliding diagonally (randomize order)
+                        else if (y + 1 < HEIGHT - 1) { // Don't slide off bottom
+                            const rand = Math.random();
+                            let moved = false;
+
+                            // Check Down-Left
+                            if (rand < 0.5) {
+                                const dlIdx = (y + 1) * WIDTH + (x - 1);
+                                if (x > 0 && grid[dlIdx] === MAT_EMPTY || grid[dlIdx] === MAT_WATER || grid[dlIdx] === MAT_ACID) {
+                                    grid[idx] = grid[dlIdx];
+                                    grid[dlIdx] = MAT_SAND;
+                                    moved = true;
+                                }
+                            }
+
+                            // Check Down-Right
+                            if (!moved && x < WIDTH - 1) {
+                                const drIdx = (y + 1) * WIDTH + (x + 1);
+                                if (grid[drIdx] === MAT_EMPTY || grid[drIdx] === MAT_WATER || grid[drIdx] === MAT_ACID) {
+                                    grid[idx] = grid[drIdx];
+                                    grid[drIdx] = MAT_SAND;
+                                    moved = true;
+                                }
+                            }
+                        }
+                    }
+
+                    // --- WATER LOGIC ---
+                    else if (type === MAT_WATER) {
+                        const belowIdx = (y + 1) * WIDTH + x;
+                        const belowType = grid[belowIdx];
+
+                        // 1. Try falling straight down
+                        if (belowType === MAT_EMPTY || belowType === MAT_ACID) {
+                            grid[idx] = belowType;
+                            grid[belowIdx] = MAT_WATER;
+                        } 
+                        // 2. Spread horizontally if blocked vertically
+                        else if (y + 1 < HEIGHT - 1) {
+                            const rand = Math.random();
+                            let moved = false;
+
+                            // Check Left
+                            if (rand < 0.5 && x > 0) {
+                                const leftIdx = y * WIDTH + (x - 1);
+                                if (grid[leftIdx] === MAT_EMPTY || grid[leftIdx] === MAT_WATER) {
+                                    grid[idx] = grid[leftIdx];
+                                    grid[leftIdx] = MAT_WATER;
+                                    moved = true;
+                                }
+                            }
+
+                            // Check Right
+                            if (!moved && x < WIDTH - 1) {
+                                const rightIdx = y * WIDTH + (x + 1);
+                                if (grid[rightIdx] === MAT_EMPTY || grid[rightIdx] === MAT_WATER) {
+                                    grid[idx] = grid[rightIdx];
+                                    grid[rightIdx] = MAT_WATER;
+                                    moved = true;
+                                }
+                            }
+                        }
+                    }
+
+                    // --- ACID LOGIC ---
+                    else if (type === MAT_ACID) {
+                        const belowIdx = (y + 1) * WIDTH + x;
+                        const belowType = grid[belowIdx];
+
+                        // 1. Try falling straight down (like water)
+                        if (belowType === MAT_EMPTY || belowType === MAT_ACID) {
+                            grid[idx] = belowType;
+                            grid[belowIdx] = MAT_ACID;
+                        } 
+                        // 2. Spread horizontally if blocked vertically
+                        else if (y + 1 < HEIGHT - 1) {
+                            const rand = Math.random();
+                            let moved = false;
+
+                            // Check Left
+                            if (rand < 0.5 && x > 0) {
+                                const leftIdx = y * WIDTH + (x - 1);
+                                if (grid[leftIdx] === MAT_EMPTY || grid[leftIdx] === MAT_ACID) {
+                                    grid[idx] = grid[leftIdx];
+                                    grid[leftIdx] = MAT_ACID;
+                                    moved = true;
+                                }
+                            }
+
+                            // Check Right
+                            if (!moved && x < WIDTH - 1) {
+                                const rightIdx = y * WIDTH + (x + 1);
+                                if (grid[rightIdx] === MAT_EMPTY || grid[rightIdx] === MAT_ACID) {
+                                    grid[idx] = grid[rightIdx];
+                                    grid[rightIdx] = MAT_ACID;
+                                    moved = true;
+                                }
+                            }
+                        }
+
+                        // --- DISSOLVE LOGIC ---
+                        // Acid dissolves walls/sand below or beside.
+                        // We check neighbors. If neighbor is Wall/Sand, turn it to Empty.
+                        // Note: We do this after movement logic so acid can fall into holes it creates.
+                        
+                        const dissolveNeighbors = (x, y) => {
+                            const targets = [
+                                { dx: 0, dy: 1 }, // Below
+                                { dx: -1, dy: 0 }, // Left
+                                { dx: 1, dy: 0 }   // Right
+                            ];
+
+                            for (let t of targets) {
+                                const nx = x + t.dx;
+                                const ny = y + t.dy;
+                                
+                                if (nx >= 0 && nx < WIDTH && ny >= 0 && ny < HEIGHT) {
+                                    const nIdx = ny * WIDTH + nx;
+                                    const targetType = grid[nIdx];
+                                    
+                                    // If neighbor is Wall or Sand, dissolve it
+                                    if (targetType === MAT_WALL || targetType === MAT_SAND) {
+                                        grid[nIdx] = MAT_EMPTY;
+                                    }
+                                }
+                            }
+                        };
+
+                        dissolveNeighbors(x, y);
+                    }
+                }
+            }
+        }
+    },
+
+    get: function(x, y) {
+        if (x < 0 || x >= this.w || y < 0 || y >= this.h) return MAT_EMPTY;
+        return grid[y * WIDTH + x];
+    },
+
+    set: function(x, y, material) {
+        if (x < 0 || x >= this.w || y < 0 || y >= this.h) return;
+        const idx = y * WIDTH + x;
+        // If we are painting over a wall with something else, usually walls are static 
+        // unless it's an eraser. But for simplicity in this sandbox, we allow overwriting 
+        // except maybe if the user wants to build walls on top of sand? 
+        // Standard behavior: overwrite.
+        grid[idx] = material;
+    },
+
+    clear: function() {
+        grid.fill(MAT_EMPTY);
+    }
+};
+
+// --- Rendering ---
+
+function draw() {
+    // Clear canvas with background color
+    ctx.fillStyle = '#000'; 
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw grid cells
+    for (let y = 0; y < HEIGHT; y++) {
+        for (let x = 0; x < WIDTH; x++) {
+            const type = sim.get(x, y);
+            if (type !== MAT_EMPTY) {
+                ctx.fillStyle = COLORS[type];
+                
+                // Draw slightly smaller rects for a grid effect or just fill
+                // Using fillRect is fast.
+                ctx.fillRect(x * SCALE, y * SCALE, SCALE, SCALE);
+            }
+        }
+    }
+}
+
+// --- Interaction ---
+
+function getMousePos(evt) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: Math.floor((evt.clientX - rect.left) / SCALE),
+        y: Math.floor((evt.clientY - rect.top) / SCALE)
+    };
+}
+
+function paint(x, y) {
+    if (x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT) {
+        sim.set(x, y, currentMaterial);
+        draw();
+    }
+}
+
+// Mouse Events
+canvas.addEventListener('mousedown', (e) => {
+    isMouseDown = true;
+    const pos = getMousePos(e);
+    paint(pos.x, pos.y);
+});
+
+window.addEventListener('mouseup', () => {
+    isMouseDown = false;
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (!isMouseDown) return;
+    
+    const pos = getMousePos(e);
+    
+    // Optimization: only draw if mouse moved
+    if (pos.x !== lastMouseX || pos.y !== lastMouseY) {
+        paint(pos.x, pos.y);
+        lastMouseX = pos.x;
+        lastMouseY = pos.y;
+    }
+});
+
+// Touch support for mobile
+canvas.addEventListener('touchstart', (e) => {
+    isMouseDown = true;
+    const touch = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    paint(Math.floor((touch.clientX - rect.left) / SCALE), Math.floor((touch.clientY - rect.top) / SCALE));
+}, {passive: false});
+
+canvas.addEventListener('touchmove', (e) => {
+    if (!isMouseDown) return;
+    e.preventDefault(); // Prevent scrolling
+    const touch = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    paint(Math.floor((touch.clientX - rect.left) / SCALE), Math.floor((touch.clientY - rect.top) / SCALE));
+}, {passive: false});
+
+canvas.addEventListener('touchend', () => {
+    isMouseDown = false;
+});
+
+
+// --- UI Logic ---
+
+function updateActiveButton() {
+    // Remove active class from all
+    Object.values(buttons).forEach(b => b.classList.remove('active'));
+    // Add to current
+    buttons[currentMaterial].classList.add('active');
+}
+
+// Button Listeners
+Object.keys(buttons).forEach(key => {
+    const btn = buttons[key];
+    btn.addEventListener('click', () => {
+        currentMaterial = parseInt(btn.dataset.mat);
+        updateActiveButton();
+    });
+});
+
+document.getElementById('clear-btn').addEventListener('click', () => {
+    sim.clear();
+    draw();
+});
+
+// --- Initialization ---
+
+// Initial Draw (Empty)
+draw();
+
+// Start Animation Loop
+function loop() {
+    // We run the simulation synchronously inside tick(), 
+    // but here we just redraw. The prompt asks for animation on RAF, 
+    // but tick(n) must be synchronous.
+    // To make it "satisfying", we can auto-tick or just let user paint.
+    // Let's add a small auto-tick to keep things moving if they don't paint?
+    // Or just wait for input. The prompt says "Animation may run on requestAnimationFrame".
+    // Let's do a passive tick every frame so particles settle naturally.
+    
+    sim.tick(1); 
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// Start the loop
+loop();
+
+// Expose API
+window.sim = sim;
+
+</script>
+</body>
+</html>

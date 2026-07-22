@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Conway's Game of Life</title>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --accent: #34f5c5;
+    --accent2: #7c5cff;
+    --text: #dbe4ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background: radial-gradient(1200px 800px at 50% -10%, #16203a 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 22px 16px;
+    user-select: none;
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(1.3rem, 3.5vw, 2rem);
+    letter-spacing: .06em;
+    text-align: center;
+    background: linear-gradient(90deg, #34f5c5, #59d4ff, #c26bff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 0 14px rgba(89, 212, 255, .25));
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+  }
+  button {
+    font: inherit;
+    font-weight: 700;
+    font-size: .95rem;
+    color: #04121a;
+    background: linear-gradient(135deg, var(--accent), #59d4ff);
+    border: none;
+    border-radius: 999px;
+    padding: 10px 18px;
+    cursor: pointer;
+    box-shadow: 0 4px 18px rgba(52, 245, 197, .25);
+    transition: transform .12s ease, filter .12s ease, box-shadow .12s ease;
+  }
+  button:hover  { transform: translateY(-2px) scale(1.05); filter: brightness(1.1); }
+  button:active { transform: translateY(0) scale(.96); }
+  #play {
+    color: #fff;
+    background: linear-gradient(135deg, var(--accent2), #c26bff);
+    box-shadow: 0 4px 18px rgba(124, 92, 255, .4);
+    min-width: 108px;
+  }
+  #play.active {
+    background: linear-gradient(135deg, #ff5c8a, #ffb35c);
+    box-shadow: 0 4px 18px rgba(255, 92, 138, .4);
+  }
+  #clear {
+    color: #fff;
+    background: linear-gradient(135deg, #ff5c5c, #ff9a5c);
+    box-shadow: 0 4px 18px rgba(255, 92, 92, .3);
+  }
+  .speed {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: .85rem;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: rgba(140, 170, 255, .08);
+    border: 1px solid rgba(140, 170, 255, .18);
+  }
+  .speed input { accent-color: var(--accent); cursor: pointer; }
+  #life {
+    width: min(600px, 92vw);
+    aspect-ratio: 1 / 1;
+    height: auto;
+    background: #0b1020;
+    border-radius: 14px;
+    border: 1px solid rgba(140, 170, 255, .18);
+    box-shadow:
+      0 0 0 6px rgba(20, 28, 50, .6),
+      0 20px 60px rgba(0, 0, 0, .55),
+      0 0 46px rgba(52, 245, 197, .08);
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .status {
+    font-size: .85rem;
+    opacity: .85;
+    text-align: center;
+    line-height: 1.6;
+  }
+  .status b { color: var(--accent); font-weight: 700; }
+  .hint { opacity: .55; font-size: .78rem; }
+</style>
+</head>
+<body>
+
+  <h1>✦ Conway's Game of Life ✦</h1>
+
+  <div class="controls">
+    <button id="play" title="toggle auto-run (space)">▶ Play</button>
+    <button id="step" title="advance one generation">⏭ Step</button>
+    <button id="random" title="seed a random soup">🎲 Random</button>
+    <button id="clear" title="kill everything">🧹 Clear</button>
+    <label class="speed">⚡ <input id="speed" type="range" min="2" max="30" value="12"/></label>
+  </div>
+
+  <canvas id="life" width="600" height="600"></canvas>
+
+  <div class="status">
+    Generation <b id="gen">0</b> &nbsp;·&nbsp; Alive <b id="pop">0</b><br/>
+    <span class="hint">click / drag to paint &nbsp;·&nbsp; right-click drops a glider &nbsp;·&nbsp; space = play/pause</span>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------- grid & simulation ---------------- */
+
+  var W = 50, H = 50;              // grid dimensions in cells (>= 40 x 40)
+  var CSS_SIZE = 600;              // logical drawing size in CSS px (>= 400)
+  var CELL = CSS_SIZE / W;
+
+  var grid = new Uint8Array(W * H);   // current generation
+  var next = new Uint8Array(W * H);   // next generation (double buffer)
+  var age  = new Uint16Array(W * H);  // for pretty coloring
+  var generation = 0;
+
+  function get(x, y) {
+    if (x < 0 || y < 0 || x >= W || y >= H) return 0;
+    return grid[y * W + x];
+  }
+
+  function set(x, y, v) {
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    var i = y * W + x;
+    grid[i] = v ? 1 : 0;
+    age[i] = v ? 1 : 0;
+    draw();
+  }
+
+  function clear() {
+    grid.fill(0);
+    age.fill(0);
+    generation = 0;
+    draw();
+  }
+
+  // B3/S23, dead edges, fully simultaneous update via double buffering.
+  function step() {
+    for (var y = 0; y < H; y++) {
+      var row = y * W;
+      for (var x = 0; x < W; x++) {
+        var n = 0;
+        if (y > 0) {
+          if (x > 0)     n += grid[row - W + x - 1];
+          n += grid[row - W + x];
+          if (x < W - 1) n += grid[row - W + x + 1];
+        }
+        if (x > 0)     n += grid[row + x - 1];
+        if (x < W - 1) n += grid[row + x + 1];
+        if (y < H - 1) {
+          if (x > 0)     n += grid[row + W + x - 1];
+          n += grid[row + W + x];
+          if (x < W - 1) n += grid[row + W + x + 1];
+        }
+        var i = row + x;
+        var alive = grid[i];
+        var lives = alive ? (n === 2 || n === 3) : (n === 3);
+        next[i] = lives ? 1 : 0;
+        age[i] = lives ? (alive ? age[i] + 1 : 1) : 0;
+      }
+    }
+    var tmp = grid; grid = next; next = tmp;   // apply all at once
+    generation++;
+    draw();
+  }
+
+  /* ---------------- rendering ---------------- */
+
+  var canvas = document.getElementById('life');
+  var ctx = canvas.getContext('2d');
+  var dpr = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = CSS_SIZE * dpr;
+  canvas.height = CSS_SIZE * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  var genEl = document.getElementById('gen');
+  var popEl = document.getElementById('pop');
+
+  function drawCell(px, py, s) {
+    if (ctx.roundRect) {
+      ctx.beginPath();
+      ctx.roundRect(px, py, s, s, 3);
+      ctx.fill();
+    } else {
+      ctx.fillRect(px, py, s, s);
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = '#0b1020';
+    ctx.fillRect(0, 0, CSS_SIZE, CSS_SIZE);
+
+    ctx.strokeStyle = 'rgba(140, 170, 255, 0.06)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var i = 1; i < W; i++) {
+      ctx.moveTo(i * CELL + 0.5, 0);
+      ctx.lineTo(i * CELL + 0.5, CSS_SIZE);
+    }
+    for (var j = 1; j < H; j++) {
+      ctx.moveTo(0, j * CELL + 0.5);
+      ctx.lineTo(CSS_SIZE, j * CELL + 0.5);
+    }
+    ctx.stroke();
+
+    var pop = 0;
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        var k = y * W + x;
+        if (!grid[k]) continue;
+        pop++;
+        var a = Math.min(age[k], 24);
+        var hue = 165 + a * 5;                 // newborn mint -> aged violet
+        var light = 70 - Math.min(a, 14);
+        ctx.fillStyle = 'hsl(' + hue + ', 90%, ' + light + '%)';
+        drawCell(x * CELL + 1, y * CELL + 1, CELL - 2);
+      }
+    }
+    genEl.textContent = generation;
+    popEl.textContent = pop;
+  }
+
+  /* ---------------- controls ---------------- */
+
+  var timer = null;
+  var playBtn = document.getElementById('play');
+  var speedEl = document.getElementById('speed');
+
+  function play() {
+    if (timer) return;
+    timer = setInterval(step, 1000 / Number(speedEl.value));
+    playBtn.textContent = '⏸ Pause';
+    playBtn.classList.add('active');
+  }
+  function pause() {
+    if (!timer) return;
+    clearInterval(timer);
+    timer = null;
+    playBtn.textContent = '▶ Play';
+    playBtn.classList.remove('active');
+  }
+  function togglePlay() { timer ? pause() : play(); }
+
+  function randomize() {
+    for (var i = 0; i < W * H; i++) {
+      grid[i] = Math.random() < 0.22 ? 1 : 0;
+      age[i] = grid[i];
+    }
+    generation = 0;
+    draw();
+  }
+
+  playBtn.addEventListener('click', function (e) { togglePlay(); e.currentTarget.blur(); });
+  document.getElementById('step').addEventListener('click', function (e) { step(); e.currentTarget.blur(); });
+  document.getElementById('random').addEventListener('click', function (e) { randomize(); e.currentTarget.blur(); });
+  document.getElementById('clear').addEventListener('click', function (e) { clear(); e.currentTarget.blur(); });
+  speedEl.addEventListener('input', function () { if (timer) { pause(); play(); } });
+
+  window.addEventListener('keydown', function (e) {
+    if (e.code === 'Space' && e.target === document.body) {
+      e.preventDefault();
+      togglePlay();
+    }
+  });
+
+  /* ---------------- painting on the grid ---------------- */
+
+  var painting = false;
+  var paintValue = 1;
+  var lastCell = -1;
+
+  function cellFromPoint(clientX, clientY) {
+    var r = canvas.getBoundingClientRect();
+    var x = Math.floor((clientX - r.left) / r.width * W);
+    var y = Math.floor((clientY - r.top) / r.height * H);
+    if (x < 0 || y < 0 || x >= W || y >= H) return null;
+    return { x: x, y: y, i: y * W + x };
+  }
+
+  function beginPaint(c) {
+    painting = true;
+    paintValue = grid[c.i] ? 0 : 1;   // toggle the first cell, then keep painting that value
+    set(c.x, c.y, paintValue);
+    lastCell = c.i;
+  }
+  function continuePaint(c) {
+    if (!c || c.i === lastCell) return;
+    lastCell = c.i;
+    set(c.x, c.y, paintValue);
+  }
+  function endPaint() { painting = false; lastCell = -1; }
+
+  canvas.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var c = cellFromPoint(e.clientX, e.clientY);
+    if (c) beginPaint(c);
+  });
+  window.addEventListener('mousemove', function (e) {
+    if (!painting) return;
+    continuePaint(cellFromPoint(e.clientX, e.clientY));
+  });
+  window.addEventListener('mouseup', endPaint);
+
+  canvas.addEventListener('touchstart', function (e) {
+    e.preventDefault();
+    var t = e.changedTouches[0];
+    var c = cellFromPoint(t.clientX, t.clientY);
+    if (c) beginPaint(c);
+  }, { passive: false });
+  canvas.addEventListener('touchmove', function (e) {
+    e.preventDefault();
+    if (!painting) return;
+    var t = e.changedTouches[0];
+    continuePaint(cellFromPoint(t.clientX, t.clientY));
+  }, { passive: false });
+  canvas.addEventListener('touchend', endPaint);
+  canvas.addEventListener('touchcancel', endPaint);
+
+  // right-click drops a glider, just for fun
+  canvas.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    var c = cellFromPoint(e.clientX, e.clientY);
+    if (!c) return;
+    var glider = [[1, 0], [2, 1], [0, 2], [1, 2], [2, 2]];
+    for (var k = 0; k < glider.length; k++) {
+      set(c.x + glider[k][0], c.y + glider[k][1], 1);
+    }
+  });
+
+  /* ---------------- programmatic API (required) ---------------- */
+
+  window.life = {
+    w: W,
+    h: H,
+    get: get,
+    set: set,
+    step: step,
+    clear: clear
+  };
+
+  draw();
+})();
+</script>
+</body>
+</html>

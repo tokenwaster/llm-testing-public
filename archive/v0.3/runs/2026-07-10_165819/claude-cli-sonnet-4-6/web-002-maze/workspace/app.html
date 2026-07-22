@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Bot Race</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#06060f;color:#c0c0e0;font-family:'Courier New',monospace;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px;gap:14px}
+h1{font-size:1.4rem;letter-spacing:8px;color:#5ac8fa;text-shadow:0 0 20px #5ac8fa66;text-transform:uppercase}
+#hud{display:flex;align-items:center;gap:28px;background:#0a0a1e;border:1px solid #1a1a40;border-radius:8px;padding:10px 28px;box-shadow:0 0 24px #5ac8fa0d}
+.lbl{font-size:.75rem;color:#404080;letter-spacing:2px;text-transform:uppercase;margin-bottom:2px}
+#completed,#timer{font-size:1.5rem;font-weight:bold;color:#5ac8fa;text-shadow:0 0 8px #5ac8fa88}
+.tot{color:#282858;font-size:.9rem}
+#reset{background:#0a1830;color:#5ac8fa;border:1px solid #1a3860;border-radius:6px;padding:8px 20px;font-family:inherit;font-size:.9rem;cursor:pointer;letter-spacing:2px;transition:background .15s}
+#reset:hover{background:#1a3060;box-shadow:0 0 12px #5ac8fa33}
+#maze{display:block;border:1px solid #1a1a40;border-radius:3px;box-shadow:0 0 30px #5ac8fa14}
+</style>
+</head>
+<body>
+<h1>Maze · Bot · Race</h1>
+<div id="hud">
+  <div><div class="lbl">Escaped</div><span id="completed">0</span><span class="tot">/24</span></div>
+  <div><div class="lbl">Time</div><span id="timer">0.0s</span></div>
+  <button id="reset">↺ RESET</button>
+</div>
+<canvas id="maze"></canvas>
+<script>
+(function(){
+'use strict';
+
+const COLS=21,ROWS=21,CELL=23;
+const NUM_BOTS=24,STEP_MS=75;
+const SPAWN_R=0,SPAWN_C=0,EXIT_R=ROWS-1,EXIT_C=COLS-1;
+const DR=[-1,0,1,0],DC=[0,1,0,-1];
+const WN=['N','E','S','W'],ON=['S','W','N','E'];
+const COLORS=[
+  '#ff6b6b','#ffd93d','#6bcb77','#4d96ff',
+  '#ff922b','#cc5de8','#20c997','#f06595',
+  '#74c0fc','#a9e34b','#ffa94d','#e599f7',
+  '#63e6be','#ff8787','#ffe066','#51cf66',
+  '#339af0','#f783ac','#94d82d','#748ffc',
+  '#ff6348','#eccc68','#1dd1a1','#a29bfe'
+];
+
+const canvas=document.getElementById('maze');
+canvas.width=COLS*CELL; canvas.height=ROWS*CELL;
+const ctx=canvas.getContext('2d');
+const completedEl=document.getElementById('completed');
+const timerEl=document.getElementById('timer');
+
+let maze,bots,stepCount,completedCount,startTime,elapsedMs,animId,lastStepTs,rafTs=0;
+
+function shuffle(a){
+  for(let i=a.length-1;i>0;i--){const j=0|Math.random()*(i+1);[a[i],a[j]]=[a[j],a[i]];}
+  return a;
+}
+
+function makeMaze(){
+  const g=Array.from({length:ROWS},()=>Array.from({length:COLS},()=>({N:true,E:true,S:true,W:true})));
+  const vis=Array.from({length:ROWS},()=>new Uint8Array(COLS));
+  const stk=[[0,0]]; vis[0][0]=1;
+  while(stk.length){
+    const[r,c]=stk[stk.length-1];
+    const nb=[];
+    for(let d=0;d<4;d++){const nr=r+DR[d],nc=c+DC[d];if(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS&&!vis[nr][nc])nb.push([nr,nc,d]);}
+    if(!nb.length){stk.pop();continue;}
+    const[nr,nc,d]=nb[0|Math.random()*nb.length];
+    g[r][c][WN[d]]=false; g[nr][nc][ON[d]]=false;
+    vis[nr][nc]=1; stk.push([nr,nc]);
+  }
+  return g;
+}
+
+function bfsPath(g,sr,sc,er,ec){
+  const prev=Array.from({length:ROWS},()=>new Array(COLS).fill(null));
+  const vis=Array.from({length:ROWS},()=>new Uint8Array(COLS));
+  const q=[[sr,sc]]; let qi=0; vis[sr][sc]=1;
+  loop: while(qi<q.length){
+    const[r,c]=q[qi++];
+    for(let d=0;d<4;d++){
+      if(!g[r][c][WN[d]]){
+        const nr=r+DR[d],nc=c+DC[d];
+        if(!vis[nr][nc]){vis[nr][nc]=1;prev[nr][nc]=[r,c];q.push([nr,nc]);if(nr===er&&nc===ec)break loop;}
+      }
+    }
+  }
+  const path=[];let cur=[er,ec];
+  while(cur){path.unshift(cur);const[r,c]=cur;cur=prev[r][c];}
+  return path;
+}
+
+function initGame(){
+  if(animId){cancelAnimationFrame(animId);animId=null;}
+  maze=makeMaze();
+  const base=bfsPath(maze,SPAWN_R,SPAWN_C,EXIT_R,EXIT_C);
+  const delays=shuffle(Array.from({length:NUM_BOTS},(_,i)=>i*2));
+  bots=COLORS.map((color,i)=>({
+    x:SPAWN_C,y:SPAWN_R,
+    path:base,pathIndex:0,
+    delay:delays[i],done:false,color,
+    dispX:SPAWN_C,dispY:SPAWN_R
+  }));
+  stepCount=0;completedCount=0;
+  startTime=performance.now();elapsedMs=0;
+  lastStepTs=startTime;rafTs=0;
+  completedEl.textContent='0';
+  timerEl.textContent='0.0s';
+  animId=requestAnimationFrame(loop);
+}
+
+function doStep(){
+  for(const b of bots){
+    if(b.done||stepCount<b.delay)continue;
+    if(b.pathIndex<b.path.length-1){
+      b.pathIndex++;
+      const[r,c]=b.path[b.pathIndex];
+      b.y=r;b.x=c;
+      if(b.pathIndex===b.path.length-1){b.done=true;completedCount++;}
+    }
+  }
+  stepCount++;
+}
+
+function tick(n){
+  for(let i=0;i<n;i++){if(completedCount>=NUM_BOTS)break;doStep();}
+  for(const b of bots){b.dispX=b.x;b.dispY=b.y;}
+  completedEl.textContent=String(completedCount);
+  draw();
+}
+
+function draw(){
+  ctx.fillStyle='#06060f';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  // spawn highlight
+  ctx.fillStyle='rgba(255,210,60,.12)';
+  ctx.fillRect(SPAWN_C*CELL,SPAWN_R*CELL,CELL,CELL);
+  // exit highlight
+  ctx.fillStyle='rgba(80,255,140,.18)';
+  ctx.fillRect(EXIT_C*CELL,EXIT_R*CELL,CELL,CELL);
+
+  // walls: draw N+W per cell; S for last row; E for last col
+  ctx.strokeStyle='#2a5898';ctx.lineWidth=1.5;ctx.lineCap='square';
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      const x=c*CELL,y=r*CELL,cl=maze[r][c];
+      ctx.beginPath();
+      if(cl.N){ctx.moveTo(x,y);ctx.lineTo(x+CELL,y);}
+      if(cl.W){ctx.moveTo(x,y);ctx.lineTo(x,y+CELL);}
+      if(r===ROWS-1&&cl.S){ctx.moveTo(x,y+CELL);ctx.lineTo(x+CELL,y+CELL);}
+      if(c===COLS-1&&cl.E){ctx.moveTo(x+CELL,y);ctx.lineTo(x+CELL,y+CELL);}
+      ctx.stroke();
+    }
+  }
+
+  // exit diamond
+  const ex=EXIT_C*CELL+CELL/2,ey=EXIT_R*CELL+CELL/2,ed=CELL*.38;
+  ctx.beginPath();
+  ctx.moveTo(ex,ey-ed);ctx.lineTo(ex+ed,ey);
+  ctx.lineTo(ex,ey+ed);ctx.lineTo(ex-ed,ey);ctx.closePath();
+  ctx.fillStyle='#40ff90';ctx.fill();
+
+  // completed badge above exit
+  if(completedCount>0){
+    ctx.font='bold '+(CELL*.42|0)+'px Courier New';
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillStyle='#40ff90';
+    ctx.fillText('+'+completedCount,ex,ey-CELL*.9);
+  }
+
+  // spawn square
+  const ss=CELL*.3,sx=SPAWN_C*CELL+CELL/2,sy=SPAWN_R*CELL+CELL/2;
+  ctx.fillStyle='#ffd93d';
+  ctx.fillRect(sx-ss,sy-ss,ss*2,ss*2);
+
+  // bots
+  const baseRad=CELL*.3;
+  for(let i=0;i<bots.length;i++){
+    const b=bots[i];if(b.done)continue;
+    const bx=b.dispX*CELL+CELL/2,by=b.dispY*CELL+CELL/2;
+    const pulse=1+.1*Math.sin(rafTs*.005+i*.65);
+    const r=baseRad*pulse;
+
+    // glow
+    const grd=ctx.createRadialGradient(bx,by,0,bx,by,r*2.8);
+    grd.addColorStop(0,b.color+'99');grd.addColorStop(1,'transparent');
+    ctx.beginPath();ctx.arc(bx,by,r*2.8,0,Math.PI*2);
+    ctx.fillStyle=grd;ctx.fill();
+
+    // body
+    ctx.beginPath();ctx.arc(bx,by,r,0,Math.PI*2);
+    ctx.fillStyle=b.color;ctx.fill();
+
+    // eyes
+    const er=r*.22;
+    ctx.fillStyle='#0009';
+    ctx.beginPath();
+    ctx.arc(bx-r*.32,by-r*.2,er,0,Math.PI*2);
+    ctx.arc(bx+r*.32,by-r*.2,er,0,Math.PI*2);
+    ctx.fill();
+  }
+}
+
+function loop(ts){
+  rafTs=ts;
+  elapsedMs=ts-startTime;
+  timerEl.textContent=(elapsedMs/1e3).toFixed(1)+'s';
+  completedEl.textContent=String(completedCount);
+
+  if(completedCount<NUM_BOTS&&ts-lastStepTs>=STEP_MS){
+    doStep();lastStepTs=ts;
+  }
+
+  // lerp display positions
+  for(const b of bots){
+    if(!b.done){b.dispX+=(b.x-b.dispX)*.25;b.dispY+=(b.y-b.dispY)*.25;}
+  }
+
+  draw();
+  animId=requestAnimationFrame(loop);
+}
+
+document.getElementById('reset').addEventListener('click',initGame);
+initGame();
+
+window.game={
+  get bots(){return bots;},
+  get completed(){return completedCount;},
+  get elapsedMs(){return elapsedMs;},
+  tick(n){tick(n);},
+  reset(){initGame();}
+};
+
+})();
+</script>
+</body>
+</html>

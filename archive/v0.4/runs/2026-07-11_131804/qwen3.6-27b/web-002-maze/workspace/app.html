@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maze Bot Race</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 1.6rem;
+    margin-bottom: 12px;
+    color: #00d4ff;
+    text-shadow: 0 0 10px rgba(0,212,255,0.3);
+    letter-spacing: 2px;
+  }
+  #hud {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+    margin-bottom: 14px;
+    background: #16213e;
+    padding: 10px 24px;
+    border-radius: 10px;
+    border: 1px solid #0f3460;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+  }
+  #hud span {
+    font-size: 1.05rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  #completed { color: #00e676; }
+  #timer { color: #ffab40; }
+  #reset {
+    background: #e94560;
+    color: #fff;
+    border: none;
+    padding: 8px 22px;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s;
+  }
+  #reset:hover { background: #ff6b81; transform: scale(1.05); }
+  #reset:active { transform: scale(0.97); }
+  #maze {
+    border: 2px solid #0f3460;
+    border-radius: 6px;
+    box-shadow: 0 0 30px rgba(0,212,255,0.15);
+    background: #0a0a1a;
+  }
+  #legend {
+    margin-top: 12px;
+    font-size: 0.85rem;
+    color: #888;
+    display: flex;
+    gap: 18px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-dot {
+    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+  }
+</style>
+</head>
+<body>
+
+<h1>⚡ MAZE BOT RACE ⚡</h1>
+
+<div id="hud">
+  <span id="completed">Completed: 0 / 24</span>
+  <span id="timer">Time: 0.0s</span>
+  <button id="reset">⟳ Reset</button>
+</div>
+
+<canvas id="maze" width="420" height="420"></canvas>
+
+<div id="legend">
+  <span class="legend-item"><span class="legend-dot" style="background:#00e676"></span> Spawn</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#ff1744"></span> Exit</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#ffd600"></span> Bots</span>
+</div>
+
+<script>
+(function() {
+  "use strict";
+
+  // ── Constants ──
+  const COLS = 21;
+  const ROWS = 21;
+  const CELL = 20;
+  const CANVAS_SIZE = COLS * CELL; // 420
+  const NUM_BOTS = 24;
+  const TICK_INTERVAL = 120; // ms per tick for animation
+
+  // ── Canvas setup ──
+  const canvas = document.getElementById("maze");
+  const ctx = canvas.getContext("2d");
+  canvas.width = CANVAS_SIZE;
+  canvas.height = CANVAS_SIZE;
+
+  // ── HUD elements ──
+  const completedEl = document.getElementById("completed");
+  const timerEl = document.getElementById("timer");
+  const resetBtn = document.getElementById("reset");
+
+  // ── Maze data ──
+  // Each cell: { top, right, bottom, left } wall booleans
+  let maze = [];
+  let spawnX, spawnY, exitX, exitY;
+
+  // ── Bot data ──
+  let bots = [];
+  let completedCount = 0;
+  let startTime = 0;
+  let elapsedMs = 0;
+  let animFrameId = null;
+  let lastTickTime = 0;
+  let running = false;
+
+  // ── Maze Generation (Iterative DFS / Recursive Backtracker) ──
+  function generateMaze() {
+    maze = [];
+    for (let r = 0; r < ROWS; r++) {
+      maze[r] = [];
+      for (let c = 0; c < COLS; c++) {
+        maze[r][c] = { top: true, right: true, bottom: true, left: true, visited: false };
+      }
+    }
+
+    const stack = [];
+    const startR = 0, startC = 0;
+    maze[startR][startC].visited = true;
+    stack.push({ r: startR, c: startC });
+
+    while (stack.length > 0) {
+      const current = stack[stack.length - 1];
+      const neighbors = getUnvisitedNeighbors(current.r, current.c);
+
+      if (neighbors.length > 0) {
+        const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+        removeWall(current.r, current.c, next.r, next.c);
+        maze[next.r][next.c].visited = true;
+        stack.push({ r: next.r, c: next.c });
+      } else {
+        stack.pop();
+      }
+    }
+
+    // Spawn at top-left, exit at bottom-right
+    spawnX = 0;
+    spawnY = 0;
+    exitX = COLS - 1;
+    exitY = ROWS - 1;
+  }
+
+  function getUnvisitedNeighbors(r, c) {
+    const result = [];
+    if (r > 0 && !maze[r-1][c].visited) result.push({ r: r-1, c: c });
+    if (r < ROWS-1 && !maze[r+1][c].visited) result.push({ r: r+1, c: c });
+    if (c > 0 && !maze[r][c-1].visited) result.push({ r: r, c: c-1 });
+    if (c < COLS-1 && !maze[r][c+1].visited) result.push({ r: r, c: c+1 });
+    return result;
+  }
+
+  function removeWall(r1, c1, r2, c2) {
+    if (r2 === r1 - 1) { maze[r1][c1].top = false; maze[r2][c2].bottom = false; }
+    if (r2 === r1 + 1) { maze[r1][c1].bottom = false; maze[r2][c2].top = false; }
+    if (c2 === c1 - 1) { maze[r1][c1].left = false; maze[r2][c2].right = false; }
+    if (c2 === c1 + 1) { maze[r1][c1].right = false; maze[r2][c2].left = false; }
+  }
+
+  // ── BFS Pathfinding ──
+  function bfsPath(sx, sy, ex, ey) {
+    const visited = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
+    const parent = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+    const queue = [{ x: sx, y: sy }];
+    visited[sy][sx] = true;
+
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      if (cur.x === ex && cur.y === ey) {
+        // Reconstruct path
+        const path = [];
+        let node = cur;
+        while (node) {
+          path.push({ x: node.x, y: node.y });
+          node = parent[node.y][node.x];
+        }
+        path.reverse();
+        return path;
+      }
+
+      const cell = maze[cur.y][cur.x];
+      const dirs = [];
+      if (!cell.top) dirs.push({ x: cur.x, y: cur.y - 1 });
+      if (!cell.bottom) dirs.push({ x: cur.x, y: cur.y + 1 });
+      if (!cell.left) dirs.push({ x: cur.x - 1, y: cur.y });
+      if (!cell.right) dirs.push({ x: cur.x + 1, y: cur.y });
+
+      for (const d of dirs) {
+        if (d.x >= 0 && d.x < COLS && d.y >= 0 && d.y < ROWS && !visited[d.y][d.x]) {
+          visited[d.y][d.x] = true;
+          parent[d.y][d.x] = cur;
+          queue.push(d);
+        }
+      }
+    }
+    return null;
+  }
+
+  // ── Bot initialization ──
+  function initBots() {
+    const basePath = bfsPath(spawnX, spawnY, exitX, exitY);
+    if (!basePath) {
+      console.error("No path found! Regenerating maze...");
+      generateMaze();
+      return initBots();
+    }
+
+    bots = [];
+    for (let i = 0; i < NUM_BOTS; i++) {
+      // Each bot gets a path; we add slight variation by sometimes taking
+      // alternative routes. For simplicity, all bots follow the BFS path
+      // but with staggered start delays.
+      const delay = Math.floor(Math.random() * 15) + i * 2; // stagger
+      bots.push({
+        x: spawnX,
+        y: spawnY,
+        path: basePath.slice(),
+        pathIndex: 0,
+        delay: delay,
+        stepsRemaining: delay,
+        finished: false,
+        color: getBotColor(i)
+      });
+    }
+    completedCount = 0;
+  }
+
+  function getBotColor(i) {
+    const hue = (i * 15 + 30) % 360;
+    return `hsl(${hue}, 90%, 60%)`;
+  }
+
+  // ── Tick logic ──
+  function tickOnce() {
+    let anyFinished = false;
+    for (let i = 0; i < bots.length; i++) {
+      const bot = bots[i];
+      if (bot.finished) continue;
+
+      if (bot.stepsRemaining > 0) {
+        bot.stepsRemaining--;
+        continue;
+      }
+
+      if (bot.pathIndex < bot.path.length - 1) {
+        bot.pathIndex++;
+        bot.x = bot.path[bot.pathIndex].x;
+        bot.y = bot.path[bot.pathIndex].y;
+      }
+
+      if (bot.x === exitX && bot.y === exitY) {
+        bot.finished = true;
+        completedCount++;
+        anyFinished = true;
+      }
+    }
+    return anyFinished;
+  }
+
+  function tick(n) {
+    for (let i = 0; i < n; i++) {
+      tickOnce();
+      if (completedCount >= NUM_BOTS) break;
+    }
+    updateHUD();
+  }
+
+  // ── Rendering ──
+  function drawMaze() {
+    ctx.fillStyle = "#0a0a1a";
+    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+    // Draw cells (floor)
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        ctx.fillStyle = "#12122a";
+        ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+      }
+    }
+
+    // Draw spawn
+    ctx.fillStyle = "rgba(0, 230, 118, 0.25)";
+    ctx.fillRect(spawnX * CELL, spawnY * CELL, CELL, CELL);
+
+    // Draw exit
+    ctx.fillStyle = "rgba(255, 23, 68, 0.25)";
+    ctx.fillRect(exitX * CELL, exitY * CELL, CELL, CELL);
+
+    // Draw walls
+    ctx.strokeStyle = "#3a3a6e";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const cell = maze[r][c];
+        const x = c * CELL;
+        const y = r * CELL;
+
+        if (cell.top) {
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + CELL, y);
+        }
+        if (cell.right) {
+          ctx.moveTo(x + CELL, y);
+          ctx.lineTo(x + CELL, y + CELL);
+        }
+        if (cell.bottom) {
+          ctx.moveTo(x, y + CELL);
+          ctx.lineTo(x + CELL, y + CELL);
+        }
+        if (cell.left) {
+          ctx.moveTo(x, y);
+          ctx.lineTo(x, y + CELL);
+        }
+      }
+    }
+    ctx.stroke();
+
+    // Draw spawn marker
+    ctx.fillStyle = "#00e676";
+    ctx.beginPath();
+    ctx.arc(spawnX * CELL + CELL/2, spawnY * CELL + CELL/2, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Draw exit marker
+    ctx.fillStyle = "#ff1744";
+    ctx.beginPath();
+    ctx.arc(exitX * CELL + CELL/2, exitY * CELL + CELL/2, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Draw bots
+    for (let i = 0; i < bots.length; i++) {
+      const bot = bots[i];
+      if (bot.finished) continue;
+
+      const cx = bot.x * CELL + CELL / 2;
+      const cy = bot.y * CELL + CELL / 2;
+
+      // Glow
+      ctx.shadowColor = bot.color;
+      ctx.shadowBlur = 6;
+      ctx.fillStyle = bot.color;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Inner highlight
+      ctx.fillStyle = "rgba(255,255,255,0.5)";
+      ctx.beginPath();
+      ctx.arc(cx - 1, cy - 1, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ── HUD update ──
+  function updateHUD() {
+    completedEl.textContent = `Completed: ${completedCount} / ${NUM_BOTS}`;
+    const seconds = (elapsedMs / 1000).toFixed(1);
+    timerEl.textContent = `Time: ${seconds}s`;
+  }
+
+  // ── Animation loop ──
+  function gameLoop(timestamp) {
+    if (!running) return;
+
+    if (!startTime) startTime = timestamp;
+    elapsedMs = timestamp - startTime;
+
+    if (timestamp - lastTickTime >= TICK_INTERVAL) {
+      tickOnce();
+      lastTickTime = timestamp;
+    }
+
+    elapsedMs = performance.now() - startTime;
+    updateHUD();
+    drawMaze();
+
+    if (completedCount < NUM_BOTS) {
+      animFrameId = requestAnimationFrame(gameLoop);
+    } else {
+      running = false;
+      drawMaze();
+      updateHUD();
+    }
+  }
+
+  // ── Reset ──
+  function reset() {
+    running = false;
+    if (animFrameId) cancelAnimationFrame(animFrameId);
+    animFrameId = null;
+
+    generateMaze();
+    initBots();
+    startTime = 0;
+    elapsedMs = 0;
+    lastTickTime = 0;
+    completedCount = 0;
+
+    updateHUD();
+    drawMaze();
+
+    // Start animation after a brief delay
+    setTimeout(() => {
+      running = true;
+      startTime = performance.now();
+      lastTickTime = startTime;
+      animFrameId = requestAnimationFrame(gameLoop);
+    }, 50);
+  }
+
+  // ── Expose API ──
+  window.game = {
+    get bots() { return bots; },
+    get completed() { return completedCount; },
+    get elapsedMs() { return elapsedMs; },
+    tick: tick,
+    reset: reset
+  };
+
+  // ── Button handler ──
+  resetBtn.addEventListener("click", reset);
+
+  // ── Initial start ──
+  reset();
+
+})();
+</script>
+</body>
+</html>

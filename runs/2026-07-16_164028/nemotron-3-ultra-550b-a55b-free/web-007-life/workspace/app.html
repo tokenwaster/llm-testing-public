@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conway's Game of Life</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #0d0d0d;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    overflow: hidden;
+  }
+  h1 {
+    font-size: 1.8rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    margin-bottom: 1rem;
+    background: linear-gradient(90deg, #00ff88, #00ccff, #ff00aa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  #life {
+    border: 2px solid #222;
+    border-radius: 8px;
+    box-shadow: 0 0 30px rgba(0, 255, 136, 0.15), inset 0 0 60px rgba(0, 0, 0, 0.5);
+    background: #111;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  #life:hover { border-color: #00ff88; box-shadow: 0 0 40px rgba(0, 255, 136, 0.3), inset 0 0 60px rgba(0, 0, 0, 0.5); }
+  .controls {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1.25rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    padding: 0.7rem 1.4rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    text-transform: uppercase;
+  }
+  button:focus-visible { outline: 2px solid #00ff88; outline-offset: 2px; }
+  #step { background: #1a1a1a; color: #00ff88; border: 1px solid #00ff88; }
+  #step:hover { background: #00ff88; color: #0d0d0d; transform: translateY(-1px); }
+  #play { background: linear-gradient(135deg, #00cc66, #00ff88); color: #0d0d0d; }
+  #play:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0, 255, 136, 0.4); }
+  #play.running { background: linear-gradient(135deg, #ff4444, #ff6666); }
+  #random { background: #1a1a1a; color: #00ccff; border: 1px solid #00ccff; }
+  #random:hover { background: #00ccff; color: #0d0d0d; transform: translateY(-1px); }
+  #clear { background: #1a1a1a; color: #ff4444; border: 1px solid #ff4444; }
+  #clear:hover { background: #ff4444; color: #0d0d0d; transform: translateY(-1px); }
+  .stats {
+    margin-top: 1rem;
+    font-size: 0.85rem;
+    color: #666;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .stats span { color: #00ff88; font-weight: 600; }
+  @media (max-width: 640px) {
+    #life { width: 95vw; height: 95vw; max-width: 400px; max-height: 400px; }
+    h1 { font-size: 1.4rem; }
+    button { padding: 0.6rem 1rem; font-size: 0.85rem; }
+  }
+</style>
+</head>
+<body>
+<h1>Conway's Game of Life</h1>
+<canvas id="life" width="600" height="600"></canvas>
+<div class="controls">
+  <button id="step">Step</button>
+  <button id="play">Play</button>
+  <button id="random">Random</button>
+  <button id="clear">Clear</button>
+</div>
+<div class="stats">Generation: <span id="gen">0</span> | Population: <span id="pop">0</span></div>
+
+<script>
+(() => {
+  const CELL_SIZE = 10;
+  const GRID_W = 60;
+  const GRID_H = 60;
+  const CANVAS_SIZE = 600;
+
+  const canvas = document.getElementById('life');
+  const ctx = canvas.getContext('2d');
+  const stepBtn = document.getElementById('step');
+  const playBtn = document.getElementById('play');
+  const randomBtn = document.getElementById('random');
+  const clearBtn = document.getElementById('clear');
+  const genEl = document.getElementById('gen');
+  const popEl = document.getElementById('pop');
+
+  let current = new Uint8Array(GRID_W * GRID_H);
+  let next = new Uint8Array(GRID_W * GRID_H);
+  let generation = 0;
+  let running = false;
+  let rafId = null;
+  let lastPaint = 0;
+  let isDrawing = false;
+  let lastDrawValue = null;
+
+  function idx(x, y) { return y * GRID_W + x; }
+
+  function inBounds(x, y) { return x >= 0 && x < GRID_W && y >= 0 && y < GRID_H; }
+
+  function getCell(x, y) {
+    if (!inBounds(x, y)) return 0;
+    return current[idx(x, y)];
+  }
+
+  function setCell(x, y, v) {
+    if (!inBounds(x, y)) return;
+    current[idx(x, y)] = v ? 1 : 0;
+  }
+
+  function countNeighbors(x, y) {
+    let count = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx, ny = y + dy;
+        if (inBounds(nx, ny) && current[idx(nx, ny)]) count++;
+      }
+    }
+    return count;
+  }
+
+  function computeNext() {
+    let pop = 0;
+    for (let y = 0; y < GRID_H; y++) {
+      for (let x = 0; x < GRID_W; x++) {
+        const i = idx(x, y);
+        const alive = current[i];
+        const n = countNeighbors(x, y);
+        let nextState = 0;
+        if (alive) {
+          if (n === 2 || n === 3) nextState = 1;
+        } else {
+          if (n === 3) nextState = 1;
+        }
+        next[i] = nextState;
+        if (nextState) pop++;
+      }
+    }
+    return pop;
+  }
+
+  function swapBuffers() {
+    const tmp = current;
+    current = next;
+    next = tmp;
+  }
+
+  function step() {
+    const pop = computeNext();
+    swapBuffers();
+    generation++;
+    draw();
+    updateStats(pop);
+  }
+
+  function draw() {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+    ctx.fillStyle = '#00ff88';
+    for (let y = 0; y < GRID_H; y++) {
+      const base = y * GRID_W;
+      for (let x = 0; x < GRID_W; x++) {
+        if (current[base + x]) {
+          ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE - 1, CELL_SIZE - 1);
+        }
+      }
+    }
+
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i <= GRID_W; i++) {
+      const pos = i * CELL_SIZE;
+      ctx.beginPath();
+      ctx.moveTo(pos, 0);
+      ctx.lineTo(pos, CANVAS_SIZE);
+      ctx.stroke();
+    }
+    for (let i = 0; i <= GRID_H; i++) {
+      const pos = i * CELL_SIZE;
+      ctx.beginPath();
+      ctx.moveTo(0, pos);
+      ctx.lineTo(CANVAS_SIZE, pos);
+      ctx.stroke();
+    }
+  }
+
+  function updateStats(pop) {
+    genEl.textContent = generation;
+    popEl.textContent = pop;
+  }
+
+  function clear() {
+    current.fill(0);
+    next.fill(0);
+    generation = 0;
+    draw();
+    updateStats(0);
+  }
+
+  function randomize() {
+    for (let i = 0; i < current.length; i++) {
+      current[i] = Math.random() < 0.3 ? 1 : 0;
+    }
+    generation = 0;
+    draw();
+    updateStats(current.reduce((a, b) => a + b, 0));
+  }
+
+  function togglePlay() {
+    running = !running;
+    playBtn.textContent = running ? 'Pause' : 'Play';
+    playBtn.classList.toggle('running', running);
+    if (running) {
+      lastPaint = performance.now();
+      loop();
+    } else if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
+  function loop(now) {
+    if (!running) return;
+    if (now - lastPaint >= 100) {
+      step();
+      lastPaint = now;
+    }
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function canvasToGrid(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((clientX - rect.left) / (rect.width / GRID_W));
+    const y = Math.floor((clientY - rect.top) / (rect.height / GRID_H));
+    return { x, y };
+  }
+
+  function handlePointer(e) {
+    const { x, y } = canvasToGrid(e.clientX, e.clientY);
+    if (inBounds(x, y)) {
+      const i = idx(x, y);
+      if (lastDrawValue === null) {
+        lastDrawValue = current[i] ? 0 : 1;
+      }
+      current[i] = lastDrawValue;
+      draw();
+      updateStats(current.reduce((a, b) => a + b, 0));
+    }
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    isDrawing = true;
+    lastDrawValue = null;
+    handlePointer(e);
+  });
+  canvas.addEventListener('mousemove', (e) => {
+    if (isDrawing) handlePointer(e);
+  });
+  window.addEventListener('mouseup', () => {
+    isDrawing = false;
+    lastDrawValue = null;
+  });
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    isDrawing = true;
+    lastDrawValue = null;
+    handlePointer(e.touches[0]);
+  }, { passive: false });
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (isDrawing) handlePointer(e.touches[0]);
+  }, { passive: false });
+  canvas.addEventListener('touchend', () => {
+    isDrawing = false;
+    lastDrawValue = null;
+  });
+
+  stepBtn.addEventListener('click', step);
+  playBtn.addEventListener('click', togglePlay);
+  randomBtn.addEventListener('click', randomize);
+  clearBtn.addEventListener('click', clear);
+
+  window.life = {
+    w: GRID_W,
+    h: GRID_H,
+    get: getCell,
+    set: setCell,
+    step,
+    clear
+  };
+
+  draw();
+  updateStats(0);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Spreadsheet</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background-color: #f4f4f9;
+        }
+        #app-container {
+            min-width: 650px;
+            min-height: 450px;
+            background: white;
+            padding: 20px;
+            border: 1px solid #ccc;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .grid-wrapper {
+            display: inline-block;
+            border: 1px solid #999;
+        }
+        .header-row {
+            display: flex;
+            background: #e0e0e0;
+        }
+        .header-cell {
+            width: 40px;
+            height: 30px;
+            border: 1px solid #999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        .data-row {
+            display: flex;
+        }
+        .row-label {
+            width: 40px;
+            height: 30px;
+            border: 1px solid #999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #e0e0e0;
+        }
+        input {
+            width: 80px;
+            height: 30px;
+            border: 1px solid #ccc;
+            text-align: center;
+            box-sizing: border-box;
+            padding: 2px;
+            font-size: 14px;
+        }
+        input:focus {
+            outline: 2px solid #007bff;
+            z-index: 10;
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 100%;
+        }
+        textarea#csv {
+            width: 100%;
+            height: 100px;
+            font-family: monospace;
+        }
+        button {
+            padding: 10px 20px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+<div id="app-container">
+    <h2>Mini Spreadsheet</h2>
+    <div class="grid-wrapper" id="spreadsheet-grid"></div>
+    
+    <div class="controls">
+        <button id="export">Export CSV</button>
+        <textarea id="csv" placeholder="CSV output will appear here..."></textarea>
+    </div>
+</div>
+
+<script>
+    const data = {}; // Raw values: { "A1": "=A2+B2", ... }
+    const computed = {}; // Computed results: { "A1": "5", ... }
+
+    // Initialize grid structure
+    const gridEl = document.getElementById('spreadsheet-grid');
+    
+    // Create Header Row (Empty corner, A-J)
+    const headerRow = document.createElement('div');
+    headerRow.className = 'header-row';
+    const corner = document.createElement('div');
+    corner.className = 'header-cell';
+    headerRow.appendChild(corner);
+    for (let i = 0; i < 10; i++) {
+        const cell = document.createElement('div');
+        cell.className = 'header-cell';
+        cell.textContent = String.fromCharCode(65 + i);
+        headerRow.appendChild(cell);
+    }
+    gridEl.appendChild(headerRow);
+
+    // Create 10 Rows
+    for (let r = 1; r <= 10; r++) {
+        const row = document.createElement('div');
+        row.className = 'data-row';
+        
+        const label = document.createElement('div');
+        label.className = 'row-label';
+        label.textContent = r;
+        row.appendChild(label);
+
+        for (let c = 0; c < 10; c++) {
+            const id = String.fromCharCode(65 + c) + r;
+            data[id] = "";
+            computed[id] = "";
+            
+            const input = document.createElement('input');
+            input.id = `cell-${id}`;
+            input.dataset.id = id;
+            
+            input.addEventListener('focus', (e) => {
+                e.target.value = data[id];
+            });
+
+            input.addEventListener('blur', (e) => {
+                data[id] = e.target.value;
+                recalculateAll();
+                updateDisplay();
+            });
+
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.target.blur();
+                }
+            });
+
+            row.appendChild(input);
+        }
+        gridEl.appendChild(row);
+    }
+
+    function mathEval(str) {
+        str = str.replace(/\s+/g, '');
+        let pos = 0;
+
+        function parseExpression() {
+            let node = parseTerm();
+            while (pos < str.length && (str[pos] === '+' || str[pos] === '-')) {
+                let op = str[pos++];
+                let right = parseTerm();
+                node = op === '+' ? node + right : node - right;
+            }
+            return node;
+        }
+
+        function parseTerm() {
+            let node = parseFactor();
+            while (pos < str.length && (str[pos] === '*' || str[pos] === '/')) {
+                let op = str[pos++];
+                let right = parseFactor();
+                if (op === '*') node *= right;
+                else {
+                    if (right === 0) throw new Error("DivByZero");
+                    node /= right;
+                }
+            }
+            return node;
+        }
+
+        function parseFactor() {
+            if (str[pos] === '-') { pos++; return -parseFactor(); }
+            if (str[pos] === '+') { pos++; return parseFactor(); }
+            if (str[pos] === '(') {
+                pos++;
+                let node = parseExpression();
+                pos++; // skip )
+                return node;
+            }
+            let start = pos;
+            while (pos < str.length && /[0-9.]/.test(str[pos])) {
+                pos++;
+            }
+            let numStr = str.substring(start, pos);
+            if (numStr === "" || numStr === ".") throw new Error("Invalid");
+            return parseFloat(numStr);
+        }
+
+        const result = parseExpression();
+        if (pos < str.length) throw new Error("Leftover");
+        return result;
+    }
+
+    function getComputedValue(id, path = new Set()) {
+        if (path.has(id)) return "#CYCLE";
+        path.add(id);
+
+        const raw = data[id] || "";
+        if (!raw.startsWith("=")) {
+            computed[id] = raw;
+            return raw;
+        }
+
+        let expr = raw.substring(1);
+        // Replace cell references A1-J10
+        let processedExpr = expr.replace(/[A-J][0-9]+/g, (match) => {
+            if (!(match in data)) return "#ERR";
+            const val = getComputedValue(match, new Set(path));
+            if (val === "#CYCLE") return "#CYCLE";
+            if (val === "#ERR") return "#ERR";
+            if (val === "") return "0";
+            return val;
+        });
+
+        if (processedExpr.includes("#CYCLE")) {
+            computed[id] = "#CYCLE";
+            return "#CYCLE";
+        }
+        if (processedExpr.includes("#ERR")) {
+            computed[id] = "#ERR";
+            return "#ERR";
+        }
+
+        try {
+            const result = mathEval(processedExpr);
+            if (isNaN(result) || !isFinite(result)) {
+                computed[id] = "#ERR";
+                return "#ERR";
+            }
+            computed[id] = result.toString();
+            return computed[id];
+        } catch (e) {
+            computed[id] = "#ERR";
+            return "#ERR";
+        }
+    }
+
+    function recalculateAll() {
+        for (let id in data) {
+            getComputedValue(id);
+        }
+    }
+
+    function updateDisplay() {
+        for (let id in data) {
+            const input = document.getElementById(`cell-${id}`);
+            if (input && document.activeElement !== input) {
+                input.value = computed[id];
+            }
+        }
+    }
+
+    // Initial calculation
+    recalculateAll();
+
+    // Scripting API
+    window.sheet = {
+        set: function(id, val) {
+            if (data.hasOwnProperty(id)) {
+                data[id] = val;
+                recalculateAll();
+                updateDisplay();
+            }
+        },
+        get: function(id) {
+            return computed[id] !== undefined ? computed[id] : "";
+        },
+        raw: function(id) {
+            return data[id] || "";
+        }
+    };
+
+    // Export CSV logic
+    document.getElementById('export').addEventListener('click', () => {
+        let csv = "";
+        for (let r = 1; r <= 10; r++) {
+            let row = [];
+            for (let c = 0; c < 10; c++) {
+                let id = String.fromCharCode(65 + c) + r;
+                row.push(computed[id] || "");
+            }
+            csv += row.join(",") + "\n";
+        }
+        document.getElementById('csv').value = csv.trim();
+    });
+
+</script>
+</body>
+</html>

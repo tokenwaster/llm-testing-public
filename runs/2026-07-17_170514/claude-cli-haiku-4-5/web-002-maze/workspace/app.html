@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        #maze {
+            background: white;
+            margin: 20px 0;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            display: block;
+        }
+        .controls {
+            margin: 20px 0;
+            font-size: 18px;
+        }
+        .stat {
+            display: inline-block;
+            margin-right: 40px;
+            font-weight: bold;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <span class="stat">Completed: <span id="completed">0</span>/24</span>
+        <span class="stat">Time: <span id="timer">0</span></span>
+        <button id="reset">Reset</button>
+    </div>
+    <canvas id="maze" width="800" height="800"></canvas>
+
+    <script>
+        class SeededRandom {
+            constructor(seed) {
+                this.seed = seed;
+            }
+            next() {
+                this.seed = (this.seed * 9301 + 49297) % 233280;
+                return this.seed / 233280;
+            }
+            nextInt(max) {
+                return Math.floor(this.next() * max);
+            }
+            shuffle(arr) {
+                const copy = arr.slice();
+                for (let i = copy.length - 1; i > 0; i--) {
+                    const j = this.nextInt(i + 1);
+                    [copy[i], copy[j]] = [copy[j], copy[i]];
+                }
+                return copy;
+            }
+        }
+
+        function generateMaze(rows, cols, seed) {
+            const rng = new SeededRandom(seed);
+            const maze = Array(rows).fill().map(() => Array(cols).fill().map(() => ({
+                n: true, e: true, s: true, w: true
+            })));
+
+            function carvePath(r, c, visited) {
+                visited[r][c] = true;
+                const dirs = [
+                    {dr: -1, dc: 0, wall: 'n', opposite: 's'},
+                    {dr: 0, dc: 1, wall: 'e', opposite: 'w'},
+                    {dr: 1, dc: 0, wall: 's', opposite: 'n'},
+                    {dr: 0, dc: -1, wall: 'w', opposite: 'e'}
+                ];
+                const order = rng.shuffle(dirs);
+                for (const dir of order) {
+                    const nr = r + dir.dr, nc = c + dir.dc;
+                    if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) {
+                        maze[r][c][dir.wall] = false;
+                        maze[nr][nc][dir.opposite] = false;
+                        carvePath(nr, nc, visited);
+                    }
+                }
+            }
+            const visited = Array(rows).fill().map(() => Array(cols).fill(false));
+            carvePath(0, 0, visited);
+            return maze;
+        }
+
+        class Bot {
+            constructor(r, c, maze, botIndex, size) {
+                this.r = r;
+                this.c = c;
+                this.maze = maze;
+                this.size = size;
+                this.path = [{r, c}];
+                this.deadEnds = [];
+                this.finishTick = null;
+                this.edgeVisits = new Map();
+                
+                const rng = new SeededRandom(botIndex + 1000);
+                const base = rng.nextInt(4);
+                this.dirOrder = [base, (base+1)%4, (base+2)%4, (base+3)%4];
+            }
+            
+            edgeKey(r1, c1, r2, c2) {
+                const minR = Math.min(r1, r2), minC = Math.min(c1, c2);
+                const maxR = Math.max(r1, r2), maxC = Math.max(c1, c2);
+                return `${minR},${minC},${maxR},${maxC}`;
+            }
+            
+            canMove(nr, nc) {
+                if (nr < 0 || nr >= this.size.rows || nc < 0 || nc >= this.size.cols) return false;
+                const dr = nr - this.r, dc = nc - this.c;
+                const wallDir = dr === -1 ? 'n' : dr === 1 ? 's' : dc === -1 ? 'w' : 'e';
+                return !this.maze[this.r][this.c][wallDir];
+            }
+            
+            getNeighbors() {
+                const dirs = [[-1, 0, 0], [1, 0, 2], [0, -1, 3], [0, 1, 1]];
+                const neighbors = [];
+                for (const [dr, dc, dirIdx] of dirs) {
+                    const nr = this.r + dr, nc = this.c + dc;
+                    if (this.canMove(nr, nc)) {
+                        const key = this.edgeKey(this.r, this.c, nr, nc);
+                        const visits = this.edgeVisits.get(key) || 0;
+                        neighbors.push({nr, nc, key, visits, dirIdx});
+                    }
+                }
+                return neighbors;
+            }
+            
+            tick() {
+                const neighbors = this.getNeighbors();
+                
+                // Trémaux: prefer unvisited, then single visit, then by direction preference
+                neighbors.sort((a, b) => {
+                    if (a.visits !== b.visits) return a.visits - b.visits;
+                    return this.dirOrder.indexOf(a.dirIdx) - this.dirOrder.indexOf(b.dirIdx);
+                });
+                
+                if (neighbors.length > 0 && neighbors[0].visits < 2) {
+                    const next = neighbors[0];
+                    this.edgeVisits.set(next.key, next.visits + 1);
+                    this.r = next.nr;
+                    this.c = next.nc;
+                    this.path.push({r: this.r, c: this.c});
+                } else if (this.path.length > 1) {
+                    // Backtrack: check if current cell is fully explored
+                    if (neighbors.every(n => n.visits >= 2)) {
+                        const key = `${this.r},${this.c}`;
+                        if (!this.deadEnds.some(d => d.r === this.r && d.c === this.c)) {
+                            this.deadEnds.push({r: this.r, c: this.c});
+                        }
+                    }
+                    const prev = this.path[this.path.length - 2];
+                    this.edgeVisits.set(this.edgeKey(this.r, this.c, prev.r, prev.c), 
+                        (this.edgeVisits.get(this.edgeKey(this.r, this.c, prev.r, prev.c)) || 0) + 1);
+                    this.r = prev.r;
+                    this.c = prev.c;
+                    this.path.push({r: this.r, c: this.c});
+                }
+            }
+        }
+
+        const GRID_SIZE = 25, BOT_COUNT = 24, CELL_SIZE = 32;
+
+        const game = {
+            size: {rows: GRID_SIZE, cols: GRID_SIZE},
+            spawn: {r: 0, c: 0},
+            exit: null,
+            maze: null,
+            bots: [],
+            elapsed: 0,
+            finished: false,
+            
+            init(seed) {
+                if (seed === undefined) seed = Math.floor(Math.random() * 1000000);
+                this.maze = generateMaze(GRID_SIZE, GRID_SIZE, seed);
+                
+                const rng = new SeededRandom(seed + 1);
+                do {
+                    this.exit = {r: rng.nextInt(GRID_SIZE), c: rng.nextInt(GRID_SIZE)};
+                } while (this.exit.r === this.spawn.r && this.exit.c === this.spawn.c);
+                
+                this.bots = [];
+                for (let i = 0; i < BOT_COUNT; i++) {
+                    this.bots.push(new Bot(this.spawn.r, this.spawn.c, this.maze, i, this.size));
+                }
+                this.elapsed = 0;
+                this.finished = false;
+            },
+            
+            walls(r, c) {
+                if (r < 0 || r >= GRID_SIZE || c < 0 || c >= GRID_SIZE) {
+                    return {n: true, e: true, s: true, w: true};
+                }
+                return this.maze[r][c];
+            },
+            
+            tick(n) {
+                for (let i = 0; i < n && !this.finished; i++) {
+                    let allFinished = true;
+                    for (const bot of this.bots) {
+                        if (bot.finishTick !== null) continue;
+                        allFinished = false;
+                        if (bot.r === this.exit.r && bot.c === this.exit.c) {
+                            bot.finishTick = this.elapsed;
+                        } else {
+                            bot.tick();
+                        }
+                    }
+                    if (allFinished) {
+                        this.finished = true;
+                    } else {
+                        this.elapsed++;
+                    }
+                }
+            },
+            
+            reset(seed) {
+                this.init(seed);
+            }
+        };
+
+        window.game = game;
+
+        const canvas = document.getElementById('maze');
+        const ctx = canvas.getContext('2d');
+        const completedSpan = document.getElementById('completed');
+        const timerSpan = document.getElementById('timer');
+        
+        const COLORS = [
+            '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
+            '#FF6600', '#FF0099', '#00FF99', '#9900FF', '#FF9900', '#0099FF',
+            '#99FF00', '#FF0033', '#00FF66', '#3300FF', '#FF3300', '#00CCFF',
+            '#FFCC00', '#CC00FF', '#00FF33', '#FF00CC', '#33FF00', '#0033FF'
+        ];
+        
+        let lastRenderTick = 0;
+        let botPositions = [];
+        
+        function drawMaze() {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 2;
+            for (let r = 0; r < GRID_SIZE; r++) {
+                for (let c = 0; c < GRID_SIZE; c++) {
+                    const x = c * CELL_SIZE, y = r * CELL_SIZE;
+                    const walls = game.walls(r, c);
+                    if (walls.n) {
+                        ctx.beginPath();
+                        ctx.moveTo(x, y);
+                        ctx.lineTo(x + CELL_SIZE, y);
+                        ctx.stroke();
+                    }
+                    if (walls.e) {
+                        ctx.beginPath();
+                        ctx.moveTo(x + CELL_SIZE, y);
+                        ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE);
+                        ctx.stroke();
+                    }
+                    if (walls.s) {
+                        ctx.beginPath();
+                        ctx.moveTo(x, y + CELL_SIZE);
+                        ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE);
+                        ctx.stroke();
+                    }
+                    if (walls.w) {
+                        ctx.beginPath();
+                        ctx.moveTo(x, y);
+                        ctx.lineTo(x, y + CELL_SIZE);
+                        ctx.stroke();
+                    }
+                }
+            }
+            
+            const exitX = game.exit.c * CELL_SIZE + CELL_SIZE / 2;
+            const exitY = game.exit.r * CELL_SIZE + CELL_SIZE / 2;
+            ctx.fillStyle = '#FFD700';
+            ctx.beginPath();
+            ctx.arc(exitX, exitY, 8, 0, Math.PI * 2);
+            ctx.fill();
+            
+            for (let i = 0; i < game.bots.length; i++) {
+                const bot = game.bots[i];
+                const x = bot.c * CELL_SIZE + CELL_SIZE / 2;
+                const y = bot.r * CELL_SIZE + CELL_SIZE / 2;
+                ctx.fillStyle = COLORS[i];
+                ctx.beginPath();
+                ctx.arc(x, y, 5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            const completed = game.bots.filter(b => b.finishTick !== null).length;
+            completedSpan.textContent = completed;
+            timerSpan.textContent = game.elapsed;
+        }
+        
+        function animate() {
+            if (!game.finished) {
+                game.tick(1);
+            }
+            drawMaze();
+            requestAnimationFrame(animate);
+        }
+        
+        document.getElementById('reset').addEventListener('click', () => {
+            game.reset();
+            drawMaze();
+        });
+        
+        game.init();
+        drawMaze();
+        animate();
+    </script>
+</body>
+</html>

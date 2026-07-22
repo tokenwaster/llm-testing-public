@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Falling Sand Sandbox</title>
+<style>
+  :root {
+    --bg: #1a1a1a;
+    --panel: #252525;
+    --text: #eee;
+    --accent: #4CAF50;
+    --sand: #d2b48c;
+    --water: #3498db;
+    --wall: #7f8c8d;
+    --acid: #f1c40f;
+  }
+  body {
+    margin: 0;
+    padding: 0;
+    background-color: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+  }
+  h1 { margin: 10px 0; font-size: 1.2rem; text-shadow: 0 2px 4px rgba(0,0,0,0.5); }
+  
+  #controls {
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    background: var(--panel);
+    border-radius: 8px;
+    margin-bottom: 10px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  
+  button {
+    padding: 8px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    color: #fff;
+    transition: transform 0.1s, opacity 0.2s, box-shadow 0.2s;
+    min-width: 60px;
+    text-align: center;
+    user-select: none;
+  }
+  
+  button:hover { transform: translateY(-1px); opacity: 0.95; box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
+  button:active { transform: translateY(1px); }
+
+  .btn-sand { background-color: var(--sand); color: #3e2723; }
+  .btn-water { background-color: var(--water); color: white; }
+  .btn-wall { background-color: var(--wall); color: white; }
+  .btn-acid { background-color: var(--acid); color: black; text-shadow: none; }
+  .btn-empty { background-color: #444; border: 1px solid #666; }
+  .btn-clear { background-color: #c0392b; margin-left: auto; min-width: 80px; }
+
+  canvas {
+    border: 2px solid #444;
+    background-color: #000;
+    image-rendering: pixelated; 
+    cursor: crosshair;
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
+    margin-bottom: 10px;
+  }
+
+  .info { font-size: 0.8rem; color: #888; margin-top: 5px; }
+</style>
+</head>
+<body>
+
+<h1>Falling Sand Sandbox</h1>
+
+<div id="controls">
+  <button id="mat-sand" class="btn-sand" onclick="selectMaterial('sand')">Sand</button>
+  <button id="mat-water" class="btn-water" onclick="selectMaterial('water')">Water</button>
+  <button id="mat-wall" class="btn-wall" onclick="selectMaterial('wall')">Wall</button>
+  <button id="mat-acid" class="btn-acid" onclick="selectMaterial('acid')">Acid</button>
+  <button id="mat-empty" class="btn-empty" onclick="selectMaterial('empty')">Eraser</button>
+  <button id="clear" class="btn-clear" onclick="sim.clear()">Clear All</button>
+</div>
+
+<canvas id="sand"></canvas>
+
+<div class="info">Left-click to paint. Right-click to erase.</div>
+
+<script>
+// Configuration
+const W = 80;
+const H = 80;
+const CELL_SIZE = 5; // Pixels per cell (CSS pixels)
+const CANVAS_WIDTH = W * CELL_SIZE;
+const CANVAS_HEIGHT = H * CELL_SIZE;
+
+// Materials
+const MAT_EMPTY = 'empty';
+const MAT_SAND = 'sand';
+const MAT_WATER = 'water';
+const MAT_WALL = 'wall';
+const MAT_ACID = 'acid';
+
+// Colors
+const COLORS = {
+  [MAT_EMPTY]: '#1a1a1a',
+  [MAT_SAND]: '#d2b48c',
+  [MAT_WATER]: '#3498db',
+  [MAT_WALL]: '#7f8c8d',
+  [MAT_ACID]: '#f1c40f'
+};
+
+// State
+let grid = [];
+let currentMaterial = MAT_SAND;
+let isMouseDown = false;
+let mouseX = 0;
+let mouseY = 0;
+
+// Canvas Setup
+const canvas = document.getElementById('sand');
+canvas.width = CANVAS_WIDTH;
+canvas.height = CANVAS_HEIGHT;
+const ctx = canvas.getContext('2d');
+
+// Initialize Grid
+function initGrid() {
+  grid = new Array(W).fill(null).map(() => new Array(H).fill(MAT_EMPTY));
+}
+
+// API Implementation
+window.sim = {
+  w: W,
+  h: H,
+  
+  tick(n) {
+    for (let i = 0; i < n; i++) {
+      simulate();
+    }
+  },
+
+  get(x, y) {
+    if (x < 0 || x >= W || y < 0 || y >= H) return MAT_EMPTY;
+    return grid[x][y];
+  },
+
+  set(x, y, material) {
+    if (x >= 0 && x < W && y >= 0 && y < H) {
+      grid[x][y] = material;
+    }
+  },
+
+  clear() {
+    initGrid();
+    draw();
+  }
+};
+
+// Simulation Logic
+function simulate() {
+  // We use a copy of the grid to handle updates deterministically without 
+  // particles moving multiple times in one tick due to in-place updates.
+  // However, for performance on larger grids, we might optimize. 
+  // For 80x80, a full copy is negligible and safest for logic.
+  
+  // Create next grid initialized with current grid
+  const nextGrid = JSON.parse(JSON.stringify(grid));
+
+  // Iterate bottom-up to handle gravity correctly (particles move into cells already processed)
+  // We iterate y from H-2 down to 0.
+  for (let y = H - 2; y >= 0; y--) {
+    for (let x = 0; x < W; x++) {
+      const cell = grid[x][y];
+
+      if (cell === MAT_WALL) continue; // Walls never move
+      if (cell === MAT_EMPTY) continue; // Empty cells do nothing
+
+      // Determine movement target
+      let moved = false;
+      
+      // 1. Check Vertical Movement (Down)
+      const belowY = y + 1;
+      const belowX = x;
+      const belowCell = grid[belowX][belowY]; // Read from current grid state
+
+      if (cell === MAT_SAND) {
+        // Sand Logic: Falls into empty, swaps with water/acid.
+        // If blocked below, slides diagonal.
+        
+        // Check direct below
+        if (belowCell === MAT_EMPTY || belowCell === MAT_WATER || belowCell === MAT_ACID) {
+          nextGrid[belowX][belowY] = cell;
+          nextGrid[x][y] = MAT_EMPTY;
+          moved = true;
+        } else {
+          // Blocked below, try diagonals
+          const dirs = [[-1, 0], [1, 0]]; // Left/Right relative to diagonal check? No.
+          // Diagonals: (x-1, y+1) and (x+1, y+1)
+          const diagLeft = grid[x - 1][belowY];
+          const diagRight = grid[x + 1][belowY];
+          
+          // Randomize order to prevent bias
+          if (Math.random() < 0.5) {
+             if (diagLeft === MAT_EMPTY || diagLeft === MAT_WATER || diagLeft === MAT_ACID) {
+                nextGrid[x - 1][belowY] = cell;
+                nextGrid[x][y] = MAT_EMPTY;
+                moved = true;
+             } else if (diagRight === MAT_EMPTY || diagRight === MAT_WATER || diagRight === MAT_ACID) {
+                nextGrid[x + 1][belowY] = cell;
+                nextGrid[x][y] = MAT_EMPTY;
+                moved = true;
+             }
+          } else {
+             if (diagRight === MAT_EMPTY || diagRight === MAT_WATER || diagRight === MAT_ACID) {
+                nextGrid[x + 1][belowY] = cell;
+                nextGrid[x][y] = MAT_EMPTY;
+                moved = true;
+             } else if (diagLeft === MAT_EMPTY || diagLeft === MAT_WATER || diagLeft === MAT_ACID) {
+                nextGrid[x - 1][belowY] = cell;
+                nextGrid[x][y] = MAT_EMPTY;
+                moved = true;
+             }
+          }
+        }
+
+      } else if (cell === MAT_WATER || cell === MAT_ACID) {
+        // Water/Acid Logic: Falls into empty. If blocked, spreads horizontally.
+        
+        // Check direct below
+        if (belowCell === MAT_EMPTY) {
+          nextGrid[belowX][belowY] = cell;
+          nextGrid[x][y] = MAT_EMPTY;
+          moved = true;
+        } else {
+          // Blocked below, spread horizontally
+          const leftEmpty = grid[x - 1][y] === MAT_EMPTY;
+          const rightEmpty = grid[x + 1][y] === MAT_EMPTY;
+          
+          if (leftEmpty) {
+            nextGrid[x - 1][y] = cell;
+            nextGrid[x][y] = MAT_EMPTY;
+            moved = true;
+          } else if (rightEmpty) {
+            nextGrid[x + 1][y] = cell;
+            nextGrid[x][y] = MAT_EMPTY;
+            moved = true;
+          }
+        }
+      }
+
+      // Acid Specific Logic: Dissolve neighbors
+      // We apply dissolution based on the CURRENT grid state (before movement)
+      // Acid dissolves sand or wall cells it touches below or beside.
+      if (cell === MAT_ACID) {
+        const targets = [
+          {x: x, y: belowY},       // Below
+          {x: x - 1, y: y},        // Beside Left
+          {x: x + 1, y: y}         // Beside Right
+        ];
+
+        for (let t of targets) {
+          if (t.x >= 0 && t.x < W && t.y >= 0 && t.y < H) {
+            const targetCell = grid[t.x][t.y];
+            if (targetCell === MAT_SAND || targetCell === MAT_WALL) {
+              // Dissolve: Turn to empty in nextGrid
+              nextGrid[t.x][t.y] = MAT_EMPTY;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Swap grids
+  grid = nextGrid;
+}
+
+// Rendering
+function draw() {
+  ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+  
+  for (let x = 0; x < W; x++) {
+    for (let y = 0; y < H; y++) {
+      const mat = grid[x][y];
+      ctx.fillStyle = COLORS[mat];
+      // Draw slightly smaller rect for "pixel" look if desired, but full fill is cleaner
+      ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+    }
+  }
+
+  // Highlight mouse position
+  if (isMouseDown) {
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(mouseX * CELL_SIZE, mouseY * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+  }
+}
+
+// Interaction Handlers
+function getGridPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) / CELL_SIZE);
+  const y = Math.floor((e.clientY - rect.top) / CELL_SIZE);
+  return { x, y };
+}
+
+canvas.addEventListener('mousedown', (e) => {
+  isMouseDown = true;
+  const pos = getGridPos(e);
+  mouseX = pos.x;
+  mouseY = pos.y;
+});
+
+window.addEventListener('mouseup', () => {
+  isMouseDown = false;
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  if (!isMouseDown) return;
+  const pos = getGridPos(e);
+  mouseX = pos.x;
+  mouseY = pos.y;
+  
+  // Paint immediately on drag
+  sim.set(mouseX, mouseY, currentMaterial);
+  draw();
+});
+
+// Touch support for mobile
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  isMouseDown = true;
+  const touch = e.touches[0];
+  const rect = canvas.getBoundingClientRect();
+  mouseX = Math.floor((touch.clientX - rect.left) / CELL_SIZE);
+  mouseY = Math.floor((touch.clientY - rect.top) / CELL_SIZE);
+}, {passive: false});
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (!isMouseDown) return;
+  const touch = e.touches[0];
+  const rect = canvas.getBoundingClientRect();
+  mouseX = Math.floor((touch.clientX - rect.left) / CELL_SIZE);
+  mouseY = Math.floor((touch.clientY - rect.top) / CELL_SIZE);
+  sim.set(mouseX, mouseY, currentMaterial);
+  draw();
+}, {passive: false});
+
+canvas.addEventListener('touchend', () => {
+  isMouseDown = false;
+});
+
+// UI Logic
+function selectMaterial(mat) {
+  currentMaterial = mat;
+  
+  // Update button styles
+  document.querySelectorAll('#controls button').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById(`mat-${mat}`);
+  if (btn) btn.style.border = "2px solid #fff";
+}
+
+// Initial setup
+initGrid();
+draw();
+
+</script>
+</body>
+</html>

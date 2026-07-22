@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Spreadsheet</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; margin: 0; }
+        .container { min-width: 600px; min-height: 400px; display: inline-block; }
+        table { border-collapse: collapse; table-layout: fixed; width: 100%; }
+        th, td { border: 1px solid #ccc; width: 60px; height: 30px; text-align: center; overflow: hidden; }
+        th { background-color: #f0f0f0; font-weight: bold; user-select: none; }
+        input { width: 100%; height: 100%; border: none; text-align: center; padding: 0; margin: 0; box-sizing: border-box; background: transparent; outline: none; font-size: 14px; }
+        input:focus { background-color: #e8f0fe; }
+        .controls { margin-top: 20px; }
+        textarea { width: 100%; height: 100px; margin-top: 10px; display: block; font-family: monospace; white-space: pre; overflow: auto; }
+        #export { padding: 8px 16px; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <table>
+        <thead><tr id="header-row"></tr></thead>
+        <tbody id="sheet-body"></tbody>
+    </table>
+
+    <div class="controls">
+        <button id="export">Export CSV</button>
+        <textarea id="csv" readonly></textarea>
+    </div>
+</div>
+
+<script>
+    const rawValues = {}; // cellId -> string (raw text)
+    const computedValues = {}; // cellId -> any (computed result)
+    const computing = new Set(); // For cycle detection
+
+    // Initialize all 10x10 cells with empty strings
+    for (let col = 0; col < 10; col++) {
+        const colChar = String.fromCharCode(65 + col);
+        for (let row = 1; row <= 10; row++) {
+            rawValues[`cell-${colChar}${row}`] = "";
+        }
+    }
+
+    /**
+     * Recursively computes the value of a cell, handling dependencies and cycles.
+     */
+    function getComputedValue(id) {
+        if (computing.has(id)) return '#CYCLE';
+        if (computedValues[id] !== undefined) return computedValues[id];
+
+        computing.add(id);
+        let result;
+        const raw = rawValues[id] || "";
+
+        if (raw.startsWith('=')) {
+            try {
+                // Regex to find cell references like A1, B10, etc.
+                const refRegex = /\b([A-J])([1-9]|10)\b/g;
+                let expr = raw.substring(1);
+                
+                // Replace each reference with its current computed value
+                let processedExpr = expr.replace(refRegex, (match) => {
+                    const refId = `cell-${match}`;
+                    const val = getComputedValue(refId);
+                    if (val === '#CYCLE' || val === '#ERR') return 'NaN';
+                    // Empty cells count as 0 inside formulas
+                    if (val === "" || val === undefined) return "0";
+                    const num = parseFloat(val);
+                    return isNaN(fmtNum(num)) ? 'NaN' : num;
+                });
+
+                // Evaluate the math expression using Function constructor
+                const res = new Function(`return ${processedExpr}`)();
+                result = (isNaN(res) || !isFinite(res)) ? '#ERR' : res;
+            } catch (e) {
+                result = '#ERR';
+            }
+        } else {
+            // Plain value: non-numeric text displays as itself
+            result = raw;
+        }
+
+        computing.delete(id);
+        computedValues[id] = result;
+        return result;
+    }
+
+    function fmtNum(n) { return n; } // Helper for numeric stability
+
+    /**
+     * Triggers a full recalculation of the spreadsheet dependency graph.
+     */
+    function recalculateAll() {
+        for (const id in computedValues) delete computedValues[id];
+        for (let col = 0; col < 10; col++) {
+            const colChar = String.fromCharCode(65 + col);
+            for (let row = 1; row <= 10; row++) {
+                getComputedValue(`cell-${colChar}${row}`);
+            }
+        }
+    }
+
+    /**
+     * Updates the visual value of a specific input element.
+     */
+    function updateDisplay(id) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const val = computedValues[id];
+        // Display computed string or empty if nothing is there
+        el.value = (val === undefined || val === "") ? "" : val.toString();
+    }
+
+    /**
+     * Updates all input elements in the grid to reflect new computed values.
+     */
+    function updateAllDisplays() {
+        for (let col = 0; col < 10; col++) {
+            const colChar = String.fromCharCode(65 + col);
+            for (let row = 1; row <= 10; row++) {
+                updateDisplay(`cell-${colChar}${row}`);
+            }
+        }
+    }
+
+    // --- UI Construction ---
+    const headerRow = document.getElementById('header-row');
+    headerRow.appendChild(document.createElement('th')); // Corner cell
+    for (let col = 0; col < 10; col++) {
+        const th = document.createElement('th');
+        th.textContent = String.fromCharCode(65 + col);
+        headerRow.appendChild(th);
+    }
+
+    const sheetBody = document.getElementById('sheet-body');
+    for (let row = 1; row <= 10; row++) {
+        const tr = document.createElement('tr');
+        // Row header
+        const th = document.createElement('th');
+        th.textContent = row;
+        tr.appendChild(th);
+
+        for (let col = 0; col < 10; col++) {
+            const colChar = String.fromCharCode(65 + col);
+            const cellId = `cell-${colChar}${row}`;
+            const td = document.createElement('td');
+            const input = document.createElement('input');
+            input.id = cellId;
+
+            // Event: Show raw text when editing starts
+            input.addEventListener('focus', (e) => {
+                e.target.value = rawValues[cellId];
+            });
+
+            // Event: Commit changes and recalculate on blur
+            input.addEventListener('blur', (e) => {
+                const newVal = e.target.value;
+                rawValues[cellId] = newVal;
+                recalculateAll();
+                updateDisplay(cellId);
+                updateAllDisplays();
+            });
+
+            // Event: Commit on Enter key
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') e.target.blur();
+            });
+
+            td.appendChild(input);
+            tr.appendChild(td);
+        }
+        sheetBody.appendChild(tr);
+    }
+
+    // --- Export Logic ---
+    document.getElementById('export').addEventListener('click', () => {
+        let csvRows = [];
+        for (let row = 1; row <= 10; row++) {
+            let rowData = [];
+            for (let col = 0; col < 10; col++) {
+                const id = `cell-${String.fromCharCode(65 + col)}${row}`;
+                const v = computedValues[id];
+                rowData.push((v === undefined || v === "") ? "" : v.toString());
+            }
+            csvRows.push(rowData.join(","));
+        }
+        document.getElementById('csv').value = csvRows.join("\n");
+    });
+
+    // --- Scripting API ---
+    window.sheet = {
+        set: (id, val) => {
+            const fid = id.startsWith('cell-') ? id : `cell-${id}`;
+            rawValues[fid] = val;
+            recalculateAll();
+            updateDisplay(fid);
+            updateAllDisplays();
+        },
+        get: (id) => {
+            const fid = id.startsWith('cell-') ? id : `cell-${id}`;
+            const v = computedValues[fid];
+            return (v === undefined || v === "") ? "" : v.toString();
+        },
+        raw: (id) => {
+            const fid = id.startsWith('cell-') ? id : `cell-${id}`;
+            return rawValues[fid] || "";
+        }
+    };
+
+</script>
+</body>
+</html>

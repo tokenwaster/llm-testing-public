@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Maze Exploration Benchmark</title>
+    <style>
+        body {
+            background: #222;
+            color: #eee;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        #maze {
+            border: 2px solid #555;
+            background: #000;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        .controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            font-size: 1.2rem;
+        }
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            background: #444;
+            color: white;
+            border: 1px solid #777;
+            border-radius: 4px;
+        }
+        button:hover { background: #666; }
+    </style>
+</head>
+<body>
+
+    <div id="maze"></div>
+    <div class="controls">
+        <div>Completed: <span id="completed">0</span> / 24</div>
+        <div>Timer: <span id="timer">0</span></div>
+        <button id="reset">Reset Maze</button>
+    </div>
+
+    <script>
+        (function() {
+            const ROWS = 20;
+            const COLS = 20;
+            const BOT_COUNT = 24;
+            const CANVAS_SIZE = 400;
+
+            let currentSeed = Math.floor(Math.random() * 1000000);
+            let grid = [];
+            let visited = [];
+            let bots = [];
+            let elapsed = 0;
+            let spawn = { r: 0, c: 0 };
+            let exit = { r: ROWS - 1, c: COLS - 1 };
+
+            // Deterministic PRNG (Mulberry32)
+            function createPRNG(seed) {
+                return function() {
+                    let t = seed += 0x6D2B79F5;
+                    t = Math.imul(t ^ (t >>> 15), t | 1);
+                    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+                    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+                };
+            }
+
+            function initMaze(seed) {
+                const rng = createPRNG(seed);
+                grid = [];
+                visited = [];
+                for (let r = 0; r < ROWS; r++) {
+                    grid[r] = [];
+                    visited[r] = [];
+                    for (let c = 0; c < COLS; c++) {
+                        grid[r][c] = { n: true, e: true, s: true, w: true };
+                        visited[r][c] = false;
+                    }
+                }
+
+                // Recursive Backtracking Maze Generation
+                function carve(r, c) {
+                    visited[r][c] = true;
+                    let dirs = [0, 1, 2, 3].sort(() => rng() - 0.5); // N, E, S, W
+                    for (let d of dirs) {
+                        let nr = r + (d === 0 ? -1 : d === 2 ? 1 : 0);
+                        let nc = c + (d === 1 ? 1 : d === 3 ? -1 : 0);
+                        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && !visited[nr][nc]) {
+                            if (d === 0) { grid[r][c].n = false; grid[nr][nc].s = false; }
+                            else if (d === 1) { grid[r][c].e = false; grid[nr][nc].w = false; }
+                            else if (d === 2) { grid[r][c].s = false; grid[nr][nc].n = false; }
+                            else if (d === 3) { grid[r][c].w = false; grid[nr][nc].e = false; }
+                            carve(nr, nc);
+                        }
+                    }
+                }
+                carve(0, 0);
+            }
+
+            function initBots(seed) {
+                const rng = createPRNG(seed + 12345);
+                bots = [];
+                for (let i = 0; i < BOT_COUNT; i++) {
+                    // Each bot gets a unique preference order for directions [N, E, S, W]
+                    let prefs = [0, 1, 2, 3].sort(() => rng() - 0.5);
+                    bots.push({
+                        id: i,
+                        path: [{ r: spawn.r, c: spawn.c }],
+                        stack: [{ r: spawn.r, c: spawn.c }],
+                        visited: new Set([`${spawn.r},${spawn.c}`]),
+                        deadEnds: [],
+                        preferences: prefs,
+                        finishTick: null,
+                        visualX: spawn.c,
+                        visualY: spawn.r,
+                        targetIndex: 0,
+                        color: `hsl(${i * (360 / BOT_COUNT)}, 70%, 50%)`
+                    });
+                }
+            }
+
+            function reset(seed) {
+                if (seed !== undefined) currentSeed = seed;
+                else currentSeed = Math.floor(Math.random() * 1000000);
+                
+                elapsed = 0;
+                initMaze(currentSeed);
+                initBots(currentSeed);
+                updateUI();
+            }
+
+            function tick(n) {
+                for (let i = 0; i < n; i++) {
+                    let activeCount = 0;
+                    bots.forEach(bot => {
+                        if (bot.finishTick === null) {
+                            activeCount++;
+                            // Bot Logic: Tremaux/DFS style exploration
+                            let curr = bot.path[bot.path.length - 1];
+                            let options = [];
+
+                            for (let d = 0; d < 4; d++) {
+                                let nr = curr.r + (d === 0 ? -1 : d === 2 ? 1 : 0);
+                                let nc = curr.c + (d === 1 ? 1 : d === 3 ? -1 : 0);
+
+                                if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                                    if (!grid[curr.r][curr.c][dirMap[d]] && !bot.visited.has(`${nr},${nc}`)) {
+                                        options.push({ r: nr, c: nc, d: d });
+                                    }
+                                }
+                            }
+
+                            if (options.length > 0) {
+                                // Sort by preference order
+                                options.sort((a, b) => bot.preferences.indexOf(a.d) - bot.preferences.indexOf(b.d));
+                                let next = options[0];
+                                bot.path.push({ r: next.r, c: next.c });
+                                bot.stack.push({ r: next.r, c: next.c });
+                                bot.visited.add(`${next.r},${next.c}`);
+                            } else {
+                                // Backtrack
+                                if (bot.stack.length > 1) {
+                                    let deadEnd = bot.stack.pop();
+                                    bot.deadEnds.push({ r: deadEnd.r, c: deadEnd.c });
+                                    let prev = bot.stack[bot.stack.length - 1];
+                                    bot.path.push(prev);
+                                }
+                            }
+
+                            // Check if reached exit
+                            let lastPos = bot.path[bot.path.length - 1];
+                            if (lastPos.r === exit.r && lastPos.c === exit.c) {
+                                bot.finishTick = elapsed + 1;
+                            }
+                        }
+                    });
+
+                    if (activeCount > 0) {
+                        elapsed++;
+                    }
+                }
+                updateUI();
+            }
+
+            const dirMap = { 0: 'n', 1: 'e', 2: 's', 3: 'w' };
+
+            // Rendering logic
+            const canvas = document.createElement('canvas');
+            canvas.width = CANVAS_SIZE;
+            canvas.height = CANVAS_SIZE;
+            canvas.id = "maze";
+            document.getElementById('maze').appendChild(canvas);
+            const ctx = canvas.getContext('2d');
+
+            function updateUI() {
+                document.getElementById('completed').innerText = bots.filter(b => b.finishTick !== null).length;
+                document.getElementById('timer').innerText = elapsed;
+            }
+
+            function draw() {
+                ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+                const cellW = CANVAS_SIZE / COLS;
+                const cellH = CANVAS_SIZE / ROWS;
+
+                // Draw Maze
+                ctx.strokeStyle = "#444";
+                ctx.lineWidth = 2;
+                for (let r = 0; r < ROWS; r++) {
+                    for (let c = 0; c < COLS; c++) {
+                        const cell = grid[r][c];
+                        if (cell.n) { ctx.beginPath(); ctx.moveTo(c * cellW, r * cellH); ctx.lineTo(c * cellW, (r + 1) * cellH); ctx.stroke(); }
+                        if (cell.e) { ctx.beginPath(); ctx.moveTo(c * cellW, r * cellH); ctx.lineTo((c + 1) * cellW, r * cellH); ctx.stroke(); }
+                        if (cell.s) { ctx.beginPath(); ctx.moveTo(c * cellW, r * cellH); ctx.lineTo(c * cellW, (r + 1) * cellH); ctx.stroke(); }
+                        if (cell.w) { ctx.beginPath(); ctx.moveTo(c * cellW, r * cellH); ctx.lineTo((c + 1) * cellW, r * cellH); ctx.stroke(); }
+                    }
+                }
+
+                // Draw Exit
+                ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
+                ctx.fillRect(exit.c * cellW + 4, exit.r * cellH + 4, cellW - 8, cellH - 8);
+
+                // Draw Bots and Interpolate
+                bots.forEach(bot => {
+                    if (bot.finishTick === null) {
+                        let target = bot.path[bot.targetIndex];
+                        if (target) {
+                            const dx = target.c * cellW + cellW / 2 - bot.visualX;
+                            const dy = target.r * cellH + cellH / 2 - bot.visualY;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist < 1) {
+                                bot.targetIndex++;
+                            } else {
+                                bot.visualX += (dx / dist) * 3; // Smooth speed
+                                bot.visualY += (dy / dist) * 3;
+                            }
+                        }
+                    } else {
+                        // Stay at exit if finished
+                        bot.visualX = exit.c * cellW + cellW / 2;
+                        bot.visualY = exit.r * cellH + cellH / 2;
+                    }
+
+                    ctx.fillStyle = bot.color;
+                    ctx.beginPath();
+                    ctx.arc(bot.visualX, bot.visualY, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+
+                requestAnimationFrame(draw);
+            }
+
+            // Global API exposure
+            window.game = {
+                tick: tick,
+                reset: reset,
+                elapsed: elapsed,
+                size: { rows: ROWS, cols: COLS },
+                spawn: spawn,
+                exit: exit,
+                walls: (r, c) => grid[r][c],
+                bots: bots
+            };
+
+            // Initial setup
+            reset();
+            draw();
+
+            document.getElementById('reset').onclick = () => reset();
+
+            // Automated benchmark loop simulation (optional for visual testing)
+            // In a real test, the harness calls window.game.tick(n)
+        })();
+    </script>
+</body>
+</html>

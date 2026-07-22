@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Exploration Game</title>
+<style>
+  body { margin: 0; background: #1a1a1a; color: #eee; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
+  .container { text-align: center; }
+  canvas { background: #000; border: 2px solid #444; box-shadow: 0 0 15px rgba(0,0,0,0.5); image-rendering: pixelated; }
+  .ui-panel { margin-top: 10px; display: flex; gap: 20px; align-items: center; justify-content: center; font-size: 18px; font-weight: bold; }
+  button { padding: 8px 16px; background: #333; color: white; border: 1px solid #555; cursor: pointer; border-radius: 4px; transition: background 0.2s; }
+  button:hover { background: #444; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="ui-panel">
+    <div id="timer">Time: 0</div>
+    <div id="completed">Completed: 0/24</div>
+    <button id="reset">Reset Maze</button>
+  </div>
+  <canvas id="maze-canvas" width="400" height="400"></canvas>
+</div>
+
+<script>
+(function() {
+    // --- Configuration ---
+    const GRID_SIZE = 31; 
+    const CANVAS_SIZE = 400;
+    const BOT_COUNT = 24;
+    
+    // --- State ---
+    let mazeData = null;
+    let bots = [];
+    let elapsed = 0;
+    let isFinished = false;
+    let seed = 12345;
+    
+    // --- API Object ---
+    const game = {
+        tick: function(n) {
+            if (isFinished) return;
+            
+            for (let i = 0; i < n; i++) {
+                this._tick();
+            }
+            this._render();
+            this._updateUI();
+        },
+        
+        reset: function(s) {
+            seed = s || Math.random() * 1e9 | 0;
+            mazeData = generateMaze(GRID_SIZE);
+            bots = [];
+            elapsed = 0;
+            isFinished = false;
+            
+            const spawnPos = { r: 0, c: 0 };
+            
+            for (let i = 0; i < BOT_COUNT; i++) {
+                bots.push(createBot(i, spawnPos));
+            }
+            
+            game.exit = { r: GRID_SIZE - 1, c: GRID_SIZE - 1 };
+            
+            this._render();
+            this._updateUI();
+        },
+        
+        get size() { return { rows: mazeData.rows, cols: mazeData.cols }; },
+        get spawn() { return { r: 0, c: 0 }; },
+        get exit() { return game.exit; },
+        get elapsed() { return elapsed; },
+        get bots() { return bots; },
+        
+        walls: function(r, c) {
+            if (!mazeData) return null;
+            return mazeData[r][c];
+        }
+    };
+
+    // --- Maze Generation (Recursive Backtracker) ---
+    function generateMaze(rows, cols) {
+        let grid = [];
+        for (let r = 0; r < rows; r++) {
+            let row = [];
+            for (let c = 0; c < cols; c++) {
+                row.push({ n: true, e: true, s: true, w: true });
+            }
+            grid.push(row);
+        }
+
+        let stack = [];
+        let visited = new Set();
+        
+        // Start at (0,0)
+        let startNode = { r: 0, c: 0 };
+        stack.push(startNode);
+        visited.add(`${startNode.r},${startNode.c}`);
+        
+        while (stack.length > 0) {
+            let u = stack[stack.length - 1]; // Peek
+            
+            // Get unvisited neighbors
+            let neighbors = [];
+            const dirs = [
+                { dr: -1, dc: 0, name: 'n' },
+                { dr: 0, dc: 1, name: 'e' },
+                { dr: 1, dc: 0, name: 's' },
+                { dr: 0, dc: -1, name: 'w' }
+            ];
+            
+            for (let d of dirs) {
+                let nr = u.r + d.dr;
+                let nc = u.c + d.dc;
+                if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+                    // Check if neighbor is unvisited
+                    if (!visited.has(`${nr},${nc}`)) {
+                        neighbors.push({ r: nr, c: nc, dir: d });
+                    }
+                }
+            }
+            
+            if (neighbors.length > 0) {
+                // Pick random neighbor to remove wall and push to stack
+                let idx = Math.floor(Math.random() * neighbors.length);
+                let v = neighbors[idx];
+                
+                // Remove walls between u and v
+                grid[u.r][u.c][v.dir.name] = false;
+                // Calculate opposite direction for v
+                let oppDirName = (v.dir.name === 'n' ? 's' : 
+                                   v.dir.name === 'e' ? 'w' : 
+                                   v.dir.name === 's' ? 'n' : 'e');
+                grid[v.r][v.c][oppDirName] = false;
+                
+                visited.add(`${v.r},${v.c}`);
+                stack.push(v);
+            } else {
+                stack.pop();
+            }
+        }
+        
+        return { rows, cols, data: grid };
+    }
+
+    // --- Bot Class ---
+    function createBot(id, spawnPos) {
+        return {
+            id: id,
+            r: spawnPos.r,
+            c: spawnPos.c,
+            path: [{r: spawnPos.r, c: spawnPos.c}],
+            visited: new Set(), 
+            finishTick: null,
+            deadEnds: [],
+            directionOrder: [], 
+            
+            init: function() {
+                let dirs = [0, 1, 2, 3]; // N, E, S, W
+                let rng = mulberry32(seed + id);
+                for (let i = dirs.length - 1; i > 0; i--) {
+                    const j = Math.floor(rng() * (i + 1));
+                    [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
+                }
+                this.directionOrder = dirs;
+            },
+            
+            update: function() {
+                if (this.finishTick !== null) return; 
+                
+                let current = { r: Math.round(this.r), c: Math.round(this.c) };
+                
+                let neighbors = [];
+                const dirs = [
+                    { dr: -1, dc: 0, name: 'n' },
+                    { dr: 0, dc: 1, name: 'e' },
+                    { dr: 1, dc: 0, name: 's' },
+                    { dr: 0, dc: -1, name: 'w' }
+                ];
+                
+                for (let d of dirs) {
+                    let nr = current.r + d.dr;
+                    let nc = current.c + d.dc;
+                    if (nr >= 0 && nr < mazeData.rows && nc >= 0 && nc < mazeData.cols) {
+                        if (!mazeData[current.r][current.c][d.name]) {
+                            let key = `${nr},${nc}`;
+                            if (!this.visited.has(key)) {
+                                neighbors.push({ r: nr, c: nc, dir: d });
+                            }
+                        }
+                    }
+                }
+                
+                // If unvisited neighbors exist, move to one based on preference
+                let moved = false;
+                for (let i = 0; i < this.directionOrder.length && !moved; i++) {
+                    let dirIdx = this.directionOrder[i];
+                    let d = dirs[dirIdx];
+                    let nr = current.r + d.dr;
+                    let nc = current.c + d.dc;
+                    
+                    if (!mazeData[current.r][current.c][d.name] && !this.visited.has(`${nr},${nc}`)) {
+                        this.move(nr, nc);
+                        moved = true;
+                    }
+                }
+                
+                // If no unvisited neighbors, backtrack
+                if (!moved) {
+                    let prevIdx = this.path.length - 2;
+                    if (prevIdx >= 0) {
+                        let prev = this.path[prevIdx];
+                        this.move(prev.r, prev.c);
+                    } else {
+                        // Stuck at start? Add to deadEnds
+                        this.deadEnds.push({r: current.r, c: current.c});
+                    }
+                }
+            },
+            
+            move: function(tr, tc) {
+                this.r = tr;
+                this.c = tc;
+                this.path.push({r: tr, c: tc});
+                this.visited.add(`${tr},${tc}`);
+                
+                if (this.r === game.exit.r && this.c === game.exit.c) {
+                    this.finishTick = elapsed;
+                }
+            },
+            
+            get path() { return this.path; },
+            get deadEnds() { return this.deadEnds; },
+            get finishTick() { return this.finishTick; }
+        };
+    }
+
+    // --- Rendering ---
+    function draw() {
+        const canvas = document.getElementById('maze-canvas');
+        const ctx = canvas.getContext('2d');
+        const cs = CANVAS_SIZE / GRID_SIZE;
+        
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+        
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let r = 0; r < GRID_SIZE; r++) {
+            for (let c = 0; c < GRID_SIZE; c++) {
+                let x = c * cs;
+                let y = r * cs;
+                
+                if (mazeData[r][c].n) { ctx.moveTo(x, y); ctx.lineTo(x + cs, y); }
+                if (mazeData[r][c].e) { ctx.moveTo(x + cs, y); ctx.lineTo(x + cs, y + cs); }
+                if (mazeData[r][c].s) { ctx.moveTo(x, y + cs); ctx.lineTo(x + cs, y + cs); }
+                if (mazeData[r][c].w) { ctx.moveTo(x, y); ctx.lineTo(x, y + cs); }
+            }
+        }
+        ctx.stroke();
+        
+        for (let bot of bots) {
+            if (bot.finishTick !== null) continue; 
+            
+            let cx = bot.c * cs + cs / 2;
+            let cy = bot.r * cs + cs / 2;
+            
+            ctx.fillStyle = `hsl(${(bot.id * 15) % 360}, 70%, 50%)`;
+            ctx.beginPath();
+            ctx.arc(cx, cy, cs * 0.3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    function _tick() {
+        if (isFinished) return;
+        
+        for (let bot of bots) {
+            bot.update();
+        }
+        
+        let finishedCount = 0;
+        for (let bot of bots) {
+            if (bot.finishTick !== null) finishedCount++;
+        }
+        
+        elapsed++; 
+        
+        if (finishedCount === BOT_COUNT) {
+            isFinished = true;
+        }
+    }
+
+    function _render() {
+        draw();
+    }
+
+    function _updateUI() {
+        document.getElementById('timer').innerText = `Time: ${elapsed}`;
+        let completed = bots.filter(b => b.finishTick !== null).length;
+        document.getElementById('completed').innerText = `Completed: ${completed}/${BOT_COUNT}`;
+    }
+
+    function init() {
+        game.reset();
+        
+        document.getElementById('reset').addEventListener('click', () => {
+            game.reset();
+        });
+    }
+
+    window.game = game;
+    
+    init();
+
+})();
+</script>
+</body>
+</html>

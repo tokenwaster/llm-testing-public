@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maze Explorer Bots</title>
+<style>
+  body{
+    font-family:system-ui,-apple-system,Segoe UI,sans-serif;
+    background:#15151d;color:#e8e8ee;
+    display:flex;flex-direction:column;align-items:center;
+    padding:18px;margin:0;
+  }
+  h1{font-size:20px;margin:0 0 12px;font-weight:600;letter-spacing:.5px}
+  #hud{display:flex;gap:28px;align-items:center;margin-bottom:14px}
+  .stat{font-size:17px;color:#aab}
+  .stat b{color:#fff;font-variant-numeric:tabular-nums;margin-left:4px}
+  #reset{
+    padding:7px 18px;font-size:15px;cursor:pointer;border-radius:7px;
+    border:1px solid #4a4a5a;background:#2b2b38;color:#eee;
+  }
+  #reset:hover{background:#3a3a4c}
+  #reset:active{background:#24242f}
+  #maze{line-height:0;border:2px solid #4a4a5a;border-radius:4px;background:#0e0e15}
+</style>
+</head>
+<body>
+<h1>Maze Explorer Bots &mdash; 24 blind explorers hunting the exit</h1>
+<div id="hud">
+  <div class="stat">Timer:<b id="timer">0</b></div>
+  <div class="stat">Completed:<b id="completed">0 / 24</b></div>
+  <button id="reset">Reset</button>
+</div>
+<div id="maze"><canvas id="cv" width="442" height="442"></canvas></div>
+<script>
+(function(){
+"use strict";
+var ROWS=17, COLS=17, NBOTS=24, CELL=26, TICK_MS=80, MAX_TICKS=20000;
+var DR={n:-1,e:0,s:1,w:0}, DC={n:0,e:1,s:0,w:-1}, OPP={n:"s",e:"w",s:"n",w:"e"};
+var cv=document.getElementById("cv"), ctx=cv.getContext("2d");
+var elTimer=document.getElementById("timer"),
+    elCompleted=document.getElementById("completed"),
+    elReset=document.getElementById("reset");
+
+function mulberry32(a){
+  return function(){
+    a|=0; a=(a+0x6D2B79F5)|0;
+    var t=Math.imul(a^(a>>>15),1|a);
+    t=(t+Math.imul(t^(t>>>7),61|t))^t;
+    return ((t^(t>>>14))>>>0)/4294967296;
+  };
+}
+
+function permutations(arr){
+  if(arr.length<=1) return [arr.slice()];
+  var out=[];
+  for(var i=0;i<arr.length;i++){
+    var rest=arr.slice(0,i).concat(arr.slice(i+1));
+    var subs=permutations(rest);
+    for(var j=0;j<subs.length;j++) out.push([arr[i]].concat(subs[j]));
+  }
+  return out;
+}
+// exactly 24 unique direction-preference orders -> one per bot, so they spread out
+var PERMS=permutations(["n","e","s","w"]);
+
+var S=null;
+
+function buildMaze(rng){
+  // perfect maze via seeded iterative recursive-backtracker
+  var walls=[], r, c;
+  for(r=0;r<ROWS;r++){
+    walls.push([]);
+    for(c=0;c<COLS;c++) walls[r].push({n:true,e:true,s:true,w:true});
+  }
+  var vis=new Array(ROWS*COLS); for(var i=0;i<vis.length;i++) vis[i]=false;
+  var stack=[[0,0]]; vis[0]=true;
+  while(stack.length){
+    var top=stack[stack.length-1]; r=top[0]; c=top[1];
+    var opts=[];
+    var ds=["n","e","s","w"];
+    for(var k=0;k<4;k++){
+      var d=ds[k], nr=r+DR[d], nc=c+DC[d];
+      if(nr<0||nr>=ROWS||nc<0||nc>=COLS) continue;
+      if(vis[nr*COLS+nc]) continue;
+      opts.push(d);
+    }
+    if(!opts.length){ stack.pop(); continue; }
+    var pick=opts[Math.floor(rng()*opts.length)];
+    var pr=r+DR[pick], pc=c+DC[pick];
+    walls[r][c][pick]=false;
+    walls[pr][pc][OPP[pick]]=false;
+    vis[pr*COLS+pc]=true;
+    stack.push([pr,pc]);
+  }
+  return walls;
+}
+
+function cellCenterX(c){ return c*CELL+CELL/2; }
+function cellCenterY(r){ return r*CELL+CELL/2; }
+
+function init(seed, autoplay){
+  var rng=mulberry32(seed);
+  var walls=buildMaze(rng);
+  var spawn={r:0,c:0}, exit={r:ROWS-1,c:COLS-1};
+  var bots=[];
+  for(var i=0;i<NBOTS;i++){
+    bots.push({
+      prefs:PERMS[i%PERMS.length].slice(),
+      r:spawn.r, c:spawn.c,
+      stack:[{r:spawn.r,c:spawn.c}],
+      visited:new Set([spawn.r*COLS+spawn.c]),
+      deadSet:new Set(),
+      path:[{r:spawn.r,c:spawn.c}],
+      deadEnds:[],
+      finishTick:null,
+      px:cellCenterX(spawn.c), py:cellCenterY(spawn.r),
+      color:"hsl("+(i*15)+",85%,62%)"
+    });
+  }
+  S={seed:seed, walls:walls, spawn:spawn, exit:exit, bots:bots,
+     elapsed:0, done:false, autoplay:!!autoplay};
+  updateUI();
+}
+
+function enterCell(b,r,c){
+  b.r=r; b.c=c;
+  b.path.push({r:r,c:c});
+  if(r===S.exit.r && c===S.exit.c) b.finishTick=S.elapsed;
+}
+
+function stepBot(b){
+  if(b.finishTick!==null) return; // arrived: stays at the exit
+  var cur=b.stack[b.stack.length-1];
+  // the bot only senses the walls of the cell it currently occupies
+  var w=S.walls[cur.r][cur.c];
+  for(var i=0;i<4;i++){
+    var d=b.prefs[i];
+    if(w[d]) continue;
+    var nr=cur.r+DR[d], nc=cur.c+DC[d], key=nr*COLS+nc;
+    if(b.visited.has(key)) continue; // never re-enter an explored branch
+    b.visited.add(key);
+    b.stack.push({r:nr,c:nc});
+    enterCell(b,nr,nc);
+    return;
+  }
+  // dead end / fully explored branch: mark dead and backtrack one cell
+  var ck=cur.r*COLS+cur.c;
+  if(!b.deadSet.has(ck)){
+    b.deadSet.add(ck);
+    b.deadEnds.push({r:cur.r,c:cur.c});
+  }
+  b.stack.pop();
+  if(b.stack.length){
+    var prev=b.stack[b.stack.length-1];
+    enterCell(b,prev.r,prev.c);
+  }
+}
+
+function doTicks(n){
+  for(var t=0;t<n;t++){
+    if(S.done) break; // timer frozen at last arrival; further ticks change nothing
+    S.elapsed++;
+    var allDone=true;
+    for(var i=0;i<S.bots.length;i++){
+      stepBot(S.bots[i]);
+      if(S.bots[i].finishTick===null) allDone=false;
+    }
+    if(allDone) S.done=true;
+    if(S.elapsed>=MAX_TICKS) break;
+  }
+  updateUI();
+}
+
+function updateUI(){
+  var done=0;
+  for(var i=0;i<S.bots.length;i++) if(S.bots[i].finishTick!==null) done++;
+  elTimer.textContent=String(S.elapsed);
+  elCompleted.textContent=done+" / "+NBOTS;
+}
+
+/* ---------- public API ---------- */
+window.game={
+  tick:function(n){
+    S.autoplay=false; // manual/scripted control takes over
+    n=Math.floor(Number(n));
+    if(!(n>0)) { updateUI(); return; }
+    doTicks(n);
+  },
+  reset:function(seed){
+    if(typeof seed==="number" && isFinite(seed)){
+      init(Math.floor(seed)|0, false); // seeded: fully reproducible, no autoplay
+    }else{
+      init((Math.random()*0x7fffffff)|0, true);
+    }
+  },
+  walls:function(r,c){
+    if(r<0||r>=ROWS||c<0||c>=COLS) return null;
+    var w=S.walls[r][c];
+    return {n:w.n,e:w.e,s:w.s,w:w.w};
+  }
+};
+Object.defineProperties(window.game,{
+  elapsed:{get:function(){return S.elapsed;},enumerable:true},
+  size:{get:function(){return {rows:ROWS,cols:COLS};},enumerable:true},
+  spawn:{get:function(){return {r:S.spawn.r,c:S.spawn.c};},enumerable:true},
+  exit:{get:function(){return {r:S.exit.r,c:S.exit.c};},enumerable:true},
+  bots:{get:function(){return S.bots;},enumerable:true}
+});
+
+elReset.addEventListener("click",function(){ window.game.reset(); });
+
+/* ---------- autoplay ---------- */
+setInterval(function(){
+  if(S && S.autoplay && !S.done) doTicks(1);
+}, TICK_MS);
+
+/* ---------- rendering ---------- */
+function draw(){
+  requestAnimationFrame(draw);
+  if(!S) return;
+  ctx.clearRect(0,0,cv.width,cv.height);
+  // spawn / exit highlights
+  ctx.fillStyle="rgba(80,140,255,0.25)";
+  ctx.fillRect(S.spawn.c*CELL,S.spawn.r*CELL,CELL,CELL);
+  ctx.fillStyle="rgba(60,220,120,0.35)";
+  ctx.fillRect(S.exit.c*CELL,S.exit.r*CELL,CELL,CELL);
+  // walls
+  ctx.strokeStyle="#c8c8d8";
+  ctx.lineWidth=2;
+  ctx.lineCap="square";
+  ctx.beginPath();
+  for(var r=0;r<ROWS;r++){
+    for(var c=0;c<COLS;c++){
+      var w=S.walls[r][c], x=c*CELL, y=r*CELL;
+      if(w.n){ ctx.moveTo(x,y); ctx.lineTo(x+CELL,y); }
+      if(w.w){ ctx.moveTo(x,y); ctx.lineTo(x,y+CELL); }
+      if(r===ROWS-1 && w.s){ ctx.moveTo(x,y+CELL); ctx.lineTo(x+CELL,y+CELL); }
+      if(c===COLS-1 && w.e){ ctx.moveTo(x+CELL,y); ctx.lineTo(x+CELL,y+CELL); }
+    }
+  }
+  ctx.stroke();
+  // bots: smooth interpolation toward their logical cell centers
+  for(var i=0;i<S.bots.length;i++){
+    var b=S.bots[i];
+    var tx=cellCenterX(b.c), ty=cellCenterY(b.r);
+    var dx=tx-b.px, dy=ty-b.py;
+    if(Math.abs(dx)+Math.abs(dy)>CELL*1.6){ b.px=tx; b.py=ty; } // huge scripted jump: snap
+    else { b.px+=dx*0.28; b.py+=dy*0.28; }
+    if(Math.abs(tx-b.px)<0.15) b.px=tx;
+    if(Math.abs(ty-b.py)<0.15) b.py=ty;
+    ctx.beginPath();
+    ctx.arc(b.px,b.py,5.5,0,Math.PI*2);
+    ctx.fillStyle=b.color;
+    ctx.fill();
+    ctx.lineWidth=1;
+    ctx.strokeStyle="rgba(0,0,0,0.5)";
+    ctx.stroke();
+  }
+}
+
+init((Math.random()*0x7fffffff)|0, true);
+requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

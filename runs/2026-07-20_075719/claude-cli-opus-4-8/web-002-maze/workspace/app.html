@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maze Discovery — 24 Bots</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 16px;
+    background: #14161c; color: #e6e9ef;
+    font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+  }
+  h1 { font-size: 18px; margin: 4px 0 0; font-weight: 600; letter-spacing: .3px; }
+  #hud {
+    display: flex; gap: 22px; align-items: center;
+    background: #1d212b; border: 1px solid #2b3140; border-radius: 10px;
+    padding: 10px 18px; font-size: 15px;
+  }
+  #hud .stat { display: flex; flex-direction: column; align-items: center; min-width: 70px; }
+  #hud .stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: #8a93a6; }
+  #hud .stat .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #reset {
+    background: #3b6ef0; color: #fff; border: none; border-radius: 8px;
+    padding: 9px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  #reset:hover { background: #5680f5; }
+  #maze {
+    border: 1px solid #2b3140; border-radius: 8px; overflow: hidden;
+    background: #0d0f14; line-height: 0;
+  }
+  canvas { display: block; }
+  .hint { font-size: 12px; color: #7c869b; max-width: 470px; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>Maze Discovery — 24 Bots Explore (Tremaux / DFS)</h1>
+  <div id="hud">
+    <div class="stat"><span class="k">Completed</span><span class="v" id="completed">0</span></div>
+    <div class="stat"><span class="k">Timer (ticks)</span><span class="v" id="timer">0</span></div>
+    <button id="reset">Reset</button>
+  </div>
+  <div id="maze"></div>
+  <div class="hint">Each bot knows only its own cell and senses walls as it moves. It explores depth-first, marks dead branches in its own memory, backtracks, and stops when it discovers the exit. Timer freezes when the last bot arrives.</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- config ----------
+  const ROWS = 15, COLS = 15;
+  const CELL = 30;                 // 15*30 = 450px  (>= 400)
+  const stepMs = 90;               // real-time ms per logic tick (auto-run only)
+  const DIRS = ['n', 'e', 's', 'w'];
+  const DELTA = { n: [-1, 0], e: [0, 1], s: [1, 0], w: [0, -1] };
+  const OPP = { n: 's', s: 'n', e: 'w', w: 'e' };
+
+  // ---------- deterministic RNG (mulberry32) ----------
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // all 24 permutations of the 4 directions -> one distinct order per bot
+  function permutations(arr) {
+    if (arr.length <= 1) return [arr.slice()];
+    const res = [];
+    for (let i = 0; i < arr.length; i++) {
+      const rest = arr.slice(0, i).concat(arr.slice(i + 1));
+      for (const p of permutations(rest)) res.push([arr[i]].concat(p));
+    }
+    return res;
+  }
+  const ORDERS = permutations(DIRS); // exactly 24
+
+  // ---------- state ----------
+  const rows = ROWS, cols = COLS;
+  const spawn = { r: 0, c: 0 };
+  const exit = { r: ROWS - 1, c: COLS - 1 };
+  let cells = [];           // cells[r][c].walls = {n,e,s,w}
+  let bots = [];
+  let tickCount = 0;
+  let elapsed = 0;          // freezes at last arrival
+  let currentSeed = 1;
+  let rand = mulberry32(1);
+
+  let manualControl = false; // true once a script drives via game.tick/reset
+  let acc = 0;               // ms accumulator for auto-run
+  let progress = 1;          // interpolation fraction for rendering
+
+  // ---------- canvas ----------
+  const mazeEl = document.getElementById('maze');
+  const canvas = document.createElement('canvas');
+  canvas.width = cols * CELL;
+  canvas.height = rows * CELL;
+  mazeEl.appendChild(canvas);
+  const ctx = canvas.getContext('2d');
+
+  // ---------- helpers ----------
+  function inBounds(r, c) { return r >= 0 && c >= 0 && r < rows && c < cols; }
+  function neighbor(cell, d) {
+    const [dr, dc] = DELTA[d];
+    const r = cell.r + dr, c = cell.c + dc;
+    return inBounds(r, c) ? { r, c } : null;
+  }
+  function key(r, c) { return r + ',' + c; }
+
+  // ---------- maze generation (recursive backtracker, seeded) ----------
+  function buildMaze() {
+    cells = [];
+    for (let r = 0; r < rows; r++) {
+      const row = [];
+      for (let c = 0; c < cols; c++) {
+        row.push({ walls: { n: true, e: true, s: true, w: true }, seen: false });
+      }
+      cells.push(row);
+    }
+    const stack = [{ r: 0, c: 0 }];
+    cells[0][0].seen = true;
+    while (stack.length) {
+      const cur = stack[stack.length - 1];
+      const opts = [];
+      for (const d of DIRS) {
+        const nb = neighbor(cur, d);
+        if (nb && !cells[nb.r][nb.c].seen) opts.push({ d, nb });
+      }
+      if (opts.length) {
+        const pick = opts[Math.floor(rand() * opts.length)];
+        const { d, nb } = pick;
+        cells[cur.r][cur.c].walls[d] = false;
+        cells[nb.r][nb.c].walls[OPP[d]] = false;
+        cells[nb.r][nb.c].seen = true;
+        stack.push(nb);
+      } else {
+        stack.pop();
+      }
+    }
+  }
+
+  // ---------- bots ----------
+  function initBots() {
+    bots = [];
+    for (let i = 0; i < 24; i++) {
+      const b = {
+        id: i,
+        order: ORDERS[i],
+        color: 'hsl(' + Math.round((i * 360) / 24) + ',75%,58%)',
+        visited: new Set([key(spawn.r, spawn.c)]),
+        deadSet: new Set(),
+        stack: [{ r: spawn.r, c: spawn.c }],
+        prev: { r: spawn.r, c: spawn.c },
+        cur: { r: spawn.r, c: spawn.c },
+        // public API surface:
+        path: [{ r: spawn.r, c: spawn.c }],
+        deadEnds: [],
+        finishTick: null
+      };
+      bots.push(b);
+    }
+  }
+
+  // one DFS/Tremaux step for a single bot (purely local knowledge)
+  function stepBot(b) {
+    if (b.finishTick !== null) return;
+    const cur = b.stack[b.stack.length - 1];
+    const w = cells[cur.r][cur.c].walls; // bot senses walls of the cell it occupies
+    let next = null;
+    for (const d of b.order) {
+      if (w[d]) continue;                 // wall -> no passage
+      const nb = neighbor(cur, d);
+      if (!nb) continue;
+      const k = key(nb.r, nb.c);
+      if (b.visited.has(k) || b.deadSet.has(k)) continue; // already in memory
+      next = nb; break;
+    }
+
+    b.prev = { r: cur.r, c: cur.c };
+
+    if (next) {
+      // advance into an unexplored passage
+      b.visited.add(key(next.r, next.c));
+      b.stack.push(next);
+      b.cur = { r: next.r, c: next.c };
+      b.path.push({ r: next.r, c: next.c });
+      if (next.r === exit.r && next.c === exit.c) {
+        b.finishTick = tickCount; // discovered the exit
+      }
+    } else {
+      // dead end / fully explored branch -> mark dead in own memory, backtrack
+      b.deadSet.add(key(cur.r, cur.c));
+      b.deadEnds.push({ r: cur.r, c: cur.c });
+      b.stack.pop();
+      if (b.stack.length === 0) {
+        b.stack.push({ r: cur.r, c: cur.c }); // safety (never happens in perfect maze)
+        b.cur = { r: cur.r, c: cur.c };
+      } else {
+        const back = b.stack[b.stack.length - 1];
+        b.cur = { r: back.r, c: back.c };
+        b.path.push({ r: back.r, c: back.c });
+      }
+    }
+  }
+
+  function allFinished() {
+    for (const b of bots) if (b.finishTick === null) return false;
+    return true;
+  }
+
+  // ---------- deterministic logic tick ----------
+  function logicTick() {
+    if (allFinished()) return;          // frozen: no further change
+    tickCount++;
+    for (const b of bots) stepBot(b);
+    elapsed = tickCount;                // freezes because we early-return once done
+  }
+
+  // ---------- reset ----------
+  function doReset(seed) {
+    if (seed === undefined || seed === null) {
+      seed = (Math.random() * 0x7fffffff) >>> 0;
+    }
+    currentSeed = seed >>> 0;
+    rand = mulberry32(currentSeed);
+    buildMaze();
+    initBots();
+    tickCount = 0;
+    elapsed = 0;
+    acc = 0;
+    progress = 1;
+  }
+
+  // ---------- rendering ----------
+  function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#0d0f14';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // spawn & exit cells
+    ctx.fillStyle = 'rgba(60,200,120,0.30)';
+    ctx.fillRect(spawn.c * CELL, spawn.r * CELL, CELL, CELL);
+    ctx.fillStyle = 'rgba(235,80,90,0.35)';
+    ctx.fillRect(exit.c * CELL, exit.r * CELL, CELL, CELL);
+
+    // walls
+    ctx.strokeStyle = '#5a6credit'.slice(0, 0) || '#6b7488';
+    ctx.strokeStyle = '#7a839a';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'square';
+    ctx.beginPath();
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const w = cells[r][c].walls;
+        const x = c * CELL, y = r * CELL;
+        if (w.n) { ctx.moveTo(x, y); ctx.lineTo(x + CELL, y); }
+        if (w.w) { ctx.moveTo(x, y); ctx.lineTo(x, y + CELL); }
+        if (w.s) { ctx.moveTo(x, y + CELL); ctx.lineTo(x + CELL, y + CELL); }
+        if (w.e) { ctx.moveTo(x + CELL, y); ctx.lineTo(x + CELL, y + CELL); }
+      }
+    }
+    ctx.stroke();
+
+    // bots (smooth interpolation between prev and cur cell, centered)
+    const p = manualControl ? 1 : progress;
+    const rad = CELL * 0.30;
+    for (const b of bots) {
+      const px = (b.prev.c + 0.5) * CELL, py = (b.prev.r + 0.5) * CELL;
+      const cx = (b.cur.c + 0.5) * CELL, cy = (b.cur.r + 0.5) * CELL;
+      const x = px + (cx - px) * p;
+      const y = py + (cy - py) * p;
+      ctx.beginPath();
+      ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.fillStyle = b.color;
+      ctx.globalAlpha = b.finishTick !== null ? 0.55 : 1;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.stroke();
+    }
+
+    // HUD
+    let done = 0;
+    for (const b of bots) if (b.finishTick !== null) done++;
+    document.getElementById('completed').textContent = done;
+    document.getElementById('timer').textContent = elapsed;
+  }
+
+  // ---------- auto-run animation loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(now - last, 250);
+    last = now;
+    if (!manualControl && !allFinished()) {
+      acc += dt;
+      let guard = 0;
+      while (acc >= stepMs && !allFinished() && guard < 500) {
+        logicTick();
+        acc -= stepMs;
+        guard++;
+      }
+      progress = allFinished() ? 1 : Math.min(1, acc / stepMs);
+    } else {
+      progress = 1;
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- public scripting API ----------
+  window.game = {
+    tick: function (n) {
+      manualControl = true;            // a script is now driving; stop auto-advance
+      n = Math.max(0, n | 0);
+      for (let i = 0; i < n; i++) logicTick();
+      render();
+    },
+    reset: function (seed) {
+      manualControl = true;            // programmatic reset -> deterministic control
+      doReset(seed);
+      render();
+    },
+    get elapsed() { return elapsed; },
+    get size() { return { rows: rows, cols: cols }; },
+    get spawn() { return { r: spawn.r, c: spawn.c }; },
+    get exit() { return { r: exit.r, c: exit.c }; },
+    walls: function (r, c) {
+      const w = cells[r][c].walls;
+      return { n: w.n, e: w.e, s: w.s, w: w.w };
+    },
+    get bots() { return bots; }
+  };
+
+  // ---------- reset button (human) resumes live animation ----------
+  document.getElementById('reset').addEventListener('click', function () {
+    manualControl = false;
+    doReset();      // random maze
+    last = performance.now();
+    render();
+  });
+
+  // ---------- boot ----------
+  doReset(1);       // deterministic first maze
+  render();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

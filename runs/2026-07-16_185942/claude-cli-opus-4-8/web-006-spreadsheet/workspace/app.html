@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    margin: 0; padding: 16px; background: #f4f5f7; color: #1a1a1a;
+  }
+  #app {
+    min-width: 600px; min-height: 400px;
+    background: #fff; border: 1px solid #ccc; border-radius: 8px;
+    padding: 16px; display: inline-block;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  #grid {
+    display: grid;
+    grid-template-columns: 34px repeat(10, 58px);
+    gap: 1px;
+    background: #d0d0d0;
+    border: 1px solid #d0d0d0;
+    width: max-content;
+  }
+  .hd {
+    background: #eceef1; font-weight: 600; font-size: 12px;
+    display: flex; align-items: center; justify-content: center;
+    height: 28px; user-select: none;
+  }
+  .corner { background: #dfe2e6; }
+  #grid input {
+    border: none; outline: none; height: 28px; width: 100%;
+    padding: 0 5px; font-size: 13px; text-align: right;
+    background: #fff; font-family: inherit;
+  }
+  #grid input:focus { background: #fff8d6; box-shadow: inset 0 0 0 2px #4a90d9; text-align: left; }
+  .controls { margin: 14px 0 8px; }
+  #export {
+    font-size: 14px; padding: 7px 14px; cursor: pointer;
+    border: 1px solid #4a90d9; background: #4a90d9; color: #fff; border-radius: 5px;
+  }
+  #export:hover { background: #3b7ac0; }
+  #csv {
+    display: block; width: 100%; min-height: 90px; margin-top: 6px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+    padding: 8px; border: 1px solid #ccc; border-radius: 5px; resize: vertical;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <div id="grid"></div>
+  <div class="controls"><button id="export">Export CSV</button></div>
+  <textarea id="csv" placeholder="Computed values appear here after Export CSV"></textarea>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const COLS = ["A","B","C","D","E","F","G","H","I","J"];
+  const ROWS = [1,2,3,4,5,6,7,8,9,10];
+
+  const rawData = {};      // id -> raw text
+  const els = {};          // id -> input element
+
+  // caches rebuilt every recompute
+  let parsedCache = {};    // id -> {ast,refs} | {error:true} | null(plain)
+  let deps = {};           // id -> [validRefIds]
+  let cyclicSet = new Set();
+  let numCache = new Map();// id -> {val} | {err:true}
+  let displayCache = {};   // id -> string
+
+  // ---------- parsing ----------
+  function tokenize(s) {
+    const toks = [];
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (/[0-9.]/.test(c)) {
+        let j = i;
+        while (j < s.length && /[0-9.]/.test(s[j])) j++;
+        const num = parseFloat(s.slice(i, j));
+        if (isNaN(num)) throw "ERR";
+        toks.push({ t: "num", v: num });
+        i = j; continue;
+      }
+      if (/[A-Za-z]/.test(c)) {
+        let j = i;
+        while (j < s.length && /[A-Za-z0-9]/.test(s[j])) j++;
+        toks.push({ t: "ref", v: s.slice(i, j).toUpperCase() });
+        i = j; continue;
+      }
+      if ("+-*/()".indexOf(c) !== -1) { toks.push({ t: c }); i++; continue; }
+      throw "ERR";
+    }
+    return toks;
+  }
+
+  function validateRef(s) {
+    if (!/^([A-J])([1-9]|10)$/.test(s)) throw "ERR";
+    return s;
+  }
+
+  function parseFormula(src) {
+    const toks = tokenize(src);
+    let pos = 0;
+    const refs = new Set();
+    const peek = () => toks[pos];
+    const next = () => toks[pos++];
+
+    function parseExpr() {
+      let node = parseTerm();
+      while (peek() && (peek().t === "+" || peek().t === "-")) {
+        const op = next().t;
+        node = { type: "bin", op, left: node, right: parseTerm() };
+      }
+      return node;
+    }
+    function parseTerm() {
+      let node = parseFactor();
+      while (peek() && (peek().t === "*" || peek().t === "/")) {
+        const op = next().t;
+        node = { type: "bin", op, left: node, right: parseFactor() };
+      }
+      return node;
+    }
+    function parseFactor() {
+      const t = peek();
+      if (!t) throw "ERR";
+      if (t.t === "+") { next(); return { type: "pos", arg: parseFactor() }; }
+      if (t.t === "-") { next(); return { type: "neg", arg: parseFactor() }; }
+      if (t.t === "num") { next(); return { type: "num", value: t.v }; }
+      if (t.t === "ref") { next(); const id = validateRef(t.v); refs.add(id); return { type: "ref", id }; }
+      if (t.t === "(") {
+        next();
+        const e = parseExpr();
+        if (!peek() || peek().t !== ")") throw "ERR";
+        next();
+        return e;
+      }
+      throw "ERR";
+    }
+
+    const ast = parseExpr();
+    if (pos !== toks.length) throw "ERR";
+    return { ast, refs: Array.from(refs) };
+  }
+
+  // ---------- evaluation ----------
+  function evalNode(node) {
+    switch (node.type) {
+      case "num": return node.value;
+      case "ref": return numValue(node.id);
+      case "pos": return evalNode(node.arg);
+      case "neg": return -evalNode(node.arg);
+      case "bin": {
+        const a = evalNode(node.left);
+        const b = evalNode(node.right);
+        let v;
+        switch (node.op) {
+          case "+": v = a + b; break;
+          case "-": v = a - b; break;
+          case "*": v = a * b; break;
+          case "/": v = a / b; break;
+        }
+        if (!isFinite(v)) throw "ERR";
+        return v;
+      }
+    }
+    throw "ERR";
+  }
+
+  function numValue(id) {
+    if (numCache.has(id)) {
+      const c = numCache.get(id);
+      if (c.err) throw "ERR";
+      return c.val;
+    }
+    if (cyclicSet.has(id)) { numCache.set(id, { err: true }); throw "ERR"; }
+
+    const r = rawData[id] || "";
+    let result;
+    try {
+      if (r.charAt(0) === "=") {
+        const parsed = parsedCache[id];
+        if (!parsed || parsed.error) throw "ERR";
+        result = evalNode(parsed.ast);
+      } else {
+        const t = r.trim();
+        if (t === "") result = 0;
+        else {
+          const n = Number(t);
+          if (isNaN(n) || !isFinite(n)) throw "ERR";
+          result = n;
+        }
+      }
+    } catch (e) {
+      numCache.set(id, { err: true });
+      throw "ERR";
+    }
+    numCache.set(id, { val: result });
+    return result;
+  }
+
+  function fmt(v) {
+    if (Object.is(v, -0)) v = 0;
+    return Number(v.toPrecision(12)).toString();
+  }
+
+  // ---------- cycle detection ----------
+  function reaches(start) {
+    const seen = new Set();
+    const stack = (deps[start] || []).slice();
+    while (stack.length) {
+      const n = stack.pop();
+      if (n === start) return true;
+      if (seen.has(n)) continue;
+      seen.add(n);
+      const d = deps[n];
+      if (d) for (let i = 0; i < d.length; i++) stack.push(d[i]);
+    }
+    return false;
+  }
+
+  function allIds() {
+    const ids = [];
+    for (const r of ROWS) for (const c of COLS) ids.push(c + r);
+    return ids;
+  }
+
+  // ---------- recompute ----------
+  function recompute() {
+    parsedCache = {};
+    deps = {};
+    numCache = new Map();
+    displayCache = {};
+    cyclicSet = new Set();
+
+    const ids = allIds();
+
+    for (const id of ids) {
+      const r = rawData[id] || "";
+      if (r.charAt(0) === "=") {
+        try { parsedCache[id] = parseFormula(r.slice(1)); }
+        catch (e) { parsedCache[id] = { error: true, refs: [] }; }
+      } else {
+        parsedCache[id] = null;
+      }
+      const p = parsedCache[id];
+      deps[id] = (p && !p.error) ? p.refs : [];
+    }
+
+    for (const id of ids) {
+      if (reaches(id)) cyclicSet.add(id);
+    }
+
+    for (const id of ids) {
+      displayCache[id] = computeDisplay(id);
+    }
+
+    refreshDOM();
+  }
+
+  function computeDisplay(id) {
+    if (cyclicSet.has(id)) return "#CYCLE";
+    const r = rawData[id] || "";
+    if (r.charAt(0) !== "=") return r;
+    try { return fmt(numValue(id)); }
+    catch (e) { return "#ERR"; }
+  }
+
+  function refreshDOM() {
+    for (const id of allIds()) {
+      const el = els[id];
+      if (!el) continue;
+      if (document.activeElement === el) continue;
+      el.value = displayCache[id];
+    }
+  }
+
+  // ---------- UI ----------
+  function buildGrid() {
+    const grid = document.getElementById("grid");
+
+    const corner = document.createElement("div");
+    corner.className = "hd corner";
+    grid.appendChild(corner);
+
+    for (const c of COLS) {
+      const h = document.createElement("div");
+      h.className = "hd";
+      h.textContent = c;
+      grid.appendChild(h);
+    }
+
+    for (const r of ROWS) {
+      const rh = document.createElement("div");
+      rh.className = "hd";
+      rh.textContent = r;
+      grid.appendChild(rh);
+
+      for (const c of COLS) {
+        const id = c + r;
+        const input = document.createElement("input");
+        input.type = "text";
+        input.id = "cell-" + id;
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        els[id] = input;
+        rawData[id] = "";
+
+        input.addEventListener("focus", () => {
+          input.value = rawData[id] || "";
+          input.select();
+        });
+        input.addEventListener("blur", () => {
+          commit(id, input.value);
+        });
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        });
+
+        grid.appendChild(input);
+      }
+    }
+  }
+
+  function commit(id, text) {
+    rawData[id] = text;
+    recompute();
+  }
+
+  function exportCSV() {
+    const lines = [];
+    for (const r of ROWS) {
+      const row = [];
+      for (const c of COLS) row.push(displayCache[c + r]);
+      lines.push(row.join(","));
+    }
+    document.getElementById("csv").value = lines.join("\n");
+  }
+
+  // ---------- init ----------
+  buildGrid();
+  recompute();
+  document.getElementById("export").addEventListener("click", exportCSV);
+
+  // ---------- scripting API ----------
+  window.sheet = {
+    set: function (id, text) {
+      id = String(id).toUpperCase();
+      rawData[id] = String(text);
+      recompute();
+      return displayCache[id];
+    },
+    get: function (id) {
+      id = String(id).toUpperCase();
+      return displayCache[id];
+    },
+    raw: function (id) {
+      id = String(id).toUpperCase();
+      return rawData[id] || "";
+    }
+  };
+})();
+</script>
+</body>
+</html>

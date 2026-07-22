@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Autonomous Bot Maze Runner</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #1e272e;
+            color: #ecf0f1;
+            padding: 20px;
+        }
+
+        #game-container {
+            display: flex;
+            gap: 30px;
+            margin-top: 20px;
+            align-items: flex-start;
+        }
+
+        #maze {
+            border: 4px solid #34495e;
+            background-color: #2c3e50; /* Dark background for the maze area */
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.5);
+        }
+
+        #hud {
+            width: 300px;
+            padding: 20px;
+            background-color: #2c3e50;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        h2 {
+            color: #f39c12;
+            margin-top: 0;
+        }
+
+        #status-line p {
+            font-size: 1.1em;
+            margin: 8px 0;
+        }
+
+        #reset {
+            padding: 10px 20px;
+            background-color: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            margin-top: 15px;
+            transition: background-color 0.2s;
+        }
+
+        #reset:hover {
+            background-color: #c0392b;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Autonomous Bot Maze Challenge</h1>
+
+    <div id="game-container">
+        <!-- The canvas for the maze rendering -->
+        <canvas id="maze" width="640" height="640"></canvas>
+
+        <!-- HUD elements -->
+        <div id="hud">
+            <h2>Game Status</h2>
+            <div id="status-line">
+                <p>Time Elapsed: <span id="timer">0.0s</span></p>
+                <p>Bots Completed: <span id="completed">0/24</span></p>
+            </div>
+
+            <button id="reset">Reset Game</button>
+        </div>
+    </div>
+
+
+    <script>
+        // --- Configuration Constants ---
+        const GRID_SIZE = 15; // Min 15x15 cells
+        const CANVAS_PIXELS = 640;
+        const CELL_PIXEL_DIM = CANVAS_PIXELS / (GRID_SIZE - 1); // Use a slightly smaller effective grid size for padding/walls
+
+        // --- Global State Variables ---
+        let mazeGrid = [];
+        let walls = {};
+        let startPos = { x: 0, y: 0 };
+        let endPos = { x: GRID_SIZE - 1, y: GRID_SIZE - 1 };
+        const NUM_BOTS = 24;
+
+        // Bot state structure
+        class Bot {
+            constructor(id, startX, startY) {
+                this.id = id;
+                this.x = startX; // Cell coordinate (0 to GRID_SIZE-1)
+                this.y = startY;
+                this.path = []; // Array of {x, y} coordinates representing the path
+                this.stepIndex = 0;
+                this.isFinished = false;
+            }
+
+            // Moves one step along the calculated path
+            move() {
+                if (this.isFinished || this.path.length === 0) return true; // Already done or no path
+
+                if (this.stepIndex < this.path.length - 1) {
+                    const nextStep = this.path[this.stepIndex + 1];
+                    this.x = nextStep.x;
+                    this.y = nextStep.y;
+                    this.stepIndex++;
+                } else {
+                    // Reached the end of the path array (which should be the exit)
+                    this.isFinished = true;
+                }
+                return !this.isFinished; // Returns true if still moving
+            }
+
+            // Resets bot to spawn position and clears path
+            reset(startX, startY) {
+                this.x = startX;
+                this.y = startY;
+                this.path = [];
+                this.stepIndex = 0;
+                this.isFinished = false;
+            }
+        }
+
+        let bots = [];
+        let startTime = null;
+        let animationFrameId = null;
+        let gameIntervalHandle = null;
+
+
+        // --- Core Game Logic Functions ---
+
+        /**
+         * Maze Generation (Recursive Backtracker)
+         * @param {number} width - Grid width
+         * @param {number} height - Grid height
+         */
+        function generateMaze(width, height) {
+            mazeGrid = Array.from({ length: height }, () => Array(width).fill(true)); // true means wall exists
+
+            const stack = [];
+            let current = { x: 0, y: 0 };
+            stack.push(current);
+            mazeGrid[current.y][current.x] = false; // Start cell is open
+
+            while (stack.length > 0) {
+                let neighbors = [];
+                // Check potential moves (N, S, E, W)
+                const directions = [
+                    { dx: 0, dy: -1, wx: 0, wy: -2 }, // North
+                    { dx: 0, dy: 1, wx: 0, wy: 2 },  // South
+                    { dx: 1, dy: 0, wx: 2, wy: 0 },   // East
+                    { dx: -1, dy: 0, wx: -2, wy: 0 }  // West
+                ];
+
+                for (const dir of directions) {
+                    const nx = current.x + dir.dx;
+                    const ny = current.y + dir.dy;
+
+                    if (nx >= 0 && nx < width && ny >= 0 && ny < height && mazeGrid[ny][nx]) {
+                        neighbors.push({ x: nx, y: ny, wallX: current.x + Math.sign(dir.dx) * 1, wallY: current.y + Math.sign(dir.dy) * 1 });
+                    }
+                }
+
+                if (neighbors.length > 0) {
+                    // Pick a random unvisited neighbor
+                    const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+
+                    // Carve path: open the wall and the cell
+                    mazeGrid[next.y][next.x] = false; // Open destination cell
+                    walls[`${next.wallY}-${next.wallX}`] = false; // Open wall between cells
+
+                    stack.push({ x: next.x, y: next.y });
+                    current = { x: next.x, y: next.y };
+                } else {
+                    // Backtrack
+                    stack.pop();
+                    if (stack.length > 0) {
+                        current = stack[stack.length - 1];
+                    }
+                }
+            }
+
+            // Ensure start and end points are open
+            mazeGrid[startPos.y][startPos.x] = false;
+            mazeGrid[endPos.y][endPos.x] = false;
+        }
+
+
+        /**
+         * Pathfinding using Breadth-First Search (BFS)
+         * Finds the shortest path from start to end through open cells.
+         * @returns {Array<{x: number, y: number}> | null} The path array including start and end.
+         */
+        function findPath(start, end) {
+            const queue = [{ x: start.x, y: start.y, path: [{ x: start.x, y: start.y }] }];
+            const visited = new Set();
+            visited.add(`${start.x},${start.y}`);
+
+            while (queue.length > 0) {
+                const current = queue.shift();
+
+                if (current.x === end.x && current.y === end.y) {
+                    return current.path; // Found the path!
+                }
+
+                // Check neighbors (N, S, E, W)
+                const directions = [
+                    { dx: 0, dy: -1 }, { dx: 0, dy: 1 },
+                    { dx: 1, dy: 0 }, { dx: -1, dy: 0 }
+                ];
+
+                for (const dir of directions) {
+                    const nx = current.x + dir.dx;
+                    const ny = current.y + dir.dy;
+                    const key = `${nx},${ny}`;
+
+                    // Check bounds, if cell is open (not a wall), and not visited
+                    if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE &&
+                        mazeGrid[ny][nx] === false && !visited.has(key)) {
+
+                        visited.add(key);
+                        const newPath = [...current.path, { x: nx, y: ny }];
+                        queue.push({ x: nx, y: ny, path: newPath });
+                    }
+                }
+            }
+            return null; // No path found
+        }
+
+        /**
+         * Initializes the game state: generates maze, sets up bots, and calculates paths.
+         */
+        function initializeGame() {
+            // 1. Reset State
+            bots = [];
+            startTime = null;
+            document.getElementById('timer').textContent = '0.0s';
+            document.getElementById('completed').textContent = `0/24`;
+
+            // 2. Generate Maze (Perfect maze)
+            generateMaze(GRID_SIZE, GRID_SIZE);
+
+            // 3. Set Start and End Points
+            startPos = { x: 1, y: 1 }; // Ensure start is not on the edge for better visualization
+            endPos = { x: GRID_SIZE - 2, y: GRID_SIZE - 2 };
+
+            // 4. Initialize Bots
+            for (let i = 0; i < NUM_BOTS; i++) {
+                const bot = new Bot(i, startPos.x, startPos.y);
+                bots.push(bot);
+            }
+
+            // 5. Calculate Paths for all bots
+            const path = findPath(startPos, endPos);
+
+            if (!path) {
+                console.error("FATAL: Could not find a solvable path!");
+                alert("Error: The generated maze is unsolvable.");
+                return false;
+            }
+
+            // Assign the calculated path to every bot (they all follow the same optimal route)
+            bots.forEach(bot => {
+                bot.path = [...path]; // Copy the path array
+            });
+
+            console.log("Game initialized successfully. Paths set.");
+            return true;
+        }
+
+
+        // --- Rendering and Animation ---
+
+        const canvas = document.getElementById('maze');
+        const ctx = canvas.getContext('2d');
+
+        /**
+         * Draws the entire game state: walls, start/end points, bots, and paths.
+         */
+        function draw() {
+            // Clear Canvas
+            ctx.clearRect(0, 0, CANVAS_PIXELS, CANVAS_PIXELS);
+
+            // 1. Draw Walls (Background)
+            for (let y = 0; y < GRID_SIZE; y++) {
+                for (let x = 0; x < GRID_SIZE; x++) {
+                    const pixelX = x * CELL_PIXEL_DIM;
+                    const pixelY = y * CELL_PIXEL_DIM;
+
+                    // Check if the cell is a wall in the generated grid
+                    if (mazeGrid[y][x]) {
+                        ctx.fillStyle = '#34495e'; // Wall color
+                        ctx.fillRect(pixelX, pixelY, CELL_PIXEL_DIM, CELL_PIXEL_DIM);
+                    } else {
+                         // Draw open cell background slightly lighter
+                        ctx.fillStyle = '#2c3e50';
+                        ctx.fillRect(pixelX, pixelY, CELL_PIXEL_DIM, CELL_PIXEL_DIM);
+                    }
+                }
+            }
+
+            // 2. Draw Paths (Optional: for debugging/visualization)
+            /*
+            ctx.strokeStyle = 'rgba(52, 152, 219, 0.3)'; // Light blue path trace
+            ctx.lineWidth = 2;
+            for (let i = 0; i < GRID_SIZE - 1; i++) {
+                for (let j = 0; j < GRID_SIZE - 1; j++) {
+                    // Draw a line segment if the wall was removed between cells
+                    if (!walls[`${j+1}-${i}`]) {
+                        ctx.beginPath();
+                        ctx.moveTo(j * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2, i * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2);
+                        ctx.lineTo((j+1) * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2, i * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2);
+                        ctx.stroke();
+                    }
+                }
+            }
+            */
+
+            // 3. Draw Start and End Points
+            const drawPoint = (x, y, color) => {
+                const px = x * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2;
+                const py = y * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2;
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(px, py, Math.min(CELL_PIXEL_DIM * 0.4, 15), 0, Math.PI * 2);
+                ctx.fill();
+            };
+
+            drawPoint(startPos.x, startPos.y, '#2ecc71'); // Green Start
+            drawPoint(endPos.x, endPos.y, '#e67e22');   // Orange End
+
+
+            // 4. Draw Bots and Paths (Animated)
+            const BOT_RADIUS = Math.min(CELL_PIXEL_DIM * 0.35, 12);
+
+            bots.forEach((bot, index) => {
+                if (bot.isFinished) return;
+
+                // Calculate current pixel position based on cell coords
+                const px = bot.x * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2;
+                const py = bot.y * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2;
+
+                // Draw the path trace (optional)
+                ctx.strokeStyle = `rgba(52, 152, 219, ${0.3 + index * 0.01})`; // Fading blue trail
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                // Draw up to the current step index
+                for (let i = 0; i < bot.stepIndex; i++) {
+                    const p = bot.path[i];
+                    const px_p = p.x * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2;
+                    const py_p = p.y * CELL_PIXEL_DIM + CELL_PIXEL_DIM / 2;
+
+                    if (i === 0) {
+                        ctx.moveTo(px_p, py_p);
+                    } else {
+                        ctx.lineTo(px_p, py_p);
+                    }
+                }
+                ctx.stroke();
+
+
+                // Draw the bot itself
+                ctx.fillStyle = index % 2 === 0 ? '#3498db' : '#f1c40f'; // Alternating colors
+                ctx.beginPath();
+                ctx.arc(px, py, BOT_RADIUS, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Add a small indicator for direction (optional)
+                const nextStep = bot.path[bot.stepIndex + 1];
+                if (nextStep) {
+                    const dx = nextStep.x - bot.x;
+                    const dy = nextStep.y - bot.y;
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                    ctx.fillRect(px + (dx * CELL_PIXEL_DIM / 4), py + (dy * CELL_PIXEL_DIM / 4), 3, 3);
+                }
+
+            });
+        }
+
+
+        /**
+         * The main animation loop using requestAnimationFrame.
+         */
+        function gameLoop() {
+            if (!startTime) return; // Game not started or reset
+
+            // Update Time HUD
+            const elapsed = Date.now() - startTime;
+            document.getElementById('timer').textContent = `${(elapsed / 1000).toFixed(1)}s`;
+
+
+            // 1. Advance Bots (Movement Logic)
+            let botsMovedThisFrame = false;
+            bots.forEach(bot => {
+                if (!bot.isFinished) {
+                    const moved = bot.move();
+                    if (moved) {
+                        botsMovedThisFrame = true;
+                    }
+                }
+            });
+
+            // 2. Check Completion Status
+            let completedCount = bots.filter(b => b.isFinished).length;
+            document.getElementById('completed').textContent = `${completedCount}/${NUM_BOTS}`;
+
+            if (completedCount === NUM_BOTS) {
+                console.log("All bots finished!");
+                cancelAnimationFrame(animationFrameId);
+                gameIntervalHandle = null;
+                return;
+            }
+
+
+            // 3. Redraw everything
+            draw();
+
+            // Schedule next frame
+            animationFrameId = requestAnimationFrame(gameLoop);
+        }
+
+
+        /**
+         * Advances the simulation synchronously by N steps.
+         * This function is deterministic and must be fast-forwardable for testing.
+         * @param {number} n - Number of steps to advance (e.g., 5000).
+         */
+        function tick(n) {
+            let stepsTaken = 0;
+            const maxSteps = Math.min(n, 1000); // Limit ticks to prevent infinite loops in tests
+
+            for (let i = 0; i < maxSteps && stepsTaken < n; i++) {
+                let botsMovedThisTick = false;
+                bots.forEach(bot => {
+                    if (!bot.isFinished) {
+                        const moved = bot.move();
+                        if (moved) {
+                            botsMovedThisTick = true;
+                        }
+                    }
+                });
+
+                // If no bots are moving, we can stop early
+                if (!botsMovedThisTick && stepsTaken > 0) break;
+
+                stepsTaken++;
+            }
+
+            // Redraw the final state after synchronous ticks
+            draw();
+        }
+
+
+        /**
+         * Resets the game to its initial state.
+         */
+        function resetGame() {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+
+            // Clear any interval timers
+            if (gameIntervalHandle) {
+                clearInterval(gameIntervalHandle);
+                gameIntervalHandle = null;
+            }
+
+            if (initializeGame()) {
+                // Start the animation loop and timer
+                startTime = Date.now();
+                gameLoop();
+            }
+        }
+
+
+        // --- API Exposure and Event Listeners ---
+
+        window.game = {
+            bots: bots, // Array of Bot objects
+            completed: () => bots.filter(b => b.isFinished).length, // Getter for completion count
+            elapsedMs: () => startTime ? Date.now() - startTime : 0, // Getter for elapsed time
+            tick: tick,
+            reset: resetGame
+        };
+
+        document.getElementById('reset').addEventListener('click', window.game.reset);
+
+
+        // Initial setup call to start the game when the page loads
+        window.onload = () => {
+            if (initializeGame()) {
+                console.log("Starting initial animation loop...");
+                window.game.reset(); // Use reset function to kick off the first run
+            }
+        };
+
+    </script>
+</body>
+</html>

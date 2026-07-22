@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>WastedToken Mint</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:#0a0a0f;color:#e8e6df;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;overflow-x:hidden}
+
+  /* ── Hero ─────────────────────────────────────── */
+  .hero{position:relative;width:100%;height:72vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at center,#141428 0%,#0a0a0f 65%)}
+  #coin-hero{width:100%;height:100%;display:block}
+
+  /* ── About ─────────────────────────────────────── */
+  .about{max-width:720px;margin:0 auto;padding:80px 24px;text-align:center;position:relative;z-index:2}
+  .about h2{font-size:clamp(1.6rem,3vw,2.4rem);letter-spacing:.04em;color:#c9b896;margin-bottom:16px}
+  .about p{color:#a8a397;line-height:1.85;font-size:clamp(.95rem,2vw,1.1rem);max-width:600px;margin-inline:auto}
+
+  /* ── Collection ─────────────────────────────────── */
+  .collection{padding:40px 24px 80px;max-width:1100px;margin:0 auto}
+  .collection h3{font-size:clamp(1.3rem,2.5vw,1.9rem);text-align:center;color:#c9b896;margin-bottom:32px;letter-spacing:.06em;text-transform:uppercase;font-weight:700}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:24px}
+
+  /* ── Edition tile ──────────────────────────────── */
+  .edition{background:#13131f;border-radius:16px;padding:28px;text-align:center;position:relative;overflow:hidden;border:1px solid #1e1e2a;transition:border-color .3s,transform .3s}
+  .edition:hover{border-color:#4a3f2a;transform:translateY(-2px)}
+  .edition h4{font-size:.95rem;color:#c9b896;margin-bottom:10px;text-transform:uppercase;letter-spacing:.1em;font-weight:700}
+  .edition canvas.edition-canvas{width:100%;height:auto;display:block;border-radius:8px;background:#0d0d14}
+  .edition .status{font-size:.75rem;color:#6b635a;margin-top:10px;letter-spacing:.06em;text-transform:uppercase;font-weight:600}
+  .edition button.buy{margin-top:12px;padding:8px 24px;border:none;border-radius:8px;background:linear-gradient(135deg,#c9b896,#a8977a);color:#0a0a0f;font-weight:700;cursor:pointer;font-size:.85rem;letter-spacing:.04em;width:100%;transition:opacity .2s}
+  button.buy:hover{opacity:.85}
+  .edition[data-state="sold-out"] button.buy,.edition[data-state="coming-soon"] button.buy{background:#3a3a4a;color:#6b635a;cursor:not-allowed;pointer-events:none;opacity:.5}
+
+  /* ── Footer ─────────────────────────────────────── */
+  footer{text-align:center;padding:28px;font-size:.78rem;color:#4a443c;letter-spacing:.06em;text-transform:uppercase}
+</style>
+</head>
+<body>
+
+<section class="hero"><canvas id="coin-hero"></canvas></section>
+
+<section class="about">
+  <h2>Crafted for the Bold</h2>
+  <p>Every WastedToken Mint challenge coin is hand-finished in our studio — from the reeded edge to the raised-relief emblem. We turn ambition into something you can hold, flip, and keep forever.</p>
+</section>
+
+<section class="collection">
+  <h3>The Collection</h3>
+  <div class="grid" id="edition-grid"></div>
+</section>
+
+<footer>© WastedToken Mint · Forged in the Forge</footer>
+
+<script>
+/* ═══════════════════════════════════════════════
+   WASTEDTOKEN MINT — SELF-CONTAINED WEBGL COIN
+   ═══════════════════════════════════════════════ */
+
+// ── Globals ───────────────────────────────────────
+const canvas = document.getElementById('coin-hero');
+let gl, program, locs;
+let time = 0, paused = false;
+let animId = null;
+
+// Coin geometry constants
+const COIN_R   = 120;      // outer radius (pixels in world space)
+const EDGE_W   = 8;        // reeded edge width
+const INNER_R  = COIN_R - EDGE_W * 2; // inner disc radius
+const TEX_SIZE = 512;
+
+// ── Procedural textures via Canvas 2D ─────────────
+function makeTexture(ctx, w, h, drawFn) {
+  const c = document.createElement('canvas');
+  c.width=c.height=w;
+  const cx = c.getContext('2d');
+  drawFn(cx,w,h);
+  return gl.createTexture();
+}
+
+function createFrontTex() {
+  // Front: WastedToken Mint emblem in raised relief
+  const t = makeTexture(gl, TEX_SIZE, TEX_SIZE, (cx,w,h)=>{
+    cx.clearRect(0,0,w,h);
+    cx.save();
+    cx.translate(w/2,h/2);
+
+    // Outer ring
+    cx.strokeStyle='rgba(180,150,90,.7)';
+    cx.lineWidth=6;
+    cx.beginPath();cx.arc(0,0,w/2-3,0,Math.PI*2);cx.stroke();
+
+    // Inner circle
+    cx.fillStyle='rgba(200,175,100,.18)';
+    cx.beginPath();cx.arc(0,0,w/2-14,0,Math.PI*2);cx.fill();
+
+    // Central emblem — stylised "W" token shape
+    cx.strokeStyle='rgba(230,210,150,.9)';
+    cx.lineWidth=3;
+    cx.beginPath();
+    const r=w/4.2;
+    for(let i=0;i<6;i++){const a=i*Math.PI*2/6- Math.PI/6;cx.moveTo(Math.cos(a)*r,Math.sin(a)*r);cx.lineTo(Math.cos(a+Math.PI/3)*r*1.15,Math.sin(a+Math.PI/3)*r*1.15);}
+    cx.closePath();cx.stroke();
+
+    // Raised relief text arc "WASTEDTOKEN MINT"
+    const txt='WASTEDTOKEN';
+    ctx.font=`bold ${w*.06}px system-ui`;
+    ctx.textAlign='center';
+    ctx.fillStyle='rgba(210,185,120,.7)';
+    ctx.fillText(txt,w/2,-r*1.3);
+
+    // Raised relief text arc "MINT"
+    ctx.font=`bold ${w*.06}px system-ui`;
+    ctx.fillText('MINT',w/2,r*1.3);
+
+    cx.restore();
+  });
+  return t;
+}
+
+function createBackTex() {
+  // Back: denomination "10,000 TOKENS"
+  const t = makeTexture(gl, TEX_SIZE, TEX_SIZE, (cx,w,h)=>{
+    cx.clearRect(0,0,w,h);
+    cx.save();
+    cx.translate(w/2,h/2);
+
+    // Outer ring
+    cx.strokeStyle='rgba(180,150,90,.6)';
+    cx.lineWidth=5;
+    cx.beginPath();cx.arc(0,0,w/2-3,0,Math.PI*2);cx.stroke();
+
+    // Denomination number
+    ctx.font=`bold ${w*.14}px system-ui`;
+    ctx.textAlign='center';
+    ctx.fillStyle='rgba(235,215,160,.9)';
+    ctx.fillText('10,000',0,-w*.28);
+
+    // Token label
+    ctx.font=`bold ${w*.07}px system-ui`;
+    ctx.fillStyle='rgba(210,185,130,.7)';
+    ctx.fillText('TOKENS',0,w*.26);
+
+    cx.restore();
+  });
+  return t;
+}
+
+// ── WebGL setup ────────────────────────────────────
+function initGL() {
+  gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+  if(!gl) throw new Error('WebGL not supported');
+
+  const vsSrc=`
+    attribute vec2 aPos;
+    varying vec2 vUv;
+    void main(){ vUv=aPos*.5+.5; gl_Position=vec4(aPos,0.0,1.0); }`;
+
+  const fsSrc=`
+    precision mediump float;
+    uniform sampler2D uTex;
+    uniform vec3  uColor;
+    uniform vec3  uLightDir;
+    uniform vec3  uViewDir;
+    varying vec2  vUv;
+
+    void main(){
+      vec4 tc=texture2D(uTex,vUv);
+      float alpha=max(tc.r,tc.g); // use luminance as opacity
+      if(alpha<.01) discard;
+
+      vec3 N=normalize(vec3(0.,0.,1.));
+      vec3 L=uLightDir;
+      vec3 V=uViewDir;
+      vec3 H=normalize(L+V);
+
+      float diff=max(dot(N,L),.05);
+      float spec=pow(max(dot(N,H),.0),64.);
+      float fresnel=pow(1.-max(dot(V,N),.0),8.);
+
+      vec3 col=uColor*(diff+.2)+vec3(.9,.85,.7)*spec*fresnel;
+      gl_FragColor=vec4(col,alpha);
+    }`;
+
+  const sh = {vs:gl.createShader(gl.VERTEX_SHADER),fs:gl.createShader(gl.FRAGMENT_SHADER)};
+  for(const k in sh){const s=sh[k];gl.shaderSource(s,eval(k==='vs'?vsSrc:fsSrc));gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error('Shader error: '+gl.getShaderInfoLog(s));}
+  program=gl.createProgram();
+  gl.attachShader(program,sh.vs);gl.attachShader(program,sh.fs);gl.linkProgram(program);
+  if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw new Error('Link error: '+gl.getProgramInfoLog(program));
+
+  locs={aPos:gl.getAttribLocation(program,'aPos'),uTex:gl.getUniformLocation(program,'uTex'),uColor:gl.getUniformLocation(program,'uColor'),uLightDir:gl.getUniformLocation(program,'uLightDir'),uViewDir:gl.getUniformLocation(program,'uViewDir')};
+}
+
+// ── Rotation helpers (deterministic) ───────────────
+function rotFor(t){
+  // t∈[0,1] → full loop. Coin rotates about Y axis AND flips about X.
+  const a=t*Math.PI*2;
+  return {x:Math.sin(a/4)*.55,y:a};
+}
+
+// ── Render one disc (front or back) ────────────────
+function renderDisc(gl, tex, color, angleX, angleY){
+  const w=canvas.width,h=canvas.height;
+  gl.viewport(0,0,w,h);
+  gl.clearColor(.07,.07,.1,.95);
+  gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
+
+  // Full-screen quad with perspective-like projection via UV distortion
+  const verts=[-COIN_R,-COIN_R, COIN_R,-COIN_R, COIN_R, COIN_R, -COIN_R, COIN_R];
+  const uvs=[[0,1],[1,1],[1,0],[0,0]];
+
+  gl.useProgram(program);
+  gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(locs.aPos);
+  gl.vertexAttribPointer(locs.aPos,2,false,0,0,0);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.uniform1i(locs.uTex,0);
+  gl.uniform3f(locs.uColor,color[0],color[1],color[2]);
+
+  // Light direction rotates with coin so specular rakes across surface
+  const Lx=Math.cos(angleY)*.7+Math.sin(angleX)*.3;
+  const Ly=Math.sin(angleY)*.5-Math.cos(angleX)*.3;
+  const Lz=Math.cos(angleX)*.4+.6;
+  gl.uniform3f(locs.uLightDir,Lx,Ly,Lz);
+
+  // View direction fixed (camera looking at coin)
+  gl.uniform3f(locs.uViewDir,0,-1,.5);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+}
+
+// ── Render reeded edge ring ────────────────────────
+function renderEdgeRing(gl){
+  const w=canvas.width,h=canvas.height;
+  gl.viewport(0,0,w,h);
+  gl.clearColor(.07,.07,.1,.95);
+  gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
+
+  // Ring between inner and outer radius — reeded ridges visible as coin turns
+  const verts=[-COIN_R,-COIN_R, COIN_R,-COIN_R, COIN_R, COIN_R, -COIN_R, COIN_R];
+  const uvs=[[0,1],[1,1],[1,0],[0,0]];
+
+  gl.useProgram(program);
+  gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(locs.aPos);
+  gl.vertexAttribPointer(locs.aPos,2,false,0,0,0);
+
+  // Edge texture: procedural ridges via a small canvas
+  const edgeTex=makeTexture(gl,16,16,(cx,w,h)=>{
+    cx.clearRect(0,0,w,h);
+    for(let i=0;i<8;i++){const y=i*w/8;cx.fillStyle='rgba(200,175,110,.3)';cx.fillRect(0,y,w*0.45,Math.max(1,w*.06));}
+  });
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,edgeTex);
+  gl.uniform1i(locs.uTex,0);
+
+  // Edge color — metallic bronze-ish
+  gl.uniform3f(locs.uColor,.85,.7,.4);
+
+  const a=rotFor(time).y;
+  const Lx=Math.cos(a)*.7+Math.sin(rotFor(time).x)*.3;
+  const Ly=Math.sin(a)*.5-Math.cos(rotFor(time).x)*.3;
+  const Lz=Math.cos(rotFor(time).x)*.4+.6;
+  gl.uniform3f(locs.uLightDir,Lx,Ly,Lz);
+  gl.uniform3f(locs.uViewDir,0,-1,.5);
+
+  // Draw ring as two triangles with UV offset to show ridges
+  const edgeVerts=[-COIN_R,-COIN_R, COIN_R,-COIN_R, COIN_R, COIN_R, -COIN_R, COIN_R];
+  gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(edgeVerts),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(locs.aPos);
+  gl.vertexAttribPointer(locs.aPos,2,false,0,0,0);
+
+  // Use a second draw with offset UV to show ridges on edge
+  const edgeTex2=makeTexture(gl,16,16,(cx,w,h)=>{
+    cx.clearRect(0,0,w,h);
+    for(let i=0;i<8;i++){const y=i*w/8;cx.fillStyle='rgba(160,135,75,.4)';cx.fillRect(w*.55,y,w*0.45,Math.max(1,w*.06));}
+  });
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,edgeTex2);
+  gl.uniform1i(locs.uTex,0);
+
+  // Draw ring twice with different UV offsets to create ridged appearance
+  const drawRing=(uvOff)=>{
+    gl.uniform3f(locs.uColor,.85,.7,.4);
+    gl.uniform3f(locs.uLightDir,Lx,Ly,Lz);
+    gl.uniform3f(locs.uViewDir,0,-1,.5);
+    // Offset UV by uvOff to show different ridges
+    const verts2=[-COIN_R,-COIN_R+uvOff*4, COIN_R,-COIN_R+uvOff*4, COIN_R, COIN_R+uvOff*4, -COIN_R, COIN_R+uvOff*4];
+    gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts2),gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(locs.aPos);
+    gl.vertexAttribPointer(locs.aPos,2,false,0,0,0);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  };
+
+  drawRing(0);
+  drawRing(.5);
+}
+
+// ── Main render ────────────────────────────────────
+function render(){
+  if(paused)return;
+  time+=1/60;
+  if(time>1)time=0;
+
+  const rx=rotFor(time).x, ry=rotFor(time).y;
+
+  // Front face (bronze-ish)
+  renderDisc(gl, frontTex, [1.0,.75,.3], rx, ry);
+  // Back face (slightly different tone)
+  renderDisc(gl, backTex, [.9,.8,.6], -rx, -ry);
+  // Reeded edge
+  renderEdgeRing(gl);
+
+  animId=requestAnimationFrame(render);
+}
+
+// ── Public API ─────────────────────────────────────
+function setTime(t){
+  if(t<0)t=0;if(t>1)t=1;time=t;
+  const w=canvas.width,h=canvas.height;
+  gl.viewport(0,0,w,h);
+  gl.clearColor(.07,.07,.1,.95);
+  gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
+
+  const rx=rotFor(time).x, ry=rotFor(time).y;
+
+  // Front face
+  gl.useProgram(program);
+  gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-COIN_R,-COIN_R, COIN_R,-COIN_R, COIN_R, COIN_R, -COIN_R, COIN_R]),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(locs.aPos);
+  gl.vertexAttribPointer(locs.aPos,2,false,0,0,0);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,frontTex);
+  gl.uniform1i(locs.uTex,0);
+  gl.uniform3f(locs.uColor,1.0,.75,.3);
+  const Lx=Math.cos(ry)*.7+Math.sin(rx)*.3;
+  const Ly=Math.sin(ry)*.5-Math.cos(rx)*.3;
+  const Lz=Math.cos(rx)*.4+.6;
+  gl.uniform3f(locs.uLightDir,Lx,Ly,Lz);
+  gl.uniform3f(locs.uViewDir,0,-1,.5);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  // Back face
+  gl.bindTexture(gl.TEXTURE_2D,backTex);
+  gl.uniform3f(locs.uColor,.9,.8,.6);
+  gl.uniform3f(locs.uLightDir,-Lx,-Ly,Lz);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  // Edge ring
+  const edgeVerts=[-COIN_R,-COIN_R, COIN_R,-COIN_R, COIN_R, COIN_R, -COIN_R, COIN_R];
+  gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(edgeVerts),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(locs.aPos);
+  gl.vertexAttribPointer(locs.aPos,2,false,0,0,0);
+
+  const edgeTex=makeTexture(gl,16,16,(cx,w,h)=>{for(let i=0;i<8;i++){const y=i*w/8;cx.fillStyle='rgba(200,175,110,.3)';cx.fillRect(0,y,w*.45,Math.max(1,w*.06));}});
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,edgeTex);
+  gl.uniform1i(locs.uTex,0);
+  gl.uniform3f(locs.uColor,.85,.7,.4);
+  gl.uniform3f(locs.uLightDir,Lx,Ly,Lz);
+  gl.uniform3f(locs.uViewDir,0,-1,.5);
+
+  const drawRing=(uvOff)=>{
+    const verts2=[-COIN_R,-COIN_R+uvOff*4, COIN_R,-COIN_R+uvOff*4, COIN_R, COIN_R+uvOff*4, -COIN_R, COIN_R+uvOff*4];
+    gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts2),gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(locs.aPos);
+    gl.vertexAttribPointer(locs.aPos,2,false,0,0,0);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  };
+  drawRing(0);drawRing(.5);
+}
+
+function pause(){
+  paused=true;
+  if(animId){cancelAnimationFrame(animId);animId=null;}
+}
+
+window.demo={canvas,setTime,pause};
+
+// ── Build edition grid ─────────────────────────────
+const editions=[
+  {id:'bronze',name:'Bronze',state:'available',color:[.85,.7,.3],label:'10,000 TOKENS'},
+  {id:'silver',name:'Silver',state:'available',color:[.9,.9,.92],label:'10,000 TOKENS'},
+  {id:'gold',name:'Gold',state:'sold-out',color:[1,.85,.3],label:'10,000 TOKENS'},
+  {id:'black',name:'Obsidian Black',state:'coming-soon',color:[.2,.2,.25],label:'NEXT SEASON: AUTUMN 2026'},
+];
+
+const grid=document.getElementById('edition-grid');
+editions.forEach(ed=>{
+  const div=document.createElement('div');
+  div.className='edition';
+  div.dataset.edition=ed.id;
+  div.dataset.state=ed.state;
+
+  // Edition canvas — render a small coin representation
+  const c=document.createElement('canvas');
+  c.className='edition-canvas';
+  c.width=256;c.height=256;
+  const ctx=c.getContext('2d');
+  ctx.clearRect(0,0,256,256);
+
+  // Draw coin disc
+  ctx.save();
+  ctx.translate(128,128);
+  ctx.beginPath();ctx.arc(0,0,110,0,Math.PI*2);ctx.closePath();
+  const grad=ctx.createRadialGradient(-30,-30,10,0,0,110);
+  grad.addColorStop(0,ed.color[0]*.9+'.2');
+  grad.addColorStop(.5,ed.color.join(','));
+  grad.addColorStop(1,ed.color[0]*.4+'.3');
+  ctx.fillStyle=grad;ctx.fill();
+
+  // Reeded edge
+  ctx.strokeStyle='rgba(255,255,255,.15)';ctx.lineWidth=2;
+  for(let i=0;i<8;i++){const a=i*Math.PI/4;ctx.beginPath();ctx.moveTo(Math.cos(a)*110,Math.sin(a)*110);ctx.lineTo(Math.cos(a+Math.PI/4)*106,Math.sin(a+Math.PI/4)*106);ctx.stroke();}
+
+  // Front text
+  ctx.fillStyle='#c9b896';ctx.font='bold 22px system-ui';ctx.textAlign='center';
+  ctx.fillText(ed.label,0,-55);
+  ctx.font='11px system-ui';ctx.fillStyle='#a8977a';
+  ctx.fillText('WASTEDTOKEN MINT',0,55);
+
+  // Back text (rotated)
+  ctx.save();ctx.rotate(Math.PI/2);
+  ctx.fillStyle='#c9b896';ctx.font='bold 18px system-ui';ctx.textAlign='center';
+  ctx.fillText(ed.label,0,-40);
+  ctx.restore();
+
+  ctx.restore();
+
+  // Status text & button
+  const status=document.createElement('div');
+  status.className='status';
+  if(ed.state==='sold-out') status.textContent='SOLD OUT';
+  else if(ed.state==='coming-soon'){const season=['Spring','Summer','Autumn','Fall','Winter'][Math.floor(Math.random()*5)];status.textContent=`MINTING NEXT SEASON: ${season} 2026`;div.dataset.season=season;}
+  else status.textContent='Available';
+
+  const btn=document.createElement('button');
+  btn.className='buy';
+  if(ed.state==='available'){btn.textContent='Add to cart';btn.disabled=false;}
+  else{btn.textContent=ed.state==='sold-out'?'SOLD OUT':`Coming ${div.dataset.season||''}`;btn.disabled=true;}
+
+  div.appendChild(c);div.appendChild(status);div.appendChild(btn);
+  grid.appendChild(div);
+});
+
+// ── Start animation ────────────────────────────────
+initGL();
+frontTex=createFrontTex();
+backTex=createBackTex();
+render();
+</script>
+</body>
+</html>

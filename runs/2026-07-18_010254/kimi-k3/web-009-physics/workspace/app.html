@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bounce Lab — Bouncing Ball Playground</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(1000px 620px at 50% -12%, rgba(56, 189, 248, 0.09), rgba(0, 0, 0, 0) 60%),
+      radial-gradient(900px 700px at 88% 112%, rgba(167, 139, 250, 0.08), rgba(0, 0, 0, 0) 60%),
+      #0a0d14;
+    color: #e6edf7;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .wrap { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 26px 18px; }
+  h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: 0.4px; color: #cbd5e1; }
+  h1 .dot { color: #38bdf8; text-shadow: 0 0 14px rgba(56, 189, 248, 0.9); }
+  .toolbar { display: flex; gap: 10px; }
+  button {
+    font: inherit;
+    font-size: 13.5px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    color: #dbe6f4;
+    background: linear-gradient(180deg, #1b2436, #131a29);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 10px;
+    padding: 9px 18px;
+    cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    transition: transform 0.07s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  button:hover {
+    border-color: rgba(56, 189, 248, 0.55);
+    box-shadow: 0 5px 18px rgba(56, 189, 248, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    transform: translateY(-1px);
+  }
+  button:active { transform: translateY(1px) scale(0.97); }
+  #drop { border-color: rgba(56, 189, 248, 0.4); }
+  #play { min-width: 106px; }
+  #sim {
+    display: block;
+    width: 720px;
+    height: 480px;
+    border-radius: 14px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+    cursor: crosshair;
+    touch-action: none;
+    outline: none;
+  }
+  #sim:focus-visible { border-color: rgba(56, 189, 248, 0.5); }
+  .hud {
+    width: 720px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: #7d8ba1;
+    font-size: 12.5px;
+    letter-spacing: 0.2px;
+  }
+  .hud .hint { color: #57667e; flex: 1; text-align: center; }
+  .hud span:first-child { min-width: 70px; }
+  .hud span:last-child { min-width: 70px; text-align: right; }
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <h1><span class="dot">●</span> Bounce Lab</h1>
+    <div class="toolbar">
+      <button id="drop" type="button" title="Drop a new ball">＋ Drop ball</button>
+      <button id="play" type="button" aria-pressed="true" title="Toggle animation">⏸ Pause</button>
+      <button id="clear" type="button" title="Remove all balls">✕ Clear</button>
+    </div>
+    <canvas id="sim" width="720" height="480" tabindex="0"
+            aria-label="Bouncing ball simulation — click to add a ball"></canvas>
+    <div class="hud">
+      <span id="count">0 balls</span>
+      <span class="hint">Click or drag on the canvas to spawn balls · Space toggles pause</span>
+      <span id="fps">60 fps</span>
+    </div>
+  </main>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ---------------- constants ---------------- */
+  const W = 720, H = 480;   // simulation size in pixels
+  const G = 0.45;           // gravity (px / step^2) — increases vy every step
+  const REST = 0.86;        // restitution (< 1: a little energy loss per bounce)
+  const SLEEP_V = 0.8;      // floor impact speed below which a ball settles
+  const MAXV = 55;          // speed cap (px / step) — guarantees no tunnelling
+  const MAX_BALLS = 500;
+  const EPS = 0.001;        // tiny inset so balls stay strictly inside the walls
+  const TAU = Math.PI * 2;
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  /* ---------------- dom ---------------- */
+  const canvas  = document.getElementById('sim');
+  const ctx     = canvas.getContext('2d');
+  const dropBtn = document.getElementById('drop');
+  const playBtn = document.getElementById('play');
+  const clearBtn = document.getElementById('clear');
+  const countEl = document.getElementById('count');
+  const fpsEl   = document.getElementById('fps');
+
+  /* ---------------- state ---------------- */
+  const balls = [];
+  let playing = true;
+  let fps = 60;
+
+  /* ---------------- balls ---------------- */
+  function makeBall(x, y, vx, vy, r) {
+    const h = Math.floor(rand(0, 360));
+    const s = Math.floor(rand(70, 92));
+    const l = Math.floor(rand(56, 66));
+    return {
+      x, y, vx, vy, r,
+      css:      'hsl(' + h + ', ' + s + '%, ' + l + '%)',
+      cssLight: 'hsl(' + h + ', ' + s + '%, ' + Math.min(l + 18, 92) + '%)',
+      cssDark:  'hsl(' + h + ', ' + s + '%, ' + Math.max(l - 24, 12) + '%)',
+      cssFade:  'hsla(' + h + ', ' + s + '%, ' + l + '%, 0)',
+      born: performance.now()
+    };
+  }
+
+  // addBall(x, y, vx = 0, vy = 0, r?) -> snapshot of the created ball
+  function addBall(x, y, vx, vy, r) {
+    x = Number(x); y = Number(y);
+    vx = vx === undefined ? 0 : Number(vx);
+    vy = vy === undefined ? 0 : Number(vy);
+    r = (r === undefined || r === null) ? rand(10, 20) : Number(r);
+    if (!Number.isFinite(r) || r <= 0) r = rand(10, 20);
+    r = Math.min(Math.max(r, 3), Math.min(W, H) / 2 - 2);
+    if (!Number.isFinite(x)) x = W / 2;
+    if (!Number.isFinite(y)) y = H / 3;
+    if (!Number.isFinite(vx)) vx = 0;
+    if (!Number.isFinite(vy)) vy = 0;
+    // spawn strictly inside the arena
+    x = Math.min(Math.max(x, r + EPS), W - r - EPS);
+    y = Math.min(Math.max(y, r + EPS), H - r - EPS);
+    const b = makeBall(x, y, vx, vy, r);
+    balls.push(b);
+    if (balls.length > MAX_BALLS) balls.splice(0, balls.length - MAX_BALLS);
+    if (!playing) draw();
+    return { x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: b.r };
+  }
+
+  function clear() {
+    balls.length = 0;
+    draw();
+  }
+
+  /* ---------------- physics ---------------- */
+  function step(dt) {
+    if (!(dt > 0) || !Number.isFinite(dt)) dt = 1;
+    for (let i = 0; i < balls.length; i++) {
+      const b = balls[i];
+
+      // gravity accelerates every ball downward
+      b.vy += G * dt;
+
+      // cap speed so a single step can never cross the arena
+      if (b.vx > MAXV) b.vx = MAXV; else if (b.vx < -MAXV) b.vx = -MAXV;
+      if (b.vy > MAXV) b.vy = MAXV; else if (b.vy < -MAXV) b.vy = -MAXV;
+
+      // integrate
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      // walls: clamp inside + reverse perpendicular velocity (with energy loss)
+      if (b.x < b.r)      { b.x = b.r + EPS;     b.vx =  Math.abs(b.vx) * REST; }
+      else if (b.x > W - b.r) { b.x = W - b.r - EPS; b.vx = -Math.abs(b.vx) * REST; }
+
+      if (b.y < b.r)      { b.y = b.r + EPS;     b.vy =  Math.abs(b.vy) * REST; }
+      else if (b.y > H - b.r) {
+        b.y = H - b.r - EPS;
+        b.vy = -Math.abs(b.vy) * REST;
+        b.vx *= 0.99;                          // a touch of floor friction
+        if (Math.abs(b.vy) < SLEEP_V) b.vy = 0; // settle instead of micro-bouncing
+      }
+
+      // absolute safety net: never NaN, never out of bounds
+      if (!Number.isFinite(b.x) || !Number.isFinite(b.y) ||
+          !Number.isFinite(b.vx) || !Number.isFinite(b.vy)) {
+        b.x = W / 2; b.y = b.r + 1; b.vx = 0; b.vy = 0;
+      }
+      if (b.x < b.r) b.x = b.r + EPS; else if (b.x > W - b.r) b.x = W - b.r - EPS;
+      if (b.y < b.r) b.y = b.r + EPS; else if (b.y > H - b.r) b.y = H - b.r - EPS;
+    }
+    draw();
+  }
+
+  /* ---------------- rendering ---------------- */
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // background
+    ctx.fillStyle = '#0c1220';
+    ctx.fillRect(0, 0, W, H);
+
+    // subtle grid
+    ctx.beginPath();
+    for (let gx = 40; gx < W; gx += 40) { ctx.moveTo(gx + 0.5, 0); ctx.lineTo(gx + 0.5, H); }
+    for (let gy = 40; gy < H; gy += 40) { ctx.moveTo(0, gy + 0.5); ctx.lineTo(W, gy + 0.5); }
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.06)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // soft floor glow
+    const fg = ctx.createLinearGradient(0, H - 70, 0, H);
+    fg.addColorStop(0, 'rgba(56, 189, 248, 0)');
+    fg.addColorStop(1, 'rgba(56, 189, 248, 0.07)');
+    ctx.fillStyle = fg;
+    ctx.fillRect(0, H - 70, W, 70);
+
+    const now = performance.now();
+    const glow = balls.length <= 150; // keep it smooth with huge crowds
+    for (let i = 0; i < balls.length; i++) drawBall(balls[i], now, glow);
+  }
+
+  function drawBall(b, now, glow) {
+    // pop-in ease (easeOutBack)
+    let s = (now - b.born) / 170;
+    if (s >= 1) s = 1;
+    else {
+      if (s < 0) s = 0;
+      s = 1 + 2.70158 * Math.pow(s - 1, 3) + 1.70158 * Math.pow(s - 1, 2);
+      if (s < 0.05) s = 0.05;
+    }
+    const rr = b.r * s;
+
+    // motion streak
+    const sp = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+    if (sp > 3) {
+      const k = Math.min(sp / 14, 2.4);
+      const x0 = b.x - b.vx * k, y0 = b.y - b.vy * k;
+      const lg = ctx.createLinearGradient(x0, y0, b.x, b.y);
+      lg.addColorStop(0, b.cssFade);
+      lg.addColorStop(1, b.css);
+      ctx.globalAlpha = 0.2;
+      ctx.strokeStyle = lg;
+      ctx.lineWidth = rr * 1.05;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // glowing orb
+    ctx.save();
+    ctx.shadowColor = b.css;
+    ctx.shadowBlur = glow ? 16 : 0;
+    const g = ctx.createRadialGradient(
+      b.x - rr * 0.32, b.y - rr * 0.38, rr * 0.12,
+      b.x, b.y, rr
+    );
+    g.addColorStop(0, b.cssLight);
+    g.addColorStop(0.55, b.css);
+    g.addColorStop(1, b.cssDark);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, rr, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    // rim light
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, Math.max(rr - 0.5, 0.5), 0, TAU);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  /* ---------------- hud & main loop ---------------- */
+  let lastHud = 0;
+  function updateHud(now) {
+    if (now - lastHud < 200) return;
+    lastHud = now;
+    const n = balls.length;
+    countEl.textContent = n + (n === 1 ? ' ball' : ' balls');
+    fpsEl.textContent = playing ? Math.round(fps) + ' fps' : 'paused';
+  }
+
+  let lastT = performance.now();
+  function frame(now) {
+    const d = now - lastT;
+    lastT = now;
+    if (d > 0 && d < 1000) fps = fps * 0.9 + (1000 / d) * 0.1;
+    if (playing) step(1); else draw();
+    updateHud(now);
+    requestAnimationFrame(frame);
+  }
+
+  function setPlaying(p) {
+    playing = !!p;
+    playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
+    playBtn.setAttribute('aria-pressed', String(playing));
+  }
+
+  /* ---------------- ui events ---------------- */
+  dropBtn.addEventListener('click', () => {
+    const r = rand(10, 20);
+    addBall(rand(r + 12, W - r - 12), rand(r + 12, H * 0.3), rand(-3, 3), rand(-1, 2), r);
+  });
+  playBtn.addEventListener('click', () => setPlaying(!playing));
+  clearBtn.addEventListener('click', () => clear());
+
+  function toSim(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (W / rect.width),
+      y: (e.clientY - rect.top) * (H / rect.height)
+    };
+  }
+
+  let dragging = false;
+  let lastSpawn = null;
+  function spawnAt(x, y) {
+    addBall(x, y, rand(-2.5, 2.5), rand(-4, -0.5), rand(9, 19));
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const p = toSim(e);
+    spawnAt(p.x, p.y);
+    lastSpawn = p;
+    dragging = true;
+    if (canvas.setPointerCapture) { try { canvas.setPointerCapture(e.pointerId); } catch (_) {} }
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const p = toSim(e);
+    const dx = p.x - lastSpawn.x, dy = p.y - lastSpawn.y;
+    if (dx * dx + dy * dy > 26 * 26) { spawnAt(p.x, p.y); lastSpawn = p; }
+  });
+  const stopDrag = () => { dragging = false; };
+  canvas.addEventListener('pointerup', stopDrag);
+  canvas.addEventListener('pointercancel', stopDrag);
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !e.repeat &&
+        (e.target === document.body || e.target === canvas)) {
+      e.preventDefault();
+      setPlaying(!playing);
+    }
+  });
+
+  /* ---------------- programmatic API (grading contract) ---------------- */
+  window.sim = {
+    w: W,
+    h: H,
+    balls() {
+      const out = new Array(balls.length);
+      for (let i = 0; i < balls.length; i++) {
+        const b = balls[i];
+        out[i] = { x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: b.r };
+      }
+      return out;
+    },
+    addBall: addBall,
+    clear: clear,
+    step: step
+  };
+
+  /* ---------------- go ---------------- */
+  setPlaying(true);
+  draw();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

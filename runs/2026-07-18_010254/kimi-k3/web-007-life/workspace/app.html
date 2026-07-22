@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conway's Game of Life</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 28px 16px;
+    background: radial-gradient(1200px 800px at 50% -10%, #16213e 0%, #0a0f1e 55%, #05070d 100%);
+    color: #e6edf3;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(1.4rem, 3.5vw, 2.1rem);
+    letter-spacing: 0.06em;
+    background: linear-gradient(90deg, #4ade80, #22d3ee, #a78bfa);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-align: center;
+  }
+  .sub {
+    margin: 0;
+    opacity: 0.55;
+    font-size: 0.85rem;
+    text-align: center;
+  }
+  canvas#life {
+    width: 480px;
+    height: 480px;
+    background: #0b1120;
+    border-radius: 14px;
+    box-shadow:
+      0 0 0 1px rgba(120, 200, 255, 0.16),
+      0 20px 60px rgba(0, 0, 0, 0.6),
+      0 0 50px rgba(34, 211, 238, 0.10);
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  button {
+    font: inherit;
+    font-weight: 600;
+    color: #eaf6ff;
+    background: linear-gradient(180deg, #1c2a45, #131d33);
+    border: 1px solid rgba(140, 200, 255, 0.25);
+    border-radius: 999px;
+    padding: 10px 20px;
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  }
+  button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(34, 211, 238, 0.25);
+    border-color: rgba(140, 220, 255, 0.6);
+  }
+  button:active { transform: translateY(0) scale(0.96); }
+  button#play.active {
+    background: linear-gradient(180deg, #0f766e, #115e59);
+    border-color: rgba(94, 234, 212, 0.7);
+    box-shadow: 0 0 18px rgba(45, 212, 191, 0.45);
+  }
+  .speed {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.95rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(140, 200, 255, 0.18);
+    border-radius: 999px;
+    padding: 8px 16px;
+  }
+  input[type="range"] { accent-color: #22d3ee; width: 110px; cursor: pointer; }
+  .stats {
+    font-size: 0.9rem;
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+  }
+  .stats b { color: #22d3ee; }
+  kbd {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 0.78em;
+  }
+</style>
+</head>
+<body>
+  <h1>✦ Conway's Game of Life ✦</h1>
+  <p class="sub">Click &amp; drag to paint cells · <kbd>Space</kbd> play · <kbd>S</kbd> step · <kbd>R</kbd> random · <kbd>C</kbd> clear</p>
+
+  <canvas id="life" width="480" height="480"></canvas>
+
+  <div class="controls">
+    <button id="play" title="Toggle auto-run">▶ Play</button>
+    <button id="step" title="Advance one generation">⏭ Step</button>
+    <button id="random" title="Seed random soup">🎲 Random</button>
+    <button id="clear" title="Kill all cells">🧹 Clear</button>
+    <label class="speed">🐢 <input id="speed" type="range" min="2" max="30" value="10"> 🐇</label>
+  </div>
+
+  <div class="stats">Generation <b id="gen">0</b> · Alive <b id="pop">0</b></div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---- Grid setup -------------------------------------------------------
+  const W = 60, H = 60;          // grid dimensions in cells (>= 40 x 40)
+  const CELL = 8;                // 60 * 8 = 480 CSS pixels
+  const canvas = document.getElementById('life');
+  const ctx = canvas.getContext('2d');
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width  = W * CELL * dpr;
+  canvas.height = H * CELL * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  let grid = new Uint8Array(W * H);   // current generation
+  let next = new Uint8Array(W * H);   // scratch buffer for next generation
+  let gen = 0;
+
+  const genEl = document.getElementById('gen');
+  const popEl = document.getElementById('pop');
+
+  // ---- Core API ---------------------------------------------------------
+  function get(x, y) {
+    if (x < 0 || y < 0 || x >= W || y >= H) return 0;   // edges are dead
+    return grid[y * W + x];
+  }
+
+  function set(x, y, v) {
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    grid[y * W + x] = v ? 1 : 0;
+    draw();
+  }
+
+  function step() {
+    // Compute the ENTIRE next generation from the current grid into `next`,
+    // then swap buffers — fully simultaneous update (B3/S23, dead edges).
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            n += get(x + dx, y + dy);
+          }
+        }
+        const alive = grid[y * W + x];
+        next[y * W + x] = alive ? (n === 2 || n === 3 ? 1 : 0)
+                                : (n === 3 ? 1 : 0);
+      }
+    }
+    const tmp = grid; grid = next; next = tmp;
+    gen++;
+    draw();
+  }
+
+  function clear() {
+    grid.fill(0);
+    gen = 0;
+    draw();
+  }
+
+  function randomize() {
+    for (let i = 0; i < grid.length; i++) {
+      grid[i] = Math.random() < 0.25 ? 1 : 0;
+    }
+    gen = 0;
+    draw();
+  }
+
+  // ---- Rendering --------------------------------------------------------
+  function draw() {
+    ctx.fillStyle = '#0b1120';
+    ctx.fillRect(0, 0, W * CELL, H * CELL);
+
+    // subtle grid lines
+    ctx.strokeStyle = 'rgba(148, 197, 255, 0.05)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= W; x++) { ctx.moveTo(x * CELL + 0.5, 0); ctx.lineTo(x * CELL + 0.5, H * CELL); }
+    for (let y = 0; y <= H; y++) { ctx.moveTo(0, y * CELL + 0.5); ctx.lineTo(W * CELL, y * CELL + 0.5); }
+    ctx.stroke();
+
+    // living cells: soft halo + bright core, hue drifts with generations
+    const hue = (160 + gen * 3) % 360;
+    let pop = 0;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        if (!grid[y * W + x]) continue;
+        pop++;
+        const px = x * CELL, py = y * CELL;
+        ctx.fillStyle = `hsla(${hue}, 90%, 55%, 0.35)`;
+        ctx.fillRect(px + 0.5, py + 0.5, CELL - 1, CELL - 1);
+        ctx.fillStyle = `hsl(${hue}, 95%, 66%)`;
+        ctx.fillRect(px + 2, py + 2, CELL - 4, CELL - 4);
+      }
+    }
+
+    genEl.textContent = gen;
+    popEl.textContent = pop;
+  }
+
+  // ---- Auto-run ---------------------------------------------------------
+  const playBtn = document.getElementById('play');
+  const speedEl = document.getElementById('speed');
+  let timer = null;
+
+  function setPlaying(on) {
+    if (on) {
+      timer = setInterval(step, 1000 / (+speedEl.value));
+      playBtn.textContent = '⏸ Pause';
+      playBtn.classList.add('active');
+    } else {
+      clearInterval(timer);
+      timer = null;
+      playBtn.textContent = '▶ Play';
+      playBtn.classList.remove('active');
+    }
+  }
+
+  playBtn.addEventListener('click', () => setPlaying(!timer));
+  speedEl.addEventListener('input', () => { if (timer) { setPlaying(false); setPlaying(true); } });
+  document.getElementById('step').addEventListener('click', step);
+  document.getElementById('random').addEventListener('click', randomize);
+  document.getElementById('clear').addEventListener('click', clear);
+
+  // ---- Painting with mouse / touch --------------------------------------
+  let painting = false, paintVal = 1;
+
+  function eventCell(e) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: Math.floor((e.clientX - r.left) * (W / r.width)),
+      y: Math.floor((e.clientY - r.top)  * (H / r.height))
+    };
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const { x, y } = eventCell(e);
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    paintVal = get(x, y) ? 0 : 1;   // first click decides: paint alive or erase
+    painting = true;
+    canvas.setPointerCapture(e.pointerId);
+    set(x, y, paintVal);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!painting) return;
+    const { x, y } = eventCell(e);
+    set(x, y, paintVal);
+  });
+  ['pointerup', 'pointercancel'].forEach(t =>
+    canvas.addEventListener(t, () => { painting = false; })
+  );
+
+  // ---- Keyboard shortcuts ------------------------------------------------
+  window.addEventListener('keydown', (e) => {
+    if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
+    if (e.code === 'Space') { e.preventDefault(); setPlaying(!timer); }
+    else if (e.key === 's' || e.key === 'S') step();
+    else if (e.key === 'r' || e.key === 'R') randomize();
+    else if (e.key === 'c' || e.key === 'C') clear();
+  });
+
+  // ---- Programmatic API for grading --------------------------------------
+  window.life = { w: W, h: H, get, set, step, clear };
+
+  // Kick things off with a fun random soup.
+  randomize();
+})();
+</script>
+</body>
+</html>

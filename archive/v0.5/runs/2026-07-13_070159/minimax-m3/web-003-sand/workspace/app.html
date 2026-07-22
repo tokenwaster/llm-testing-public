@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Falling Sand</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: #15151a;
+    color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px 16px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 500;
+    margin: 0 0 18px;
+    color: #f0f0f0;
+    letter-spacing: 0.5px;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 18px;
+    justify-content: center;
+  }
+  .toolbar button {
+    background: #2a2a30;
+    color: #d0d0d0;
+    border: 1px solid #3a3a44;
+    border-radius: 6px;
+    padding: 9px 18px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.05s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+  .toolbar button:hover { background: #383842; border-color: #50505c; color: #fff; }
+  .toolbar button:active { transform: translateY(1px); }
+  .toolbar button.active { color: #fff; }
+  #mat-sand.active  { background: #c8a26b; border-color: #e0bd7f; color: #1a1a1a; }
+  #mat-water.active { background: #3a7bc8; border-color: #5a9be8; color: #fff; }
+  #mat-wall.active  { background: #707078; border-color: #909098; color: #fff; }
+  #mat-acid.active  { background: #6fbf30; border-color: #9fdb5f; color: #1a1a1a; }
+  #mat-empty.active { background: #555560; border-color: #757580; color: #fff; }
+  #clear { background: #5a2828; border-color: #7a3838; color: #f0d0d0; }
+  #clear:hover { background: #7a3838; border-color: #9a4848; color: #fff; }
+  #canvas-wrap {
+    border: 1px solid #2a2a32;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #000;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04);
+  }
+  canvas {
+    display: block;
+    cursor: crosshair;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  .info {
+    margin-top: 14px;
+    font-size: 12px;
+    color: #666;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <h1>Falling Sand</h1>
+  <div class="toolbar">
+    <button id="mat-sand"  class="active">Sand</button>
+    <button id="mat-water">Water</button>
+    <button id="mat-wall">Wall</button>
+    <button id="mat-acid">Acid</button>
+    <button id="mat-empty">Eraser</button>
+    <button id="clear">Clear</button>
+  </div>
+  <div id="canvas-wrap">
+    <canvas id="sand"></canvas>
+  </div>
+  <div class="info">Click and drag on the canvas to paint. Select a material above.</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // --- Configuration ---
+  const W = 100;              // grid width  (cells)
+  const H = 100;              // grid height (cells)
+  const CELL = 6;             // pixel size per cell (=> 600x600 canvas)
+  const MATERIALS = ['empty', 'sand', 'water', 'wall', 'acid'];
+
+  // [r,g,b] per material index
+  const COLORS = [
+    [12, 12, 16],     // empty  (dark background)
+    [212, 170, 110],  // sand   (tan)
+    [46, 108, 196],   // water  (blue)
+    [118, 118, 128],  // wall   (gray)
+    [140, 220, 60],   // acid   (green)
+  ];
+
+  // --- Canvas / rendering ---
+  const canvas = document.getElementById('sand');
+  canvas.width = W * CELL;
+  canvas.height = H * CELL;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+
+  // Offscreen 1:1 pixel canvas, scaled up for crisp blocks
+  const off = document.createElement('canvas');
+  off.width = W;
+  off.height = H;
+  const offCtx = off.getContext('2d');
+  const imageData = offCtx.createImageData(W, H);
+  const pixelData = imageData.data;
+
+  // --- Simulation state ---
+  // grid[y*W + x]  : 0=empty, 1=sand, 2=water, 3=wall, 4=acid
+  let grid  = new Uint8Array(W * H);
+  let moved = new Uint8Array(W * H);
+  let stepSalt = 0;
+
+  const idx = (x, y) => y * W + x;
+
+  // Deterministic per-cell pseudo random (0..<1) so tick(n) is reproducible.
+  function hashRand(x, y, salt) {
+    let h = (x | 0) * 374761393 + (y | 0) * 668265263 + (salt | 0) * 1442695040;
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = (Math.imul(h, 1274126177)) >>> 0;
+    h = (h ^ (h >>> 16)) >>> 0;
+    return (h % 100000) / 100000;
+  }
+
+  // --- Public API helpers (also used internally) ---
+  function get(x, y) {
+    if (x < 0 || x >= W || y < 0 || y >= H) return 'wall'; // solid boundary
+    return MATERIALS[grid[idx(x, y)]];
+  }
+
+  function set(x, y, material) {
+    if (x < 0 || x >= W || y < 0 || y >= H) return;
+    const m = MATERIALS.indexOf(material);
+    if (m >= 0) grid[idx(x, y)] = m;
+  }
+
+  function clearGrid() { grid.fill(0); }
+
+  // --- One simulation step ---
+  function step() {
+    moved.fill(0);
+    stepSalt++;
+
+    // Pass 1: vertical fall (bottom-up).
+    // For each falling particle, try straight down; if blocked, sand tries
+    // a diagonal slide.  The "moved" flag prevents a particle that just
+    // arrived (via a swap) from being written into again this tick, which
+    // stops the liquid from being catapulted up through a sand column.
+    for (let y = H - 1; y >= 0; y--) {
+      const leftFirst = hashRand(0, y, stepSalt) < 0.5;
+      for (let xi = 0; xi < W; xi++) {
+        const x = leftFirst ? xi : (W - 1 - xi);
+        const i = idx(x, y);
+        if (moved[i]) continue;
+        const cell = grid[i];
+        if (cell === 0) continue;
+
+        // Bottom boundary: can't fall further.
+        if (y + 1 >= H) continue;
+        const belowI = (y + 1) * W + x;
+        if (moved[belowI]) continue;
+        const below = grid[belowI];
+
+        if (cell === 1) { // SAND
+          if (below === 0) {
+            grid[belowI] = 1; grid[i] = 0;
+            moved[belowI] = 1; moved[i] = 1;
+          } else if (below === 2 || below === 4) {
+            // Sand sinks in water/acid.
+            grid[belowI] = 1; grid[i] = below;
+            moved[belowI] = 1; moved[i] = 1;
+          } else {
+            // Wall or sand below -> try diagonal slide.
+            const tryLeft = hashRand(x, y, stepSalt) < 0.5;
+            const d1 = tryLeft ? -1 : 1;
+            const d2 = -d1;
+            for (let d = 0; d < 2; d++) {
+              const nx = x + (d === 0 ? d1 : d2);
+              if (nx < 0 || nx >= W) continue;
+              const nI = (y + 1) * W + nx;
+              if (moved[nI]) continue;
+              const n = grid[nI];
+              if (n === 0) {
+                grid[nI] = 1; grid[i] = 0;
+                moved[nI] = 1; moved[i] = 1;
+                break;
+              } else if (n === 2 || n === 4) {
+                grid[nI] = 1; grid[i] = n;
+                moved[nI] = 1; moved[i] = 1;
+                break;
+              }
+            }
+          }
+        } else if (cell === 2) { // WATER
+          if (below === 0) {
+            grid[belowI] = 2; grid[i] = 0;
+            moved[belowI] = 1; moved[i] = 1;
+          }
+          // Water is lighter than sand -> doesn't sink into it.
+        } else if (cell === 4) { // ACID
+          if (below === 0) {
+            grid[belowI] = 4; grid[i] = 0;
+            moved[belowI] = 1; moved[i] = 1;
+          } else if (below === 1 || below === 3) {
+            // Dissolve sand or wall below.
+            grid[belowI] = 4; grid[i] = 0;
+            moved[belowI] = 1; moved[i] = 1;
+          } else if (below === 2) {
+            // Acid sinks in water.
+            grid[belowI] = 4; grid[i] = 2;
+            moved[belowI] = 1; moved[i] = 1;
+          }
+        }
+        // WALL (3) never moves.
+      }
+    }
+
+    // Pass 2: horizontal spread for water and acid.
+    for (let y = H - 1; y >= 0; y--) {
+      const leftFirst = hashRand(1, y, stepSalt) < 0.5;
+      for (let xi = 0; xi < W; xi++) {
+        const x = leftFirst ? xi : (W - 1 - xi);
+        const i = idx(x, y);
+        if (moved[i]) continue;
+        const cell = grid[i];
+        if (cell !== 2 && cell !== 4) continue;
+
+        const tryLeft = hashRand(x, y, stepSalt + 7919) < 0.5;
+        const d1 = tryLeft ? -1 : 1;
+        const d2 = -d1;
+
+        for (let d = 0; d < 2; d++) {
+          const nx = x + (d === 0 ? d1 : d2);
+          if (nx < 0 || nx >= W) continue;
+          const nI = y * W + nx;
+          if (moved[nI]) continue;
+          const n = grid[nI];
+
+          if (cell === 2) { // WATER
+            if (n === 0) {
+              grid[nI] = 2; grid[i] = 0;
+              moved[nI] = 1; moved[i] = 1;
+              break;
+            }
+          } else { // ACID
+            if (n === 0) {
+              grid[nI] = 4; grid[i] = 0;
+              moved[nI] = 1; moved[i] = 1;
+              break;
+            } else if (n === 1 || n === 3) {
+              // Dissolve sand or wall horizontally.
+              grid[nI] = 4; grid[i] = 0;
+              moved[nI] = 1; moved[i] = 1;
+              break;
+            } else if (n === 2) {
+              // Acid displaces water (acid is heavier).
+              grid[nI] = 4; grid[i] = 2;
+              moved[nI] = 1; moved[i] = 1;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  function tick(n) {
+    if (n === undefined) n = 1;
+    n = n | 0;
+    for (let s = 0; s < n; s++) step();
+  }
+
+  // --- Rendering ---
+  function render() {
+    const data = pixelData;
+    for (let y = 0; y < H; y++) {
+      const row = y * W;
+      for (let x = 0; x < W; x++) {
+        const v = grid[row + x];
+        const c = COLORS[v];
+        const p = (row + x) * 4;
+        data[p]     = c[0];
+        data[p + 1] = c[1];
+        data[p + 2] = c[2];
+        data[p + 3] = 255;
+      }
+    }
+    offCtx.putImageData(imageData, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(off, 0, 0, W, H, 0, 0, canvas.width, canvas.height);
+  }
+
+  // --- Painting (mouse drag) ---
+  let currentMaterial = 'sand';
+  let painting = false;
+  let lastX = 0, lastY = 0;
+
+  function eventToCell(e) {
+    const rect = canvas.getBoundingClientRect();
+    const sx = canvas.width  / rect.width;
+    const sy = canvas.height / rect.height;
+    const px = (e.clientX - rect.left) * sx;
+    const py = (e.clientY - rect.top)  * sy;
+    return [Math.floor(px / CELL), Math.floor(py / CELL)];
+  }
+
+  function paintLine(x0, y0, x1, y1) {
+    const dx = x1 - x0, dy = y1 - y0;
+    const steps = Math.max(Math.abs(dx), Math.abs(dy), 1);
+    for (let i = 0; i <= steps; i++) {
+      const t = steps === 0 ? 0 : i / steps;
+      const x = Math.round(x0 + dx * t);
+      const y = Math.round(y0 + dy * t);
+      if (x >= 0 && x < W && y >= 0 && y < H) set(x, y, currentMaterial);
+    }
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    painting = true;
+    const [x, y] = eventToCell(e);
+    lastX = x; lastY = y;
+    if (x >= 0 && x < W && y >= 0 && y < H) set(x, y, currentMaterial);
+  });
+  canvas.addEventListener('mousemove', (e) => {
+    if (!painting) return;
+    const [x, y] = eventToCell(e);
+    paintLine(lastX, lastY, x, y);
+    lastX = x; lastY = y;
+  });
+  window.addEventListener('mouseup',     () => { painting = false; });
+  window.addEventListener('mouseleave',  () => { painting = false; });
+  window.addEventListener('blur',        () => { painting = false; });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // Touch support (basic)
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    const [x, y] = eventToCell(t);
+    painting = true; lastX = x; lastY = y;
+    if (x >= 0 && x < W && y >= 0 && y < H) set(x, y, currentMaterial);
+  }, { passive: false });
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (!painting) return;
+    const t = e.touches[0];
+    const [x, y] = eventToCell(t);
+    paintLine(lastX, lastY, x, y);
+    lastX = x; lastY = y;
+  }, { passive: false });
+  canvas.addEventListener('touchend',   () => { painting = false; });
+
+  // --- Material / clear buttons ---
+  function setMaterial(mat, btn) {
+    currentMaterial = mat;
+    document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+  }
+  document.getElementById('mat-sand') .addEventListener('click', (e) => setMaterial('sand',  e.currentTarget));
+  document.getElementById('mat-water').addEventListener('click', (e) => setMaterial('water', e.currentTarget));
+  document.getElementById('mat-wall') .addEventListener('click', (e) => setMaterial('wall',  e.currentTarget));
+  document.getElementById('mat-acid') .addEventListener('click', (e) => setMaterial('acid',  e.currentTarget));
+  document.getElementById('mat-empty').addEventListener('click', (e) => setMaterial('empty', e.currentTarget));
+  document.getElementById('clear')    .addEventListener('click', () => clearGrid());
+
+  // --- Expose programmatic API ---
+  window.sim = {
+    w: W,
+    h: H,
+    tick: tick,
+    get: get,
+    set: set,
+    clear: clearGrid,
+  };
+
+  // --- Animation loop (rAF) ---
+  function loop() {
+    tick(1);
+    render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

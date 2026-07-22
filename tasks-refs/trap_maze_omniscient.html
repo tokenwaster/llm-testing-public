@@ -1,0 +1,187 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Explorer Maze</title>
+<style>
+body{font:14px system-ui;background:#14141c;color:#eee;padding:14px}
+#hud{display:flex;gap:18px;align-items:center;margin-bottom:10px}
+#reset{background:#2a5db0;color:#fff;border:0;border-radius:6px;padding:7px 16px;cursor:pointer}
+canvas{background:#1b1b26;border-radius:8px}
+</style></head><body>
+<div id="hud">
+  <button id="reset">↻ Reset</button>
+  <div>finished: <b id="completed">0</b>/24</div>
+  <div>time: <b id="timer">0.0s</b></div>
+</div>
+<canvas id="maze" width="510" height="510"></canvas>
+<script>
+const ROWS = 17, COLS = 17, N = 24, CELL = 30, TICK_MS = 60;
+
+function lcg(seed){ let s = seed >>> 0;
+  return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+
+let walls, spawn, exitCell, bots, elapsed, allDone, seedCounter = 1;
+
+function genMaze(rng){
+  walls = Array.from({length: ROWS}, () => Array.from({length: COLS},
+    () => ({n: true, e: true, s: true, w: true})));
+  const seen = new Set(["0,0"]);
+  const stack = [[0, 0]];
+  const OPP = {n: "s", s: "n", e: "w", w: "e"};
+  const DIRS = [["n", -1, 0], ["e", 0, 1], ["s", 1, 0], ["w", 0, -1]];
+  while (stack.length){
+    const [r, c] = stack[stack.length - 1];
+    const cand = DIRS
+      .map(([d, dr, dc]) => [d, r + dr, c + dc])
+      .filter(([d, nr, nc]) => nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS
+              && !seen.has(nr + "," + nc));
+    if (!cand.length){ stack.pop(); continue; }
+    const [d, nr, nc] = cand[Math.floor(rng() * cand.length)];
+    walls[r][c][d] = false;
+    walls[nr][nc][OPP[d]] = false;
+    seen.add(nr + "," + nc);
+    stack.push([nr, nc]);
+  }
+}
+
+function makeBot(i, seed){
+  return {
+    i, r: spawn.r, c: spawn.c,
+    rng: lcg(seed * 7919 + i * 104729 + 17),
+    known: new Set([spawn.r + "," + spawn.c]),   // cells this bot has seen
+    stack: [],                                   // its own breadcrumb trail
+    path: [{r: spawn.r, c: spawn.c}],
+    deadSet: new Set(), deadEnds: [],
+    finishTick: null,
+    prevR: spawn.r, prevC: spawn.c,              // for smooth rendering
+  };
+}
+
+function reset(seed){
+  const s = (typeof seed === "number") ? seed : (seedCounter = seedCounter * 31 + Date.now() % 65536);
+  const rng = lcg(s);
+  genMaze(rng);
+  spawn = {r: 0, c: 0};
+  exitCell = {r: ROWS - 1, c: COLS - 1};
+  bots = Array.from({length: N}, (_, i) => makeBot(i, s));
+  elapsed = 0;
+  allDone = false;
+  draw(1);
+  hud();
+}
+
+const DIRS = [["n", -1, 0], ["e", 0, 1], ["s", 1, 0], ["w", 0, -1]];
+
+
+function bfsPath(){
+  const OPPD = [["n",-1,0],["e",0,1],["s",1,0],["w",0,-1]];
+  const prev = {};
+  const q = [[spawn.r, spawn.c]];
+  const seen = new Set([spawn.r + "," + spawn.c]);
+  while (q.length){
+    const [r, c] = q.shift();
+    if (r === exitCell.r && c === exitCell.c) break;
+    for (const [d, dr, dc] of OPPD){
+      if (!walls[r][c][d]){
+        const k = (r+dr) + "," + (c+dc);
+        if (!seen.has(k)){ seen.add(k); prev[k] = [r, c]; q.push([r+dr, c+dc]); }
+      }
+    }
+  }
+  const path = [];
+  let cur = [exitCell.r, exitCell.c];
+  while (cur){ path.unshift({r: cur[0], c: cur[1]});
+    cur = prev[cur[0] + "," + cur[1]]; }
+  return path;
+}
+function stepBot(b){
+  if (b.finishTick !== null) return;
+  b.prevR = b.r; b.prevC = b.c;
+  if (!b.plan) b.plan = bfsPath();
+  const idx = b.path.length;             // next step along the optimal plan
+  if (idx >= b.plan.length){ b.finishTick = elapsed; return; }
+  const dest = b.plan[idx];
+  b.r = dest.r; b.c = dest.c;
+  b.path.push({r: b.r, c: b.c});
+  if (b.r === exitCell.r && b.c === exitCell.c) b.finishTick = elapsed;
+}
+
+function tick(n){
+  n = Math.max(1, n | 0);
+  for (let i = 0; i < n; i++){
+    if (bots.every(b => b.finishTick !== null)){ allDone = true; break; }
+    elapsed++;
+    for (const b of bots) stepBot(b);
+  }
+  hud();
+  draw(1);
+}
+
+function hud(){
+  const done = bots.filter(b => b.finishTick !== null).length;
+  document.getElementById("completed").textContent = done;
+  document.getElementById("timer").textContent =
+    (elapsed * TICK_MS / 1000).toFixed(1) + "s";
+}
+
+const ctx = document.getElementById("maze").getContext("2d");
+function draw(t){
+  ctx.clearRect(0, 0, 510, 510);
+  ctx.fillStyle = "#1b1b26";
+  ctx.fillRect(0, 0, 510, 510);
+  ctx.fillStyle = "rgba(70,200,120,.25)";
+  ctx.fillRect(spawn.c * CELL, spawn.r * CELL, CELL, CELL);
+  ctx.fillStyle = "rgba(220,80,80,.35)";
+  ctx.fillRect(exitCell.c * CELL, exitCell.r * CELL, CELL, CELL);
+  ctx.strokeStyle = "#8f8fb0";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++){
+      const x = c * CELL, y = r * CELL;
+      const w = walls[r][c];
+      if (w.n){ ctx.moveTo(x, y); ctx.lineTo(x + CELL, y); }
+      if (w.w){ ctx.moveTo(x, y); ctx.lineTo(x, y + CELL); }
+      if (r === ROWS - 1 && w.s){ ctx.moveTo(x, y + CELL); ctx.lineTo(x + CELL, y + CELL); }
+      if (c === COLS - 1 && w.e){ ctx.moveTo(x + CELL, y); ctx.lineTo(x + CELL, y + CELL); }
+    }
+  ctx.stroke();
+  bots.forEach((b, i) => {
+    // smooth: interpolate from previous cell toward current, corridor-centered
+    const x = ((b.prevC + (b.c - b.prevC) * t) + 0.5) * CELL;
+    const y = ((b.prevR + (b.r - b.prevR) * t) + 0.5) * CELL;
+    ctx.fillStyle = `hsl(${(i * 47) % 360}, 75%, 60%)`;
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+// live animation: one real tick per TICK_MS, interpolated frames between.
+// External game.tick()/seeded reset switch to manual mode so scripted runs
+// stay exactly deterministic (autoplay never injects extra ticks).
+let auto = true;
+let lastTick = performance.now();
+function loop(now){
+  if (auto && !allDone && now - lastTick >= TICK_MS){
+    tick(1);
+    lastTick = now;
+  } else {
+    draw(Math.min(1, (now - lastTick) / TICK_MS));
+  }
+  requestAnimationFrame(loop);
+}
+
+document.getElementById("reset").addEventListener("click", () => { auto = true; reset(); });
+
+window.game = {
+  tick(n){ auto = false; tick(n); },
+  reset(seed){ auto = (typeof seed !== "number"); reset(seed); },
+  get elapsed(){ return elapsed; },
+  get size(){ return {rows: ROWS, cols: COLS}; },
+  get spawn(){ return {...spawn}; },
+  get exit(){ return {...exitCell}; },
+  walls(r, c){ return {...walls[r][c]}; },
+  get bots(){ return bots.map(b => ({
+    path: b.path, deadEnds: b.deadEnds, finishTick: b.finishTick})); },
+};
+reset(7);
+requestAnimationFrame(loop);
+</script></body></html>

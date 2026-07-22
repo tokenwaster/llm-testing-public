@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Bots</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#080c14;color:#c9d1d9;font-family:'Courier New',monospace;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:20px 16px;gap:14px}
+h1{font-size:1.5rem;letter-spacing:8px;color:#58a6ff;text-shadow:0 0 28px rgba(88,166,255,.5);text-transform:uppercase}
+#hud{display:flex;align-items:stretch;background:#0d1117;border:1px solid #30363d;border-radius:10px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.6)}
+.stat{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:10px 26px;gap:3px}
+.stat+.stat{border-left:1px solid #30363d}
+.lbl{font-size:.6rem;letter-spacing:2px;color:#6e7681;text-transform:uppercase}
+#completed{font-size:1.75rem;font-weight:bold;color:#3fb950;text-shadow:0 0 14px rgba(63,185,80,.4);min-width:2.5ch;text-align:center}
+#timer{font-size:1.75rem;font-weight:bold;color:#58a6ff;text-shadow:0 0 14px rgba(88,166,255,.4);min-width:4.5ch;text-align:center}
+#reset{margin:10px 12px;padding:0 20px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-family:inherit;font-size:.8rem;letter-spacing:1px;transition:background .15s,border-color .15s}
+#reset:hover{background:#30363d;border-color:#58a6ff}
+#maze{border:2px solid #21262d;border-radius:6px;display:block;box-shadow:0 8px 40px rgba(0,0,0,.8)}
+#info{font-size:.7rem;color:#484f58;letter-spacing:1px}
+</style>
+</head>
+<body>
+<h1>MAZE BOTS</h1>
+<div id="hud">
+  <div class="stat"><div class="lbl">Completed</div><div id="completed">0</div></div>
+  <div class="stat"><div class="lbl">Elapsed</div><div id="timer">0:00</div></div>
+  <button id="reset">&#8635; RESET</button>
+</div>
+<canvas id="maze" width="600" height="600"></canvas>
+<div id="info">24 autonomous bots &bull; BFS pathfinding &bull; 20&times;20 maze</div>
+<script>
+(function(){
+'use strict';
+
+const ROWS=20,COLS=20,CELL=30,WTHK=3,INNER=CELL-WTHK*2;
+const NUM_BOTS=24,CW=COLS*CELL,CH=ROWS*CELL;
+const SR=0,SC=0,ER=ROWS-1,EC=COLS-1;
+const STAGGER=5,MS_STEP=115;
+
+const DN=1,DE=2,DS=4,DW=8;
+const DIRS=[
+  {dr:-1,dc:0,bit:DN,opp:DS},
+  {dr:0,dc:1,bit:DE,opp:DW},
+  {dr:1,dc:0,bit:DS,opp:DN},
+  {dr:0,dc:-1,bit:DW,opp:DE}
+];
+
+const COLORS=[
+  '#ff6b6b','#ff9f43','#ffd32a','#a8e063',
+  '#0be881','#67e5ad','#00d2d3','#54a0ff',
+  '#5f27cd','#ee5a24','#10ac84','#2e86de',
+  '#f368e0','#e84393','#fd79a8','#a29bfe',
+  '#fdcb6e','#e17055','#6c5ce7','#00cec9',
+  '#74b9ff','#55efc4','#81ecec','#b2bec3'
+];
+
+const canvas=document.getElementById('maze');
+const ctx=canvas.getContext('2d');
+const compEl=document.getElementById('completed');
+const timerEl=document.getElementById('timer');
+document.getElementById('reset').addEventListener('click',()=>window.game.reset());
+
+let grid,bots,completedCount,stepCount,elapsedMs,timeSinceStep,loopGen=0;
+
+function makeMaze(){
+  grid=Array.from({length:ROWS},()=>new Array(COLS).fill(0));
+  const vis=Array.from({length:ROWS},()=>new Array(COLS).fill(false));
+  const stk=[[SR,SC]];
+  vis[SR][SC]=true;
+  while(stk.length){
+    const[r,c]=stk[stk.length-1];
+    const nbrs=[];
+    for(const d of DIRS){
+      const nr=r+d.dr,nc=c+d.dc;
+      if(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS&&!vis[nr][nc])nbrs.push(d);
+    }
+    if(!nbrs.length){stk.pop();continue;}
+    const d=nbrs[(Math.random()*nbrs.length)|0];
+    const nr=r+d.dr,nc=c+d.dc;
+    grid[r][c]|=d.bit;
+    grid[nr][nc]|=d.opp;
+    vis[nr][nc]=true;
+    stk.push([nr,nc]);
+  }
+}
+
+function bfsPath(sr,sc,er,ec){
+  const total=ROWS*COLS;
+  const prev=new Int32Array(total).fill(-1);
+  const start=sr*COLS+sc,end=er*COLS+ec;
+  prev[start]=start;
+  const q=[start];let h=0;
+  outer:while(h<q.length){
+    const idx=q[h++];
+    if(idx===end)break outer;
+    const r=(idx/COLS)|0,c=idx%COLS;
+    for(const d of DIRS){
+      if(!(grid[r][c]&d.bit))continue;
+      const ni=(r+d.dr)*COLS+(c+d.dc);
+      if(prev[ni]===-1){prev[ni]=idx;q.push(ni);}
+    }
+  }
+  const path=[];let cur=end;
+  while(cur!==start){path.push({r:(cur/COLS)|0,c:cur%COLS});cur=prev[cur];}
+  path.push({r:sr,c:sc});
+  return path.reverse();
+}
+
+function advanceStep(){
+  stepCount++;
+  for(const b of bots){
+    if(b.done)continue;
+    b.px=b.x;b.py=b.y;
+    if(stepCount<=b.startStep)continue;
+    if(b.pathIndex<b.path.length-1){
+      b.pathIndex++;
+      const cell=b.path[b.pathIndex];
+      b.x=cell.c;b.y=cell.r;
+      if(b.pathIndex===b.path.length-1){b.done=true;completedCount++;}
+    }
+  }
+}
+
+function updateHUD(){
+  compEl.textContent=String(completedCount);
+  const s=(elapsedMs/1000)|0;
+  timerEl.textContent=`${(s/60)|0}:${String(s%60).padStart(2,'0')}`;
+}
+
+function render(ts){
+  ts=ts||0;
+
+  // wall background
+  ctx.fillStyle='#090d16';
+  ctx.fillRect(0,0,CW,CH);
+
+  // corridor floors
+  ctx.fillStyle='#1a2d45';
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      const x=c*CELL,y=r*CELL,g=grid[r][c];
+      ctx.fillRect(x+WTHK,y+WTHK,INNER,INNER);
+      if(g&DN)ctx.fillRect(x+WTHK,y,INNER,WTHK);
+      if(g&DE)ctx.fillRect(x+CELL-WTHK,y+WTHK,WTHK,INNER);
+      if(g&DS)ctx.fillRect(x+WTHK,y+CELL-WTHK,INNER,WTHK);
+      if(g&DW)ctx.fillRect(x,y+WTHK,WTHK,INNER);
+    }
+  }
+
+  // spawn highlight
+  ctx.fillStyle='rgba(63,185,80,0.2)';
+  ctx.fillRect(SC*CELL+WTHK,SR*CELL+WTHK,INNER,INNER);
+
+  // exit highlight — pulsing
+  const pulse=0.22+0.12*Math.sin(ts*0.003);
+  ctx.fillStyle=`rgba(255,215,60,${pulse})`;
+  ctx.fillRect(EC*CELL+WTHK,ER*CELL+WTHK,INNER,INNER);
+
+  // S / E labels
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.font=`bold 10px monospace`;
+  ctx.fillStyle='#3fb950';
+  ctx.fillText('S',SC*CELL+CELL/2,SR*CELL+CELL/2);
+  ctx.fillStyle='#ffd347';
+  ctx.fillText('E',EC*CELL+CELL/2,ER*CELL+CELL/2);
+
+  // bots (back to front so bot 0 renders on top)
+  for(let i=bots.length-1;i>=0;i--){
+    const b=bots[i];
+    const px=(b.vx+0.5)*CELL;
+    const py=(b.vy+0.5)*CELL;
+    const rad=CELL*0.27;
+
+    ctx.globalAlpha=b.done?0.5:1;
+    ctx.shadowColor=b.color;
+    ctx.shadowBlur=b.done?3:14;
+    ctx.fillStyle=b.color;
+    ctx.beginPath();
+    ctx.arc(px,py,rad,0,6.2832);
+    ctx.fill();
+
+    // specular glint
+    ctx.shadowBlur=0;
+    ctx.globalAlpha=b.done?0.15:0.4;
+    ctx.fillStyle='#fff';
+    ctx.beginPath();
+    ctx.arc(px-rad*0.32,py-rad*0.32,rad*0.3,0,6.2832);
+    ctx.fill();
+  }
+  ctx.globalAlpha=1;
+  ctx.shadowBlur=0;
+}
+
+function startLoop(){
+  const myGen=++loopGen;
+  let lastTs=performance.now();
+
+  function frame(ts){
+    if(loopGen!==myGen)return;
+    const dt=Math.min(ts-lastTs,80);
+    lastTs=ts;
+    if(completedCount<NUM_BOTS)elapsedMs+=dt;
+
+    timeSinceStep+=dt;
+    while(timeSinceStep>=MS_STEP&&completedCount<NUM_BOTS){
+      advanceStep();
+      timeSinceStep-=MS_STEP;
+    }
+
+    const frac=Math.min(timeSinceStep/MS_STEP,1);
+    for(const b of bots){
+      b.vx=b.px+(b.x-b.px)*frac;
+      b.vy=b.py+(b.y-b.py)*frac;
+    }
+
+    updateHUD();
+    render(ts);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+function init(){
+  makeMaze();
+  const path=bfsPath(SR,SC,ER,EC);
+
+  completedCount=0;
+  stepCount=0;
+  elapsedMs=0;
+  timeSinceStep=0;
+
+  bots=Array.from({length:NUM_BOTS},(_,i)=>({
+    id:i,
+    x:SC,y:SR,
+    vx:SC,vy:SR,
+    px:SC,py:SR,
+    path,
+    pathIndex:0,
+    done:false,
+    startStep:i*STAGGER,
+    color:COLORS[i]
+  }));
+
+  updateHUD();
+  startLoop();
+}
+
+window.game={
+  get bots(){return bots;},
+  get completed(){return completedCount;},
+  get elapsedMs(){return elapsedMs;},
+
+  tick(n){
+    for(let i=0;i<n;i++){
+      if(completedCount>=NUM_BOTS)break;
+      advanceStep();
+    }
+    for(const b of bots){b.vx=b.x;b.vy=b.y;b.px=b.x;b.py=b.y;}
+    timeSinceStep=0;
+    updateHUD();
+    render();
+  },
+
+  reset:init
+};
+
+init();
+}());
+</script>
+</body>
+</html>

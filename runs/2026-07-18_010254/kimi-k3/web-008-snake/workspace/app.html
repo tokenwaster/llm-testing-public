@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Snake</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #070b12;
+    --line: #1e2a3a;
+    --text: #e6edf3;
+    --muted: #8b98a9;
+    --green: #3fb950;
+    --green-bright: #7dffb0;
+    --red: #ff5566;
+    --blue: #79b8ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background:
+      radial-gradient(900px 600px at 50% -10%, rgba(63, 185, 80, .12), transparent 60%),
+      radial-gradient(700px 500px at 50% 110%, rgba(88, 166, 255, .08), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .game {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding: 22px 26px 24px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, .03), rgba(255, 255, 255, 0));
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    box-shadow: 0 30px 60px rgba(0, 0, 0, .5);
+  }
+  h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: .35em;
+    text-transform: uppercase;
+    color: var(--green-bright);
+    text-shadow: 0 0 18px rgba(125, 255, 176, .35);
+  }
+  .hud { display: flex; gap: 34px; align-items: baseline; }
+  .stat { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .stat .label {
+    font-size: 11px;
+    letter-spacing: .2em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .stat .value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+  #score { color: var(--green-bright); }
+  #best  { color: var(--blue); }
+  #snake {
+    width: 420px;
+    height: 420px;
+    display: block;
+    background: #0d1117;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 0 0 4px rgba(63, 185, 80, .06), 0 18px 40px rgba(0, 0, 0, .55);
+  }
+  .controls { display: flex; gap: 10px; }
+  button {
+    font: 600 14px/1 system-ui, sans-serif;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--text);
+    background: #131c2b;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 11px 24px;
+    cursor: pointer;
+    transition: transform .06s ease, background .15s ease, border-color .15s ease, box-shadow .15s ease;
+  }
+  button:hover { background: #1a2740; border-color: #2e4258; }
+  button:active { transform: translateY(1px); }
+  #start {
+    background: var(--green);
+    border-color: var(--green);
+    color: #06110a;
+    box-shadow: 0 6px 18px rgba(63, 185, 80, .35);
+  }
+  #start:hover { background: #4cc763; border-color: #4cc763; }
+  .hint {
+    margin: 0;
+    font-size: 12px;
+    letter-spacing: .05em;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+  <main class="game">
+    <h1>Snake</h1>
+    <div class="hud">
+      <div class="stat"><span class="label">Score</span><span class="value" id="score">0</span></div>
+      <div class="stat"><span class="label">Best</span><span class="value" id="best">0</span></div>
+    </div>
+    <canvas id="snake" width="420" height="420" aria-label="Snake game board"></canvas>
+    <div class="controls">
+      <button id="start" type="button">Start</button>
+      <button id="pause" type="button">Pause</button>
+      <button id="reset" type="button">Reset</button>
+    </div>
+    <p class="hint">Arrow keys / WASD to steer &middot; Space to pause</p>
+  </main>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---- Constants ----
+  var W = 20, H = 20;      // board size in cells (>= 10)
+  var SIZE = 420;          // board size in CSS pixels (>= 400)
+  var TICK_MS = 120;       // auto-advance interval
+
+  var canvas  = document.getElementById('snake');
+  var ctx     = canvas.getContext('2d');
+  var scoreEl = document.getElementById('score');
+  var bestEl  = document.getElementById('best');
+
+  // Crisp rendering on HiDPI displays; CSS size stays 420x420.
+  var dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  canvas.width  = SIZE * dpr;
+  canvas.height = SIZE * dpr;
+  canvas.style.width  = SIZE + 'px';
+  canvas.style.height = SIZE + 'px';
+
+  var DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+
+  // ---- State ----
+  var snakeArr, foodPos, dir, dirQueue, scoreVal, isAlive, won;
+  var timer = null, best = 0;
+
+  function updateHud() {
+    if (scoreVal > best) best = scoreVal;
+    scoreEl.textContent = scoreVal;
+    bestEl.textContent = best;
+  }
+
+  function randomFreeCell() {
+    var occ = Object.create(null);
+    for (var i = 0; i < snakeArr.length; i++) occ[snakeArr[i][0] + ',' + snakeArr[i][1]] = 1;
+    var free = [];
+    for (var y = 0; y < H; y++)
+      for (var x = 0; x < W; x++)
+        if (!occ[x + ',' + y]) free.push([x, y]);
+    return free.length ? free[(Math.random() * free.length) | 0] : null;
+  }
+
+  function reset() {
+    var cx = W >> 1, cy = H >> 1;
+    snakeArr = [[cx, cy], [cx - 1, cy], [cx - 2, cy]];  // head first, length 3
+    dir = 'right';
+    dirQueue = [];
+    scoreVal = 0;
+    isAlive = true;
+    won = false;
+    foodPos = randomFreeCell();
+    updateHud();
+    draw();
+  }
+
+  // Queue a turn; a 180-degree reversal is ignored.
+  function setDir(d) {
+    if (!DIRS[d]) return;
+    var last = dirQueue.length ? dirQueue[dirQueue.length - 1] : dir;
+    var a = DIRS[last], b = DIRS[d];
+    if (a[0] === b[0] && a[1] === b[1]) return;          // same direction: no-op
+    if (a[0] + b[0] === 0 && a[1] + b[1] === 0) return;  // reversal: keep heading
+    if (dirQueue.length < 2) dirQueue.push(d);
+  }
+
+  function die() {
+    isAlive = false;
+    if (timer !== null) { clearInterval(timer); timer = null; }
+    draw();
+  }
+
+  // Advance exactly one step.
+  function tick() {
+    if (!isAlive) return;
+    if (dirQueue.length) dir = dirQueue.shift();
+    var d = DIRS[dir];
+    var nx = snakeArr[0][0] + d[0];
+    var ny = snakeArr[0][1] + d[1];
+
+    if (nx < 0 || ny < 0 || nx >= W || ny >= H) { die(); return; }  // wall
+
+    var eating = foodPos !== null && nx === foodPos[0] && ny === foodPos[1];
+    var limit = eating ? snakeArr.length : snakeArr.length - 1;     // tail cell frees up
+    for (var i = 0; i < limit; i++)
+      if (snakeArr[i][0] === nx && snakeArr[i][1] === ny) { die(); return; }  // self
+
+    snakeArr.unshift([nx, ny]);
+    if (eating) {
+      scoreVal++;
+      updateHud();
+      foodPos = randomFreeCell();
+      if (foodPos === null) { won = true; die(); return; }  // filled the board
+    } else {
+      snakeArr.pop();
+    }
+    draw();
+  }
+
+  // ---- Auto-advance loop ----
+  function start() {
+    if (timer !== null) return;
+    if (!isAlive) reset();
+    timer = setInterval(tick, TICK_MS);
+    draw();
+  }
+
+  function pause() {
+    if (timer !== null) { clearInterval(timer); timer = null; }
+    draw();
+  }
+
+  function handleReset() {
+    var wasRunning = timer !== null;
+    if (timer !== null) { clearInterval(timer); timer = null; }
+    reset();
+    if (wasRunning) start();
+  }
+
+  // ---- Input ----
+  var KEYMAP = {
+    ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+    w: 'up', W: 'up', a: 'left', A: 'left', s: 'down', S: 'down', d: 'right', D: 'right'
+  };
+  window.addEventListener('keydown', function (e) {
+    var d = KEYMAP[e.key];
+    if (d) {
+      e.preventDefault();
+      setDir(d);
+      if (timer === null && isAlive) start();  // arrows both steer and get things moving
+      return;
+    }
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      if (timer !== null) pause(); else start();
+    }
+  });
+
+  function bind(id, fn) {
+    document.getElementById(id).addEventListener('click', function (e) {
+      fn();
+      e.currentTarget.blur();
+    });
+  }
+  bind('start', start);
+  bind('pause', pause);
+  bind('reset', handleReset);
+
+  // ---- Rendering ----
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function draw() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var cell = SIZE / W, x, y, i;
+
+    // checkerboard background
+    for (y = 0; y < H; y++)
+      for (x = 0; x < W; x++) {
+        ctx.fillStyle = ((x + y) & 1) ? '#101824' : '#0c121c';
+        ctx.fillRect(x * cell, y * cell, cell, cell);
+      }
+
+    // food
+    if (foodPos) {
+      var fx = (foodPos[0] + 0.5) * cell, fy = (foodPos[1] + 0.5) * cell;
+      ctx.save();
+      ctx.shadowColor = 'rgba(255, 85, 102, .9)';
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = '#ff5566';
+      ctx.beginPath();
+      ctx.arc(fx, fy, cell * 0.30, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      ctx.fillStyle = 'rgba(255, 255, 255, .55)';
+      ctx.beginPath();
+      ctx.arc(fx - cell * 0.09, fy - cell * 0.10, cell * 0.07, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // snake, tail first so the head sits on top
+    var n = snakeArr.length;
+    for (i = n - 1; i >= 0; i--) {
+      var t = n <= 1 ? 0 : i / (n - 1);
+      var r = Math.round(125 + (34 - 125) * t);
+      var g = Math.round(255 + (150 - 255) * t);
+      var b = Math.round(176 + (80 - 176) * t);
+      var sx = snakeArr[i][0] * cell, sy = snakeArr[i][1] * cell;
+      if (i === 0) {
+        ctx.save();
+        ctx.shadowColor = 'rgba(125, 255, 176, .8)';
+        ctx.shadowBlur = 14;
+        ctx.fillStyle = isAlive ? '#7dffb0' : '#8e9aa8';
+        roundRect(sx + 1.5, sy + 1.5, cell - 3, cell - 3, cell * 0.28);
+        ctx.fill();
+        ctx.restore();
+      } else {
+        ctx.fillStyle = isAlive ? 'rgb(' + r + ',' + g + ',' + b + ')' : 'rgb(86, 97, 110)';
+        roundRect(sx + 1.5, sy + 1.5, cell - 3, cell - 3, cell * 0.24);
+        ctx.fill();
+      }
+    }
+
+    // eyes, oriented along the heading
+    if (isAlive) {
+      var h = snakeArr[0];
+      var hx = (h[0] + 0.5) * cell, hy = (h[1] + 0.5) * cell;
+      var dv = DIRS[dir];
+      var px = -dv[1], py = dv[0];
+      for (var s = -1; s <= 1; s += 2) {
+        ctx.fillStyle = '#06110a';
+        ctx.beginPath();
+        ctx.arc(hx + dv[0] * cell * 0.16 + px * s * cell * 0.17,
+                hy + dv[1] * cell * 0.16 + py * s * cell * 0.17,
+                cell * 0.085, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // overlays
+    if (!isAlive) {
+      ctx.fillStyle = 'rgba(5, 8, 13, .62)';
+      ctx.fillRect(0, 0, SIZE, SIZE);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = won ? '#7dffb0' : '#ff5566';
+      ctx.font = '700 34px system-ui, sans-serif';
+      ctx.fillText(won ? 'You Win!' : 'Game Over', SIZE / 2, SIZE / 2 - 6);
+      ctx.fillStyle = '#c9d4e0';
+      ctx.font = '500 15px system-ui, sans-serif';
+      ctx.fillText('Press Start to play again', SIZE / 2, SIZE / 2 + 24);
+    } else if (timer === null) {
+      ctx.fillStyle = 'rgba(5, 8, 13, .45)';
+      ctx.fillRect(0, 0, SIZE, SIZE);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#e6edf3';
+      ctx.font = '600 16px system-ui, sans-serif';
+      ctx.fillText(scoreVal > 0 ? 'Paused' : 'Press Start or an arrow key', SIZE / 2, SIZE / 2 + 5);
+    }
+  }
+
+  // ---- Programmatic API (used by grading) ----
+  window.game = {
+    w: W,
+    h: H,
+    reset: reset,
+    tick: tick,
+    setDir: setDir,
+    setFood: function (x, y) { foodPos = [x, y]; draw(); },
+    snake: function () { return snakeArr.map(function (p) { return [p[0], p[1]]; }); },
+    food: function () { return foodPos ? [foodPos[0], foodPos[1]] : null; },
+    alive: function () { return isAlive; },
+    score: function () { return scoreVal; }
+  };
+
+  reset();
+})();
+</script>
+</body>
+</html>

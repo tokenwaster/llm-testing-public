@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body { font-family: sans-serif; padding: 20px; background: #f5f5f5; }
+  #app-container { width: 100%; max-width: 900px; margin: 0 auto; }
+  
+  /* Grid Layout */
+  #spreadsheet-grid {
+    display: grid;
+    grid-template-columns: 40px repeat(10, 1fr);
+    gap: 1px;
+    background: #ccc;
+    border: 1px solid #999;
+    width: 800px; /* >= 600 */
+    min-height: 500px; /* >= 400 */
+    margin-bottom: 20px;
+  }
+
+  .cell, .header {
+    background: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    padding: 2px;
+    box-sizing: border-box;
+  }
+
+  /* Headers */
+  .header { background: #e0e0e0; font-weight: bold; cursor: default; user-select: none; }
+  .corner { background: #f5f5f5; }
+
+  /* Inputs */
+  input.cell-input {
+    width: 100%;
+    height: 100%;
+    border: none;
+    outline: none;
+    text-align: right;
+    padding: 2px 4px;
+    font-family: monospace;
+    background: #fff;
+    box-sizing: border-box;
+  }
+  input.cell-input:focus { background: #e8f0fe; }
+
+  /* Controls */
+  .controls { display: flex; gap: 10px; align-items: center; margin-top: 20px; }
+  textarea#csv { width: 100%; height: 100px; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<div id="app-container">
+  <div id="spreadsheet-grid"></div>
+  
+  <div class="controls">
+    <button id="export">Export CSV</button>
+    <textarea id="csv" placeholder="CSV Output..."></textarea>
+  </div>
+</div>
+
+<script>
+(function() {
+  const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  const ROWS = [1,2,3,4,5,6,7,8,9,10];
+  
+  // State: Raw values (key: "A1", value: string)
+  const cellsRaw = {}; 
+  // Cache for computed display values
+  const cellsComputed = {};
+  // Tracking set for cycle detection during a single recalc pass
+  let visiting = new Set();
+
+  // Initialize Grid UI
+  function initGrid() {
+    const grid = document.getElementById('spreadsheet-grid');
+    
+    // Corner Header
+    const corner = document.createElement('div');
+    corner.className = 'header corner';
+    grid.appendChild(corner);
+
+    // Column Headers (A-J)
+    for (const col of COLS) {
+      const h = document.createElement('div');
+      h.className = 'header';
+      h.textContent = col;
+      grid.appendChild(h);
+    }
+
+    // Rows 1-10
+    for (const row of ROWS) {
+      // Row Label
+      const rLabel = document.createElement('div');
+      rLabel.className = 'header';
+      rLabel.textContent = row;
+      grid.appendChild(rLabel);
+
+      // Cells A-J
+      for (const col of COLS) {
+        const id = `${col}${row}`;
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'cell-input';
+        input.id = `cell-${id}`;
+        
+        // Event Listeners
+        input.addEventListener('focus', () => {
+          // Show raw text when editing
+          input.value = cellsRaw[id] || '';
+        });
+        
+        input.addEventListener('blur', () => {
+          commitCell(id);
+        });
+
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            input.blur();
+          }
+        });
+
+        grid.appendChild(input);
+      }
+    }
+  }
+
+  function getCellId(col, row) { return col + row; }
+
+  // Commit change from UI to State and Recalculate
+  function commitCell(id) {
+    const input = document.getElementById(`cell-${id}`);
+    if (input) {
+      cellsRaw[id] = input.value.trim();
+      recalculateAll();
+    }
+  }
+
+  // Core Calculation Logic
+  function calc(id) {
+    if (visiting.has(id)) return '#CYCLE';
+    
+    visiting.add(id);
+    try {
+      const raw = cellsRaw[id] || '';
+      
+      // Plain text or empty
+      if (!raw.startsWith('=')) {
+        // Empty counts as 0 in formulas, but display is empty string
+        return raw; 
+      }
+
+      // Formula
+      let expr = raw.slice(1);
+      
+      // Resolve cell references recursively
+      // Regex matches A-J followed by 1-9 or 10
+      const refRegex = /([A-J])([1-9]|10)/g;
+      
+      let resolvedExpr = expr.replace(refRegex, (match, c, r) => {
+        const refId = c + r;
+        // Check if reference is within valid grid bounds (A-J 1-10)
+        // Since regex restricts to A-J and 1-10, it's technically valid format.
+        // But we must ensure the cell exists in our state map? 
+        // All cells exist conceptually, even if empty.
+        
+        const val = calc(refId);
+        if (val === '#CYCLE') throw new Error('CYCLE');
+        // Empty cells count as 0 inside formulas
+        if (val === '') return '0';
+        return val;
+      });
+
+      // Evaluate expression safely using Function constructor
+      // Sanitize: ensure only allowed chars remain? 
+      // Since we replaced refs with numbers/strings, and regex restricted refs,
+      // the remaining string should be math. But user could type "=A1*2+abc".
+      // eval will throw on 'abc'. We catch that as #ERR.
+      
+      let result;
+      try {
+        // eslint-disable-next-line no-new-func
+        const fn = new Function('return ' + resolvedExpr);
+        result = fn();
+      } catch (e) {
+        throw new Error('SYNTAX');
+      }
+
+      if (!isFinite(result)) {
+        throw new Error('INVALID');
+      }
+
+      return String(result);
+
+    } catch (e) {
+      visiting.delete(id); // Ensure cleanup on error path before returning
+      if (e.message === 'CYCLE') return '#CYCLE';
+      return '#ERR';
+    } finally {
+      visiting.delete(id);
+    }
+  }
+
+  function recalculateAll() {
+    // Reset cycle tracking for this pass
+    visiting.clear();
+    
+    // Calculate all cells
+    for (const col of COLS) {
+      for (const row of ROWS) {
+        const id = getCellId(col, row);
+        const val = calc(id);
+        cellsComputed[id] = val;
+        
+        // Update UI input if not currently focused to avoid flickering during edit
+        const input = document.getElementById(`cell-${id}`);
+        if (input && document.activeElement !== input) {
+          input.value = val;
+        }
+      }
+    }
+  }
+
+  // API Implementation
+  window.sheet = {
+    set: function(id, value) {
+      cellsRaw[id] = value;
+      recalculateAll();
+    },
+    get: function(id) {
+      return cellsComputed[id] !== undefined ? cellsComputed[id] : '';
+    },
+    raw: function(id) {
+      return cellsRaw[id] !== undefined ? cellsRaw[id] : '';
+    }
+  };
+
+  // Export CSV
+  document.getElementById('export').addEventListener('click', () => {
+    let csv = '';
+    for (const row of ROWS) {
+      const rowData = [];
+      for (const col of COLS) {
+        const id = getCellId(col, row);
+        // Use computed value; if empty string, treat as "" in CSV? 
+        // Prompt says "writes the current 10x10 grid of COMPUTED values"
+        rowData.push(cellsComputed[id] !== undefined ? cellsComputed[id] : '');
+      }
+      csv += rowData.join(',') + '\n';
+    }
+    document.getElementById('csv').value = csv;
+  });
+
+  // Initialize on Load
+  window.onload = initGrid;
+
+})();
+</script>
+</body>
+</html>

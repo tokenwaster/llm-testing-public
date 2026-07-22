@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maze Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: Arial, sans-serif;
+    background: #1a1a2e;
+    color: #eee;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+    min-height: 100vh;
+  }
+  #maze {
+    border: 2px solid #444;
+    border-radius: 4px;
+    margin: 10px 0;
+  }
+  #maze canvas {
+    display: block;
+  }
+  #controls {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    margin: 10px 0;
+    font-size: 18px;
+  }
+  #completed { color: #4ecca3; font-weight: bold; }
+  #timer { color: #e94560; font-weight: bold; }
+  #reset {
+    padding: 8px 20px;
+    font-size: 16px;
+    background: #e94560;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  #reset:hover { background: #c73652; }
+</style>
+</head>
+<body>
+  <div id="controls">
+    <span id="completed">Completed: 0/24</span>
+    <span id="timer">0</span>
+    <button id="reset">Reset</button>
+  </div>
+  <div id="maze"><canvas id="canvas"></canvas></div>
+
+<script>
+(function() {
+  function createRNG(seed) {
+    var s = seed | 0;
+    return function() {
+      s |= 0; s = s + 0x6D2B79F5 | 0;
+      var t = Math.imul(s ^ s >>> 15, 1 | s);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  var ROWS = 20;
+  var COLS = 20;
+  var CELL_SIZE = 25;
+  var CANVAS_SIZE = (ROWS + 1) * CELL_SIZE;
+  var NUM_BOTS = 24;
+  var BOT_COLORS = [
+    '#ff6b6b','#feca57','#48dbfb','#ff9ff3','#54a0ff',
+    '#5f27cd','#01a3a4','#f368e0','#ff6348','#7bed9f',
+    '#70a1ff','#ffa502','#2ed573','#ff4757','#eccc68',
+    '#a29bfe','#fd79a8','#00cec9','#e17055','#6c5ce7',
+    '#fdcb6e','#00b894','#e84393','#0984e3'
+  ];
+
+  function generateMaze(rows, cols, rng) {
+    var walls = [];
+    for (var r = 0; r < rows; r++) {
+      walls[r] = [];
+      for (var c = 0; c < cols; c++) {
+        walls[r][c] = {n: true, e: true, s: true, w: true};
+      }
+    }
+
+    var visited = [];
+    for (var r = 0; r < rows; r++) {
+      visited[r] = [];
+      for (var c = 0; c < cols; c++) {
+        visited[r][c] = false;
+      }
+    }
+
+    var stack = [{r: 0, c: 0}];
+    visited[0][0] = true;
+
+    var dirs = [
+      {dr: -1, dc: 0, wall: 'n', opp: 's'},
+      {dr: 1, dc: 0, wall: 's', opp: 'n'},
+      {dr: 0, dc: -1, wall: 'w', opp: 'e'},
+      {dr: 0, dc: 1, wall: 'e', opp: 'w'}
+    ];
+
+    while (stack.length > 0) {
+      var current = stack[stack.length - 1];
+      var neighbors = [];
+
+      for (var i = 0; i < dirs.length; i++) {
+        var d = dirs[i];
+        var nr = current.r + d.dr;
+        var nc = current.c + d.dc;
+        if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) {
+          neighbors.push({r: nr, c: nc, dir: d});
+        }
+      }
+
+      if (neighbors.length > 0) {
+        var next = neighbors[Math.floor(rng() * neighbors.length)];
+        walls[current.r][current.c][next.dir.wall] = false;
+        walls[next.r][next.c][next.dir.opp] = false;
+        visited[next.r][next.c] = true;
+        stack.push({r: next.r, c: next.c});
+      } else {
+        stack.pop();
+      }
+    }
+
+    return walls;
+  }
+
+  function getDirectionOrder(seed) {
+    var rng = createRNG(seed);
+    var dirs = [0, 1, 2, 3];
+    for (var i = dirs.length - 1; i > 0; i--) {
+      var j = Math.floor(rng() * (i + 1));
+      var temp = dirs[i];
+      dirs[i] = dirs[j];
+      dirs[j] = temp;
+    }
+    return dirs;
+  }
+
+  var dirMap = [
+    {dr: -1, dc: 0, wall: 'n'},
+    {dr: 1, dc: 0, wall: 's'},
+    {dr: 0, dc: -1, wall: 'w'},
+    {dr: 0, dc: 1, wall: 'e'}
+  ];
+
+  function cellKey(r, c) { return r + ',' + c; }
+
+  var game = {
+    _walls: null,
+    _rows: ROWS,
+    _cols: COLS,
+    _spawn: {r: 0, c: 0},
+    _exit: {r: ROWS - 1, c: COLS - 1},
+    _bots: [],
+    _elapsed: 0,
+    _finished: false,
+    _rng: null,
+
+    get size() { return {rows: this._rows, cols: this._cols}; },
+    get spawn() { return {r: this._spawn.r, c: this._spawn.c}; },
+    get exit() { return {r: this._exit.r, c: this._exit.c}; },
+    get elapsed() { return this._elapsed; },
+    get bots() { return this._bots; },
+
+    walls: function(r, c) {
+      if (r < 0 || r >= this._rows || c < 0 || c >= this._cols) {
+        return {n: true, e: true, s: true, w: true};
+      }
+      return {
+        n: this._walls[r][c].n,
+        e: this._walls[r][c].e,
+        s: this._walls[r][c].s,
+        w: this._walls[r][c].w
+      };
+    },
+
+    reset: function(seed) {
+      var rngSeed = seed !== undefined ? seed : Date.now();
+      this._rng = createRNG(rngSeed);
+      this._walls = generateMaze(this._rows, this._cols, this._rng);
+      this._elapsed = 0;
+      this._finished = false;
+
+      this._bots = [];
+      for (var i = 0; i < NUM_BOTS; i++) {
+        var dirOrder = getDirectionOrder(rngSeed * 1000 + i + 1);
+        var spawnKey = cellKey(this._spawn.r, this._spawn.c);
+        this._bots.push({
+          id: i,
+          color: BOT_COLORS[i],
+          path: [{r: this._spawn.r, c: this._spawn.c}],
+          stack: [{r: this._spawn.r, c: this._spawn.c}],
+          visited: {},
+          deadEnds: [],
+          deadEndsSet: {},
+          current: {r: this._spawn.r, c: this._spawn.c},
+          fromPos: {r: this._spawn.r, c: this._spawn.c},
+          toPos: {r: this._spawn.r, c: this._spawn.c},
+          progress: 1,
+          finished: false,
+          finishTick: null,
+          directionOrder: dirOrder
+        });
+        this._bots[i].visited[spawnKey] = true;
+      }
+
+      updateUI();
+      render();
+    },
+
+    tick: function(n) {
+      if (this._finished) return;
+
+      for (var t = 0; t < n; t++) {
+        var anyStillSearching = false;
+
+        for (var i = 0; i < this._bots.length; i++) {
+          var bot = this._bots[i];
+          if (bot.finished) continue;
+
+          if (bot.progress < 1) {
+            bot.progress += 1;
+            if (bot.progress >= 1) {
+              bot.progress = 1;
+              this._moveBot(bot);
+            }
+          } else {
+            this._moveBot(bot);
+          }
+
+          if (!bot.finished) anyStillSearching = true;
+        }
+
+        this._elapsed++;
+
+        var allFinished = true;
+        for (var i = 0; i < this._bots.length; i++) {
+          if (!this._bots[i].finished) {
+            allFinished = false;
+            break;
+          }
+        }
+        if (allFinished) {
+          this._finished = true;
+        }
+      }
+
+      updateUI();
+      render();
+    },
+
+    _moveBot: function(bot) {
+      var current = bot.stack[bot.stack.length - 1];
+      var candidates = [];
+
+      for (var i = 0; i < bot.directionOrder.length; i++) {
+        var di = bot.directionOrder[i];
+        var d = dirMap[di];
+        var nr = current.r + d.dr;
+        var nc = current.c + d.dc;
+
+        if (nr < 0 || nr >= this._rows || nc < 0 || nc >= this._cols) continue;
+        if (this._walls[current.r][current.c][d.wall]) continue;
+
+        var k = cellKey(nr, nc);
+        if (bot.deadEndsSet[k]) continue;
+        if (bot.visited[k]) continue;
+
+        candidates.push({r: nr, c: nc});
+      }
+
+      if (candidates.length > 0) {
+        var next = candidates[0];
+        bot.fromPos = {r: current.r, c: current.c};
+        bot.toPos = {r: next.r, c: next.c};
+        bot.progress = 0;
+        bot.stack.push({r: next.r, c: next.c});
+        bot.path.push({r: next.r, c: next.c});
+        bot.visited[cellKey(next.r, next.c)] = true;
+        bot.current = {r: next.r, c: next.c};
+
+        if (next.r === this._exit.r && next.c === this._exit.c) {
+          bot.finished = true;
+          bot.finishTick = this._elapsed;
+        }
+      } else {
+        var deadKey = cellKey(current.r, current.c);
+        bot.deadEnds.push({r: current.r, c: current.c});
+        bot.deadEndsSet[deadKey] = true;
+        bot.stack.pop();
+
+        if (bot.stack.length > 0) {
+          var newTop = bot.stack[bot.stack.length - 1];
+          bot.fromPos = {r: current.r, c: current.c};
+          bot.toPos = {r: newTop.r, c: newTop.c};
+          bot.progress = 0;
+          bot.current = {r: newTop.r, c: newTop.c};
+          bot.path.push({r: newTop.r, c: newTop.c});
+        } else {
+          bot.finished = true;
+          bot.finishTick = this._elapsed;
+        }
+      }
+    }
+  };
+
+  var canvas = document.getElementById('canvas');
+  var ctx = canvas.getContext('2d');
+  var completedEl = document.getElementById('completed');
+  var timerEl = document.getElementById('timer');
+  var resetBtn = document.getElementById('reset');
+
+  function updateUI() {
+    var completed = 0;
+    for (var i = 0; i < game.bots.length; i++) {
+      if (game.bots[i].finished) completed++;
+    }
+    completedEl.textContent = 'Completed: ' + completed + '/' + NUM_BOTS;
+    timerEl.textContent = game.elapsed;
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+    ctx.fillStyle = '#0a0a1a';
+    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+
+    for (var r = 0; r < game._rows; r++) {
+      for (var c = 0; c < game._cols; c++) {
+        var x = c * CELL_SIZE;
+        var y = r * CELL_SIZE;
+        var w = game._walls[r][c];
+
+        if (w.n) {
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + CELL_SIZE, y);
+          ctx.stroke();
+        }
+        if (w.e) {
+          ctx.beginPath();
+          ctx.moveTo(x + CELL_SIZE, y);
+          ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE);
+          ctx.stroke();
+        }
+        if (w.s) {
+          ctx.beginPath();
+          ctx.moveTo(x, y + CELL_SIZE);
+          ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE);
+          ctx.stroke();
+        }
+        if (w.w) {
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x, y + CELL_SIZE);
+          ctx.stroke();
+        }
+      }
+    }
+
+    var ex = game._exit.c * CELL_SIZE + CELL_SIZE / 2;
+    var ey = game._exit.r * CELL_SIZE + CELL_SIZE / 2;
+    ctx.fillStyle = '#4ecca3';
+    ctx.beginPath();
+    ctx.arc(ex, ey, CELL_SIZE / 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    var sx = game._spawn.c * CELL_SIZE + CELL_SIZE / 2;
+    var sy = game._spawn.r * CELL_SIZE + CELL_SIZE / 2;
+    ctx.fillStyle = '#feca57';
+    ctx.beginPath();
+    ctx.arc(sx, sy, CELL_SIZE / 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    for (var i = 0; i < game.bots.length; i++) {
+      var bot = game.bots[i];
+      var px = bot.fromPos.c * CELL_SIZE + CELL_SIZE / 2;
+      var py = bot.fromPos.r * CELL_SIZE + CELL_SIZE / 2;
+      var qx = bot.toPos.c * CELL_SIZE + CELL_SIZE / 2;
+      var qy = bot.toPos.r * CELL_SIZE + CELL_SIZE / 2;
+
+      var cx = px + (qx - px) * bot.progress;
+      var cy = py + (qy - py) * bot.progress;
+
+      ctx.fillStyle = bot.color;
+      ctx.beginPath();
+      ctx.arc(cx, cy, CELL_SIZE / 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = bot.color;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, CELL_SIZE / 3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  resetBtn.addEventListener('click', function() { game.reset(); });
+  window.game = game;
+  game.reset();
+})();
+</script>
+</body>
+</html>

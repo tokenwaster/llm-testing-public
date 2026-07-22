@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Deterministic Maze Exploration Game</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 10px;
+      background-color: #1e1e1e;
+      color: #f0f0f0;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    h1 {
+      margin: 5px 0;
+      font-size: 1.5rem;
+    }
+    #controls {
+      display: flex;
+      gap: 15px;
+      align-items: center;
+      margin-bottom: 10px;
+      background: #2d2d2d;
+      padding: 8px 15px;
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+    }
+    .stat {
+      font-size: 1rem;
+      font-weight: bold;
+    }
+    .stat span {
+      color: #00ffcc;
+    }
+    button {
+      background-color: #007acc;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background-color: #0098ff;
+    }
+    #maze-container {
+      position: relative;
+      background: #111;
+      border: 3px solid #444;
+      border-radius: 8px;
+      padding: 5px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.7);
+    }
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Maze Exploration Bots</h1>
+  
+  <div id="controls">
+    <div class="stat">Completed: <span id="completed">0</span>/24</div>
+    <div class="stat">Ticks: <span id="timer">0</span></div>
+    <button id="reset">Reset / New Maze</button>
+  </div>
+
+  <div id="maze-container" id="maze">
+    <canvas id="mazeCanvas" width="600" height="600"></canvas>
+  </div>
+
+  <script>
+    // --- Deterministic Random Number Generator (LCG) ---
+    class SeededRandom {
+      constructor(seed) {
+        this.seed = seed % 2147483647;
+        if (this.seed <= 0) this.seed += 2147483646;
+      }
+      // Returns a float between 0 (inclusive) and 1 (exclusive)
+      next() {
+        this.seed = (this.seed * 16807) % 2147483647;
+        return (this.seed - 1) / 2147483646;
+      }
+      // Returns an integer between min and max (inclusive)
+      nextInt(min, max) {
+        return Math.floor(this.next() * (max - min + 1)) + min;
+      }
+      // Shuffles an array in-place deterministically
+      shuffle(array) {
+        for (let i = array.length - 1; i > 0; i--) {
+          const j = Math.floor(this.next() * (i + 1));
+          const temp = array[i];
+          array[i] = array[j];
+          array[j] = temp;
+        }
+        return array;
+      }
+    }
+
+    // --- Game Configuration ---
+    const ROWS = 21;
+    const COLS = 21;
+    const NUM_BOTS = 24;
+    const CELL_SIZE = 28; // Canvas size will be ROWS * CELL_SIZE
+    
+    // Direction vectors
+    const DIRS = [
+      { dr: -1, dc: 0, name: 'n' }, // North
+      { dr: 0, dc: 1, name: 'e' },  // East
+      { dr: 1, dc: 0, name: 's' },  // South
+      { dr: 0, dc: -1, name: 'w' }  // West
+    ];
+    const DIR_OPPOSITES = { 'n': 's', 's': 'n', 'e': 'w', 'w': 'e' };
+
+    // --- Bot Class ---
+    class Bot {
+      constructor(id, startR, startC, dirPreference, color) {
+        this.id = id;
+        this.color = color;
+        this.dirPreference = dirPreference; // Array of direction names, e.g., ['n', 'e', 's', 'w']
+        
+        // Current position
+        this.r = startR;
+        this.c = startC;
+        
+        // Grading API properties
+        this.path = [{ r: startR, c: startC }];
+        this.deadEnds = []; // Cells marked as dead ends (fully explored)
+        this.finishTick = null;
+
+        // Internal exploration state (Tremaux / DFS)
+        // We track visited cells and the path we took to backtrack.
+        this.visited = {}; // Key: "r,c" -> boolean
+        this.visited[`${startR},${startC}`] = true;
+        
+        this.backtrackStack = [{ r: startR, c: startC }];
+        
+        // For smooth rendering interpolation
+        this.prevR = startR;
+        this.prevC = startC;
+      }
+
+      // Decide and execute next move based on local knowledge
+      step(maze, exitR, exitC, currentTick) {
+        if (this.finishTick !== null) return;
+
+        // Check if already at exit
+        if (this.r === exitR && this.c === exitC) {
+          this.finishTick = currentTick;
+          return;
+        }
+
+        this.prevR = this.r;
+        this.prevC = this.c;
+
+        const currentCellKey = `${this.r},${this.c}`;
+        const walls = maze.getWalls(this.r, this.c);
+
+        // Find unvisited neighbors that are accessible (no wall)
+        let nextMove = null;
+
+        // Try directions in this bot's preferred order
+        for (let dirName of this.dirPreference) {
+          if (walls[dirName]) continue; // Wall in this direction
+
+          const dir = DIRS.find(d => d.name === dirName);
+          const nr = this.r + dir.dr;
+          const nc = this.c + dir.dc;
+          const neighborKey = `${nr},${nc}`;
+
+          // If neighbor is not visited and not marked dead
+          if (!this.visited[neighborKey] && !this.isDeadEnd(nr, nc)) {
+            nextMove = { r: nr, c: nc };
+            break;
+          }
+        }
+
+        if (nextMove) {
+          // Move forward to unvisited cell
+          this.r = nextMove.r;
+          this.c = nextMove.c;
+          const key = `${this.r},${this.c}`;
+          this.visited[key] = true;
+          this.backtrackStack.push({ r: this.r, c: this.c });
+          this.path.push({ r: this.r, c: this.c });
+        } else {
+          // No unvisited neighbors. This cell is now a dead end for this bot.
+          this.markDeadEnd(this.r, this.c);
+          
+          // Backtrack
+          if (this.backtrackStack.length > 1) {
+            this.backtrackStack.pop(); // Pop current cell
+            const prevCell = this.backtrackStack[this.backtrackStack.length - 1];
+            this.r = prevCell.r;
+            this.c = prevCell.c;
+            this.path.push({ r: this.r, c: this.c });
+          } else {
+            // Stack empty, nowhere to backtrack (should not happen in perfect maze unless fully explored)
+          }
+        }
+
+        // Check if reached exit after moving
+        if (this.r === exitR && this.c === exitC) {
+          this.finishTick = currentTick;
+        }
+      }
+
+      isDeadEnd(r, c) {
+        return this.deadEnds.some(cell => cell.r === r && cell.c === c);
+      }
+
+      markDeadEnd(r, c) {
+        if (!this.isDeadEnd(r, c)) {
+          this.deadEnds.push({ r, c });
+        }
+      }
+    }
+
+    // --- Maze Class ---
+    class Maze {
+      constructor(rows, cols, rng) {
+        this.rows = rows;
+        this.cols = cols;
+        // Grid of cells. Each cell has walls: {n: true, e: true, s: true, w: true}
+        this.grid = [];
+        for (let r = 0; r < rows; r++) {
+          this.grid[r] = [];
+          for (let c = 0; c < cols; c++) {
+            this.grid[r][c] = { n: true, e: true, s: true, w: true };
+          }
+        }
+        this.generate(rng);
+      }
+
+      generate(rng) {
+        // Randomized Prim's or DFS for perfect maze generation.
+        // Let's use DFS with a stack for guaranteed perfect maze.
+        const visited = Array.from({ length: this.rows }, () => Array(this.cols).fill(false));
+        const stack = [];
+        
+        // Start at (0,0)
+        let currR = 0;
+        let currC = 0;
+        visited[currR][currC] = true;
+        stack.push({ r: currR, c: currC });
+
+        while (stack.length > 0) {
+          const current = stack[stack.length - 1];
+          const neighbors = [];
+
+          for (let d of DIRS) {
+            const nr = current.r + d.dr;
+            const nc = current.c + d.dc;
+            if (nr >= 0 && nr < this.rows && nc >= 0 && nc < this.cols && !visited[nr][nc]) {
+              neighbors.push({ r: nr, c: nc, dir: d });
+            }
+          }
+
+          if (neighbors.length > 0) {
+            // Deterministic choice using our seeded RNG
+            const nextCell = neighbors[Math.floor(rng.next() * neighbors.length)];
+            
+            // Remove walls
+            this.grid[current.r][current.c][nextCell.dir.name] = false;
+            const oppositeDir = DIR_OPPOSITES[nextCell.dir.name];
+            this.grid[nextCell.r][nextCell.c][oppositeDir] = false;
+
+            visited[nextCell.r][nextCell.c] = true;
+            stack.push({ r: nextCell.r, c: nextCell.c });
+          } else {
+            stack.pop();
+          }
+        }
+      }
+
+      getWalls(r, c) {
+        if (r < 0 || r >= this.rows || c < 0 || c >= this.cols) {
+          return { n: true, e: true, s: true, w: true };
+        }
+        return this.grid[r][c];
+      }
+    }
+
+    // --- Game Engine ---
+    class Game {
+      constructor() {
+        this.canvas = document.getElementById('mazeCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        
+        // Animation interpolation factor
+        this.animProgress = 1.0;
+        this.lastFrameTime = 0;
+
+        this.reset();
+        
+        // Start visual render loop
+        requestAnimationFrame((t) => this.loop(t));
+      }
+
+      reset(seed) {
+        if (seed === undefined) {
+          seed = Math.floor(Math.random() * 1000000) + 1;
+        }
+        this.currentSeed = seed;
+        this.rng = new SeededRandom(seed);
+
+        this.size = { rows: ROWS, cols: COLS };
+        
+        // Generate Maze
+        this.maze = new Maze(ROWS, COLS, this.rng);
+
+        // Deterministic Spawn and Exit selection (far apart)
+        // Spawn at top-left, Exit at bottom-right
+        this.spawn = { r: 0, c: 0 };
+        this.exit = { r: ROWS - 1, c: COLS - 1 };
+
+        this.elapsed = 0;
+
+        // Generate 24 bots with distinct direction preferences and colors
+        this.bots = [];
+        const baseDirections = ['n', 'e', 's', 'w'];
+        
+        for (let i = 0; i < NUM_BOTS; i++) {
+          // Create a unique deterministic direction preference for each bot
+          const pref = [...baseDirections];
+          // Shuffle deterministically using the seeded RNG
+          this.rng.shuffle(pref);
+
+          // Distinct colors using HSL
+          const hue = Math.floor((360 / NUM_BOTS) * i);
+          const color = `hsl(${hue}, 90%, 55%)`;
+
+          this.bots.push(new Bot(i, this.spawn.r, this.spawn.c, pref, color));
+        }
+
+        this.animProgress = 1.0;
+        this.updateUI();
+      }
+
+      walls(r, c) {
+        return this.maze.getWalls(r, c);
+      }
+
+      // Advance simulation by n ticks synchronously
+      tick(n = 1) {
+        for (let step = 0; step < n; step++) {
+          // Check if all bots have finished
+          const allFinished = this.bots.every(bot => bot.finishTick !== null);
+          if (allFinished) {
+            break; 
+          }
+
+          this.elapsed++;
+
+          // Step each bot
+          for (let bot of this.bots) {
+            bot.step(this.maze, this.exit.r, this.exit.c, this.elapsed);
+          }
+        }
+        this.animProgress = 0.0; // Reset animation interpolation for smooth rendering
+        this.updateUI();
+      }
+
+      updateUI() {
+        const completedCount = this.bots.filter(b => b.finishTick !== null).length;
+        document.getElementById('completed').textContent = completedCount;
+        document.getElementById('timer').textContent = this.elapsed;
+      }
+
+      // Smooth rendering loop
+      loop(timestamp) {
+        if (!this.lastFrameTime) this.lastFrameTime = timestamp;
+        const dt = timestamp - this.lastFrameTime;
+        this.lastFrameTime = timestamp;
+
+        // Smoothly interpolate bot positions between ticks
+        // Speed of visual transition: completes in ~150ms
+        if (this.animProgress < 1.0) {
+          this.animProgress += dt / 150;
+          if (this.animProgress > 1.0) this.animProgress = 1.0;
+        } else {
+          // Auto-tick in real-time if not all finished
+          const allFinished = this.bots.every(bot => bot.finishTick !== null);
+          if (!allFinished) {
+            this.tick(1);
+          }
+        }
+
+        this.draw();
+        requestAnimationFrame((t) => this.loop(t));
+      }
+
+      draw() {
+        const ctx = this.ctx;
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        const cellW = w / COLS;
+        const cellH = h / ROWS;
+
+        // 1. Draw Maze Walls & Paths
+        ctx.strokeStyle = '#444444';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const x = c * cellW;
+            const y = r * cellH;
+            const walls = this.maze.getWalls(r, c);
+
+            if (walls.n) {
+              ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + cellW, y); ctx.stroke();
+            }
+            if (walls.e) {
+              ctx.beginPath(); ctx.moveTo(x + cellW, y); ctx.lineTo(x + cellW, y + cellH); ctx.stroke();
+            }
+            if (walls.s) {
+              ctx.beginPath(); ctx.moveTo(x, y + cellH); ctx.lineTo(x + cellW, y + cellH); ctx.stroke();
+            }
+            if (walls.w) {
+              ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + cellH); ctx.stroke();
+            }
+          }
+        }
+
+        // 2. Draw Spawn and Exit indicators
+        // Spawn (Green)
+        ctx.fillStyle = 'rgba(0, 255, 100, 0.25)';
+        ctx.fillRect(this.spawn.c * cellW + 2, this.spawn.r * cellH + 2, cellW - 4, cellH - 4);
+        
+        // Exit (Red/Gold)
+        ctx.fillStyle = 'rgba(255, 50, 50, 0.3)';
+        ctx.fillRect(this.exit.c * cellW + 2, this.exit.r * cellH + 2, cellW - 4, cellH - 4);
+        ctx.strokeStyle = '#ff3333';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(this.exit.c * cellW + 4, this.exit.r * cellH + 4, cellW - 8, cellH - 8);
+
+        // 3. Draw Bots with smooth interpolation
+        for (let bot of this.bots) {
+          // Interpolate position
+          const r = bot.prevR + (bot.r - bot.prevR) * this.animProgress;
+          const c = bot.prevC + (bot.c - bot.prevC) * this.animProgress;
+
+          const cx = c * cellW + cellW / 2;
+          const cy = r * cellH + cellH / 2;
+
+          ctx.beginPath();
+          ctx.arc(cx, cy, cellW * 0.25, 0, 2 * Math.PI);
+          ctx.fillStyle = bot.color;
+          ctx.shadowBlur = 6;
+          ctx.shadowColor = bot.color;
+          ctx.fill();
+          ctx.shadowBlur = 0; // Reset shadow
+
+          // Draw a small border around active bots
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      }
+    }
+
+    // --- Initialize Game and Bind to Window ---
+    window.onload = () => {
+      window.game = new Game();
+
+      // Bind Reset Button
+      document.getElementById('reset').addEventListener('click', () => {
+        window.game.reset();
+      });
+    };
+  </script>
+</body>
+</html>

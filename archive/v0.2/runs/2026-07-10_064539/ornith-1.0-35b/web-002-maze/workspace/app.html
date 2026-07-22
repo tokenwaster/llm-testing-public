@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maze Bots</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  #hud {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+    margin-bottom: 16px;
+    font-size: 18px;
+    background: #16213e;
+    padding: 10px 24px;
+    border-radius: 8px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+  }
+  #completed { color: #00d2ff; font-weight: bold; min-width: 100px; }
+  #timer   { color: #ffd700; font-weight: bold; min-width: 80px; }
+  #reset {
+    background: #e94560;
+    color: white;
+    border: none;
+    padding: 8px 20px;
+    border-radius: 6px;
+    font-size: 15px;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s;
+  }
+  #reset:hover { background: #ff6b81; transform: scale(1.05); }
+  #reset:active { transform: scale(0.97); }
+  canvas {
+    border-radius: 6px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    display: block;
+  }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <span id="completed">0 / 24</span>
+  <span id="timer">0.0s</span>
+  <button id="reset">Reset</button>
+</div>
+<canvas id="maze" width="525" height="525"></canvas>
+
+<script>
+(function() {
+  "use strict";
+
+  // ── Constants ──────────────────────────────────────────────
+  const COLS = 21;
+  const ROWS = 21;
+  const CELL = 25;            // px per cell → canvas is 525×525
+  const NUM_BOTS = 24;
+
+  // ── DOM refs ───────────────────────────────────────────────
+  const canvas = document.getElementById("maze");
+  const ctx    = canvas.getContext("2d");
+  const elCompleted = document.getElementById("completed");
+  const elTimer     = document.getElementById("timer");
+  const btnReset    = document.getElementById("reset");
+
+  // ── Maze state ─────────────────────────────────────────────
+  // walls[r][c] = { t, r, b, l }  (boolean per side)
+  let walls;
+  let spawnR, spawnC, exitR, exitC;
+  let pathToExit;          // flat array indexed by r*COLS+c → next cell index
+
+  // ── Bot state ──────────────────────────────────────────────
+  let bots;                // { x, y, pathIdx, started, delay }
+  let completedCount;
+  let startTime;           // ms when game began (0 until first tick)
+  let elapsedMs;
+
+  // ── Animation loop ─────────────────────────────────────────
+  let rafId = null;
+  let lastFrameTime = 0;
+
+  // ── Colour palette for bots ────────────────────────────────
+  const PALETTE = [
+    "#ff6b6b","#feca57","#48dbfb","#ff9ff3","#54a0ff",
+    "#5f27cd","#01a3a4","#f368e0","#ff6348","#7bed9f",
+    "#70a1ff","#eccc68","#a29bfe","#fd79a8","#00cec9",
+    "#e17055","#6c5ce7","#fdcb6e","#00b894","#e84393",
+    "#0984e3","#d63031","#2d98da","#badc58"
+  ];
+
+  // ── Maze generation (recursive backtracker / DFS) ─────────
+  function generateMaze() {
+    walls = [];
+    for (let r = 0; r < ROWS; r++) {
+      walls[r] = [];
+      for (let c = 0; c < COLS; c++) {
+        walls[r][c] = { t: true, r: true, b: true, l: true };
+      }
+    }
+
+    const visited = Array.from({length: ROWS}, () => new Uint8Array(COLS));
+    const stack = [];
+    let r = 0, c = 0;
+    visited[r][c] = 1;
+    stack.push([r, c]);
+
+    const dirs = [[-1,0],[1,0],[0,-1],[0,1]]; // t, b, l, r
+
+    while (stack.length > 0) {
+      const neighbors = [];
+      for (const [dr, dc] of dirs) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && !visited[nr][nc]) {
+          neighbors.push([nr, nc, dr, dc]);
+        }
+      }
+      if (neighbors.length > 0) {
+        const [nr, nc, dr, dc] = neighbors[Math.floor(Math.random() * neighbors.length)];
+        // remove walls between r,c and nr,nc
+        walls[r][c]["t" + (dr === -1 ? "" : "")] ; // noop placeholder
+        if (dr === -1) { walls[r][c].t = false; walls[nr][nc].b = false; }
+        if (dr ===  1) { walls[r][c].b = false; walls[nr][nc].t = false; }
+        if (dc === -1) { walls[r][c].l = false; walls[nr][nc].r = false; }
+        if (dc ===  1) { walls[r][c].r = false; walls[nr][nc].l = false; }
+        visited[nr][nc] = 1;
+        stack.push([r, c]);
+        r = nr; c = nc;
+      } else {
+        [r, c] = stack.pop();
+      }
+    }
+
+    spawnR = 0; spawnC = 0;
+    exitR = ROWS - 1; exitC = COLS - 1;
+  }
+
+  // ── BFS from exit to every cell → shortest path index map ─
+  function computePaths() {
+    const total = ROWS * COLS;
+    const dist = Array.from({length: total}, () => Infinity);
+    const prev = new Int32Array(total).fill(-1);
+    const queue = [];
+
+    const ei = exitR * COLS + exitC;
+    dist[ei] = 0;
+    queue.push(ei);
+
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      const cr = Math.floor(cur / COLS), cc = cur % COLS;
+      const w = walls[cr][cc];
+      const nbrs = [];
+      if (!w.t) nbrs.push((cr-1)*COLS+cc);
+      if (!w.b) nbrs.push((cr+1)*COLS+cc);
+      if (!w.l) nbrs.push(cr*COLS+(cc-1));
+      if (!w.r) nbrs.push(cr*COLS+(cc+1));
+
+      for (const nb of nbrs) {
+        if (dist[nb] === Infinity) {
+          dist[nb] = dist[cur] + 1;
+          prev[nb] = cur;
+          queue.push(nb);
+        }
+      }
+    }
+
+    // Build path: for each cell, the next cell index toward exit
+    pathToExit = new Int32Array(total).fill(-1);
+    for (let i = 0; i < total; i++) {
+      if (dist[i] === Infinity) continue;
+      let cur = i;
+      while (prev[cur] !== -1 && prev[cur] !== ei) {
+        // we want path FROM cell TO exit, so follow prev pointers to build reverse
+        cur = prev[cur];
+      }
+    }
+
+    // Actually rebuild properly: for each non-exit cell, find neighbor with dist-1
+    const nextToExit = new Int32Array(total).fill(-1);
+    for (let i = 0; i < total; i++) {
+      if (dist[i] === Infinity || i === ei) continue;
+      const cr = Math.floor(i / COLS), cc = i % COLS;
+      const w = walls[cr][cc];
+      let best = -1, bestD = dist[i];
+      const nbrs = [];
+      if (!w.t) nbrs.push((cr-1)*COLS+cc);
+      if (!w.b) nbrs.push((cr+1)*COLS+cc);
+      if (!w.l) nbrs.push(cr*COLS+(cc-1));
+      if (!w.r) nbrs.push(cr*COLS+(cc+1));
+      for (const nb of nbrs) {
+        if (dist[nb] < bestD) { bestD = dist[nb]; best = nb; }
+      }
+      nextToExit[i] = best;
+    }
+
+    // Now build full path from each cell to exit by following nextToExit
+    pathToExit = new Int32Array(total);
+    for (let i = 0; i < total; i++) {
+      if (dist[i] === Infinity) { pathToExit[i] = -1; continue; }
+      const path = [];
+      let cur = i;
+      while (cur !== ei && nextToExit[cur] !== -1) {
+        path.push(cur);
+        cur = nextToExit[cur];
+      }
+      if (cur === ei) path.push(ei);
+      pathToExit[i] = 0; // placeholder, we'll store paths differently
+    }
+
+    // Store as: for each start cell, a path array
+    // We'll use a Map keyed by cell index → path array
+    window._mazePaths = new Map();
+    for (let i = 0; i < total; i++) {
+      if (dist[i] === Infinity) continue;
+      const path = [];
+      let cur = i;
+      while (cur !== ei && nextToExit[cur] !== -1) {
+        path.push(cur);
+        cur = nextToExit[cur];
+      }
+      if (cur === ei) path.push(ei);
+      window._mazePaths.set(i, path);
+    }
+  }
+
+  // ── Initialise bots ────────────────────────────────────────
+  function initBots() {
+    const spawnIdx = spawnR * COLS + spawnC;
+    const fullPath = window._mazePaths.get(spawnIdx) || [];
+
+    bots = [];
+    for (let i = 0; i < NUM_BOTS; i++) {
+      // stagger: random delay in steps, plus slight speed variation
+      const delay = Math.floor(Math.random() * 80);
+      // each bot gets a sub-path (skip first `delay` cells)
+      const path = fullPath.slice(delay);
+      bots.push({
+        x: spawnC,
+        y: spawnR,
+        pathIdx: 0,       // index into path array
+        path: path,
+        started: delay === 0,
+        delay: delay,
+        stepCount: 0,
+        color: PALETTE[i % PALETTE.length],
+        pulsePhase: Math.random() * Math.PI * 2
+      });
+    }
+  }
+
+  // ── Reset everything ───────────────────────────────────────
+  function resetGame() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+    generateMaze();
+    computePaths();
+    initBots();
+    completedCount = 0;
+    startTime = 0;
+    elapsedMs = 0;
+    updateHUD();
+    draw();
+  }
+
+  // ── HUD update ─────────────────────────────────────────────
+  function updateHUD() {
+    elCompleted.textContent = completedCount + " / " + NUM_BOTS;
+    elTimer.textContent = (elapsedMs / 1000).toFixed(1) + "s";
+  }
+
+  // ── Draw maze & bots ───────────────────────────────────────
+  function draw() {
+    // background
+    ctx.fillStyle = "#0f3460";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // cell floors
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const x = c * CELL, y = r * CELL;
+        ctx.fillStyle = "#16213e";
+        ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+
+        // highlight spawn & exit
+        if (r === spawnR && c === spawnC) {
+          ctx.fillStyle = "rgba(0,210,255,0.18)";
+          ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+        }
+        if (r === exitR && c === exitC) {
+          ctx.fillStyle = "rgba(255,215,0,0.18)";
+          ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+        }
+      }
+    }
+
+    // walls
+    ctx.strokeStyle = "#e94560";
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = "round";
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const x = c * CELL, y = r * CELL;
+        const w = walls[r][c];
+        if (w.t) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + CELL, y); ctx.stroke(); }
+        if (w.r) { ctx.beginPath(); ctx.moveTo(x + CELL, y); ctx.lineTo(x + CELL, y + CELL); ctx.stroke(); }
+        if (w.b) { ctx.beginPath(); ctx.moveTo(x, y + CELL); ctx.lineTo(x + CELL, y + CELL); ctx.stroke(); }
+        if (w.l) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + CELL); ctx.stroke(); }
+      }
+    }
+
+    // exit marker
+    const ex = exitC * CELL + CELL / 2;
+    const ey = exitR * CELL + CELL / 2;
+    ctx.fillStyle = "#ffd700";
+    ctx.font = "bold " + (CELL - 6) + "px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("★", ex, ey);
+
+    // spawn marker
+    const sx = spawnC * CELL + CELL / 2;
+    const sy = spawnR * CELL + CELL / 2;
+    ctx.fillStyle = "#00d2ff";
+    ctx.font = "bold " + (CELL - 6) + "px sans-serif";
+    ctx.fillText("S", sx, sy);
+
+    // bots
+    for (let i = 0; i < bots.length; i++) {
+      const b = bots[i];
+      if (!b.started) continue;
+      const bx = b.x * CELL + CELL / 2;
+      const by = b.y * CELL + CELL / 2;
+
+      // glow
+      ctx.beginPath();
+      ctx.arc(bx, by, CELL * 0.45, 0, Math.PI * 2);
+      ctx.fillStyle = b.color + "33";
+      ctx.fill();
+
+      // body
+      const pulse = 1 + 0.12 * Math.sin(b.pulsePhase);
+      ctx.beginPath();
+      ctx.arc(bx, by, (CELL * 0.3) * pulse, 0, Math.PI * 2);
+      ctx.fillStyle = b.color;
+      ctx.fill();
+
+      // outline
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  // ── Simulation step (one tick) ─────────────────────────────
+  function step() {
+    if (startTime === 0 && completedCount < NUM_BOTS) {
+      startTime = performance.now();
+    }
+
+    let anyMoved = false;
+    for (let i = 0; i < bots.length; i++) {
+      const b = bots[i];
+      if (b.pathIdx >= b.path.length) continue; // already done
+
+      // count down delay
+      if (!b.started) {
+        b.delay--;
+        if (b.delay <= 0) {
+          b.started = true;
+        } else {
+          continue;
+        }
+      }
+
+      const cellIdx = b.path[b.pathIdx];
+      const cr = Math.floor(cellIdx / COLS);
+      const cc = cellIdx % COLS;
+      b.y = cr;
+      b.x = cc;
+      b.pathIdx++;
+      b.stepCount++;
+      anyMoved = true;
+
+      if (cr === exitR && cc === exitC) {
+        completedCount++;
+      }
+    }
+
+    elapsedMs = startTime > 0 ? performance.now() - startTime : 0;
+    updateHUD();
+    draw();
+    return anyMoved || completedCount < NUM_BOTS;
+  }
+
+  // ── Public API ─────────────────────────────────────────────
+  window.game = {
+    get bots() {
+      return bots.map(b => ({ x: b.x, y: b.y }));
+    },
+    get completed() {
+      return completedCount;
+    },
+    get elapsedMs() {
+      if (startTime > 0) return performance.now() - startTime;
+      return elapsedMs;
+    },
+    tick(n) {
+      for (let i = 0; i < n; i++) {
+        const alive = step();
+        if (!alive && completedCount >= NUM_BOTS) break;
+      }
+      // ensure HUD is current
+      updateHUD();
+      draw();
+    },
+    reset() {
+      resetGame();
+    }
+  };
+
+  // ── rAF loop for real-time rendering ───────────────────────
+  function gameLoop(ts) {
+    if (completedCount < NUM_BOTS) {
+      step();
+      // update pulse phases
+      for (const b of bots) {
+        b.pulsePhase += 0.1;
+      }
+      rafId = requestAnimationFrame(gameLoop);
+    } else {
+      // all done — do a final draw with pulsing effect
+      for (const b of bots) {
+        b.pulsePhase += 0.1;
+      }
+      draw();
+      rafId = requestAnimationFrame(gameLoop);
+    }
+  }
+
+  btnReset.addEventListener("click", () => {
+    resetGame();
+    rafId = requestAnimationFrame(gameLoop);
+  });
+
+  // ── Start ──────────────────────────────────────────────────
+  resetGame();
+  rafId = requestAnimationFrame(gameLoop);
+
+})();
+</script>
+</body>
+</html>

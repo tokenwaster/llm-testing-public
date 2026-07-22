@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maze Explorer Bots</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 16px;
+    background: #14161c; color: #e6e8ee;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+  }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .5px; }
+  #hud {
+    display: flex; gap: 18px; align-items: center;
+    background: #1e2230; border: 1px solid #2e3448;
+    padding: 8px 16px; border-radius: 10px;
+  }
+  .stat { font-size: 14px; }
+  .stat b { font-variant-numeric: tabular-nums; color: #7fd4ff; }
+  #timer.frozen { color: #7dff9e; }
+  #reset {
+    background: #2f6fed; border: none; color: white;
+    padding: 6px 14px; border-radius: 8px; font-size: 14px; cursor: pointer;
+  }
+  #reset:hover { background: #4a83f2; }
+  #maze {
+    background: #0d0f14; padding: 10px; border-radius: 10px;
+    border: 1px solid #2e3448; line-height: 0;
+  }
+  canvas { display: block; }
+  #legend { font-size: 12px; color: #9aa2b8; }
+</style>
+</head>
+<body>
+<h1>Maze Explorer &mdash; 24 bots discovering the exit</h1>
+<div id="hud">
+  <span class="stat">Timer: <b id="timer">0</b></span>
+  <span class="stat">Completed: <b id="completed">0</b>/24</span>
+  <button id="reset">Reset</button>
+</div>
+<div id="maze"><canvas id="cv"></canvas></div>
+<div id="legend">S = spawn &middot; green square = exit &middot; each dot is a bot with its own exploration memory</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var ROWS = 21, COLS = 21, NBOTS = 24;
+  var CELL = 26, WALL_W = 3;
+  var STEP_MS = 110;            // autoplay cadence (visual only)
+
+  var cv = document.getElementById("cv");
+  var ctx = cv.getContext("2d");
+  cv.width = COLS * CELL + WALL_W;
+  cv.height = ROWS * CELL + WALL_W;
+
+  var timerEl = document.getElementById("timer");
+  var completedEl = document.getElementById("completed");
+  var resetBtn = document.getElementById("reset");
+
+  // ---------- deterministic RNG ----------
+  function mulberry32(a) {
+    a = a >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Directions
+  var DIRS = ["n", "e", "s", "w"];
+  var DR = { n: -1, e: 0, s: 1, w: 0 };
+  var DC = { n: 0, e: 1, s: 0, w: -1 };
+  var OPP = { n: "s", e: "w", s: "n", w: "e" };
+
+  // All 24 permutations of the 4 directions — one per bot, so they spread out.
+  function permutations(arr) {
+    if (arr.length <= 1) return [arr];
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+      var rest = arr.slice(0, i).concat(arr.slice(i + 1));
+      permutations(rest).forEach(function (p) { out.push([arr[i]].concat(p)); });
+    }
+    return out;
+  }
+  var ALL_PERMS = permutations(DIRS);
+
+  // ---------- game state ----------
+  var walls, bots, elapsed, spawn, exit, currentSeed;
+  var autoplay = true;
+  var lastStepAt = 0;
+
+  function key(r, c) { return r * COLS + c; }
+
+  function generateMaze(rng) {
+    var w = [];
+    for (var r = 0; r < ROWS; r++) {
+      w.push([]);
+      for (var c = 0; c < COLS; c++) w[r].push({ n: true, e: true, s: true, w: true });
+    }
+    // iterative recursive backtracker → perfect maze
+    var visited = new Uint8Array(ROWS * COLS);
+    var stack = [[0, 0]];
+    visited[key(0, 0)] = 1;
+    while (stack.length) {
+      var cur = stack[stack.length - 1];
+      var r = cur[0], c = cur[1];
+      var options = [];
+      for (var i = 0; i < 4; i++) {
+        var d = DIRS[i], nr = r + DR[d], nc = c + DC[d];
+        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && !visited[key(nr, nc)])
+          options.push(d);
+      }
+      if (!options.length) { stack.pop(); continue; }
+      var dir = options[Math.floor(rng() * options.length)];
+      var nr2 = r + DR[dir], nc2 = c + DC[dir];
+      w[r][c][dir] = false;
+      w[nr2][nc2][OPP[dir]] = false;
+      visited[key(nr2, nc2)] = 1;
+      stack.push([nr2, nc2]);
+    }
+    return w;
+  }
+
+  function makeBot(i, rng) {
+    // distinct base permutation per bot, ordering shuffled per seed
+    var perm = ALL_PERMS[Math.floor(rng() * ALL_PERMS.length + i) % ALL_PERMS.length];
+    return {
+      id: i,
+      color: "hsl(" + Math.round(i * 360 / NBOTS) + ",85%,60%)",
+      r: spawn.r, c: spawn.c,
+      prevR: spawn.r, prevC: spawn.c,
+      order: perm,
+      visited: (function () { var s = new Set(); s.add(key(spawn.r, spawn.c)); return s; })(),
+      dead: new Set(),
+      stack: [],
+      path: [{ r: spawn.r, c: spawn.c }],
+      deadEnds: [],
+      finishTick: null,
+      done: false
+    };
+  }
+
+  function reset(seed) {
+    var seeded = (typeof seed === "number" && isFinite(seed));
+    currentSeed = seeded ? (seed >>> 0) : ((Math.random() * 0xFFFFFFFF) >>> 0);
+    var rng = mulberry32(currentSeed);
+
+    walls = generateMaze(rng);
+    spawn = { r: 0, c: 0 };
+    exit = { r: ROWS - 1, c: COLS - 1 };
+    elapsed = 0;
+
+    bots = [];
+    for (var i = 0; i < NBOTS; i++) bots.push(makeBot(i, rng));
+
+    // A programmatic seeded reset means a script is driving; pause autoplay
+    // so external tick() calls fully control the simulation.
+    if (seeded) autoplay = false;
+    lastStepAt = performance.now();
+    updateHud();
+    draw(1);
+    return currentSeed;
+  }
+
+  // ---------- exploration (Tremaux / DFS, per-bot local memory only) ----------
+  function stepBot(bot, tickNo) {
+    if (bot.done) return;
+    bot.prevR = bot.r; bot.prevC = bot.c;
+
+    var r = bot.r, c = bot.c, cw = walls[r][c];
+    var moved = false;
+    for (var i = 0; i < 4; i++) {
+      var d = bot.order[i];
+      if (cw[d]) continue;                       // wall — the bot senses adjacent walls
+      var nr = r + DR[d], nc = c + DC[d];
+      if (bot.visited.has(key(nr, nc))) continue; // own memory: already explored
+      bot.stack.push({ r: r, c: c });
+      bot.r = nr; bot.c = nc;
+      bot.visited.add(key(nr, nc));
+      bot.path.push({ r: nr, c: nc });
+      moved = true;
+      break;
+    }
+    if (!moved) {
+      // dead end / fully explored branch: mark dead, backtrack one cell
+      if (!bot.dead.has(key(r, c))) {
+        bot.dead.add(key(r, c));
+        bot.deadEnds.push({ r: r, c: c });
+      }
+      if (bot.stack.length) {
+        var back = bot.stack.pop();
+        bot.r = back.r; bot.c = back.c;
+        bot.path.push({ r: back.r, c: back.c });
+      }
+    }
+    if (bot.r === exit.r && bot.c === exit.c) {
+      bot.done = true;
+      bot.finishTick = tickNo;
+    }
+  }
+
+  function allDone() {
+    for (var i = 0; i < NBOTS; i++) if (!bots[i].done) return false;
+    return true;
+  }
+
+  function advance(n) {
+    n = Math.max(0, Math.floor(n || 0));
+    for (var t = 0; t < n; t++) {
+      if (allDone()) break;          // timer/elapsed frozen at last arrival
+      elapsed++;
+      for (var i = 0; i < NBOTS; i++) stepBot(bots[i], elapsed);
+    }
+    updateHud();
+  }
+
+  // ---------- HUD ----------
+  function updateHud() {
+    var done = 0;
+    for (var i = 0; i < NBOTS; i++) if (bots[i].done) done++;
+    timerEl.textContent = String(elapsed);
+    completedEl.textContent = String(done);
+    timerEl.classList.toggle("frozen", done === NBOTS);
+  }
+
+  // ---------- rendering ----------
+  function draw(interp) {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    var off = WALL_W / 2;
+
+    // exit + spawn markers
+    ctx.fillStyle = "#1f7a3d";
+    ctx.fillRect(exit.c * CELL + off + 3, exit.r * CELL + off + 3, CELL - 6, CELL - 6);
+    ctx.fillStyle = "#39435e";
+    ctx.font = "bold " + Math.round(CELL * 0.55) + "px sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("S", spawn.c * CELL + off + CELL / 2, spawn.r * CELL + off + CELL / 2 + 1);
+
+    // walls
+    ctx.strokeStyle = "#8f9bb8";
+    ctx.lineWidth = WALL_W;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var x = c * CELL + off, y = r * CELL + off, w = walls[r][c];
+        if (w.n) { ctx.moveTo(x, y); ctx.lineTo(x + CELL, y); }
+        if (w.w) { ctx.moveTo(x, y); ctx.lineTo(x, y + CELL); }
+        if (r === ROWS - 1 && w.s) { ctx.moveTo(x, y + CELL); ctx.lineTo(x + CELL, y + CELL); }
+        if (c === COLS - 1 && w.e) { ctx.moveTo(x + CELL, y); ctx.lineTo(x + CELL, y + CELL); }
+      }
+    }
+    ctx.stroke();
+
+    // bots — interpolated between previous and current cell, centered in corridors
+    var t = Math.max(0, Math.min(1, interp));
+    var ease = t * (2 - t);
+    for (var i = 0; i < NBOTS; i++) {
+      var b = bots[i];
+      var rr = b.prevR + (b.r - b.prevR) * ease;
+      var cc = b.prevC + (b.c - b.prevC) * ease;
+      var cx = cc * CELL + off + CELL / 2;
+      var cy = rr * CELL + off + CELL / 2;
+      ctx.beginPath();
+      ctx.fillStyle = b.color;
+      ctx.arc(cx, cy, CELL * 0.22, 0, Math.PI * 2);
+      ctx.fill();
+      if (b.done) {
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+  }
+
+  function frame(now) {
+    if (autoplay && !allDone() && now - lastStepAt >= STEP_MS) {
+      advance(1);
+      lastStepAt = now;
+    }
+    draw((now - lastStepAt) / STEP_MS);
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- public API ----------
+  window.game = {
+    tick: function (n) {
+      autoplay = false;              // external driver takes over
+      advance(n);
+      // snap interpolation for instant, synchronous state
+      lastStepAt = performance.now() - STEP_MS;
+      draw(1);
+    },
+    reset: function (seed) {
+      autoplay = !(typeof seed === "number" && isFinite(seed));
+      return reset(seed);
+    },
+    get elapsed() { return elapsed; },
+    get size() { return { rows: ROWS, cols: COLS }; },
+    get spawn() { return { r: spawn.r, c: spawn.c }; },
+    get exit() { return { r: exit.r, c: exit.c }; },
+    walls: function (r, c) {
+      var w = walls[r][c];
+      return { n: w.n, e: w.e, s: w.s, w: w.w };
+    },
+    get bots() { return bots; }
+  };
+
+  resetBtn.addEventListener("click", function () {
+    autoplay = true;
+    reset();
+  });
+
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

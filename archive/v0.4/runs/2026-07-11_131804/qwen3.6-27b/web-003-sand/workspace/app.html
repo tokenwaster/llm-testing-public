@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Falling Sand Sandbox</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #121212;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 20px;
+    user-select: none;
+  }
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    margin-bottom: 16px;
+    color: #bbb;
+  }
+  #sand {
+    border: 2px solid #333;
+    border-radius: 6px;
+    cursor: crosshair;
+    display: block;
+    image-rendering: pixelated;
+    background: #1a1a2e;
+  }
+  .toolbar {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .mat-btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.15s, filter 0.15s;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    letter-spacing: 0.3px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  }
+  .mat-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.4); filter: brightness(1.15); }
+  .mat-btn:active { transform: translateY(1px); box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+  .mat-btn.active { outline: 3px solid #fff; outline-offset: 2px; filter: brightness(1.2); }
+  #mat-sand    { background: #d4a843; }
+  #mat-water   { background: #3a8fd4; }
+  #mat-wall    { background: #777; }
+  #mat-acid    { background: #3dd680; }
+  #mat-empty   { background: #555; }
+  #clear       { background: #c0392b; }
+  .info {
+    margin-top: 12px;
+    font-size: 0.75rem;
+    color: #666;
+  }
+</style>
+</head>
+<body>
+<h1>Falling Sand</h1>
+<canvas id="sand" width="400" height="400"></canvas>
+<div class="toolbar">
+  <button class="mat-btn active" id="mat-sand">Sand</button>
+  <button class="mat-btn" id="mat-water">Water</button>
+  <button class="mat-btn" id="mat-wall">Wall</button>
+  <button class="mat-btn" id="mat-acid">Acid</button>
+  <button class="mat-btn" id="mat-empty">Eraser</button>
+  <button class="mat-btn" id="clear">Clear</button>
+</div>
+<div class="info">Click &amp; drag to paint · Grid: 80×80</div>
+
+<script>
+(function() {
+  "use strict";
+
+  const W = 80, H = 80;
+  const CELL = 5; // CSS pixels per cell
+  const canvas = document.getElementById("sand");
+  const ctx = canvas.getContext("2d");
+  canvas.width = W * CELL;
+  canvas.height = H * CELL;
+
+  // Grid: 0=empty, 1=sand, 2=water, 3=wall, 4=acid
+  const EMPTY = 0, SAND = 1, WATER = 2, WALL = 3, ACID = 4;
+  const NAMES = ["empty","sand","water","wall","acid"];
+  const grid = new Uint8Array(W * H);
+
+  // Color palette per material [r,g,b]
+  const COLORS = [
+    [26, 26, 46],   // empty
+    [212, 168, 67], // sand
+    [58, 143, 212], // water
+    [120, 120, 120],// wall
+    [61, 214, 128], // acid
+  ];
+
+  // Precompute per-cell color variation for visual interest
+  const variation = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) variation[i] = 0.85 + Math.random() * 0.3;
+
+  function idx(x, y) { return y * W + x; }
+  function inBounds(x, y) { return x >= 0 && x < W && y >= 0 && y < H; }
+  function getCell(x, y) { return inBounds(x, y) ? grid[idx(x, y)] : WALL; }
+  function setCell(x, y, v) { if (inBounds(x, y)) grid[idx(x, y)] = v; }
+
+  // --- API ---
+  window.sim = {
+    w: W,
+    h: H,
+    tick: function(n) {
+      for (let s = 0; s < n; s++) step();
+    },
+    get: function(x, y) {
+      if (!inBounds(x, y)) return "empty";
+      return NAMES[grid[idx(x, y)]];
+    },
+    set: function(x, y, material) {
+      if (!inBounds(x, y)) return;
+      const v = NAMES.indexOf(material);
+      if (v >= 0) grid[idx(x, y)] = v;
+    },
+    clear: function() {
+      grid.fill(EMPTY);
+    }
+  };
+
+  // --- Simulation step ---
+  function step() {
+    // Process bottom-up
+    for (let y = H - 1; y >= 0; y--) {
+      // Alternate scan direction each row for more natural behavior
+      const leftToRight = (y % 2 === 0);
+      for (let i = 0; i < W; i++) {
+        const x = leftToRight ? i : (W - 1 - i);
+        const ci = idx(x, y);
+        const cell = grid[ci];
+
+        if (cell === EMPTY || cell === WALL) continue;
+
+        if (cell === SAND) updateSand(x, y);
+        else if (cell === WATER) updateWater(x, y);
+        else if (cell === ACID) updateAcid(x, y);
+      }
+    }
+  }
+
+  function updateSand(x, y) {
+    const below = getCell(x, y + 1);
+    // Fall straight down into empty
+    if (below === EMPTY) {
+      setCell(x, y + 1, SAND);
+      setCell(x, y, EMPTY);
+      return;
+    }
+    // Sink through water or acid (swap)
+    if (below === WATER || below === ACID) {
+      setCell(x, y + 1, SAND);
+      setCell(x, y, below);
+      return;
+    }
+    // Slide diagonally
+    const dir = Math.random() < 0.5 ? -1 : 1;
+    const d1 = x + dir, d2 = x - dir;
+    if (getCell(d1, y + 1) === EMPTY) {
+      setCell(d1, y + 1, SAND); setCell(x, y, EMPTY); return;
+    }
+    if (getCell(d1, y + 1) === WATER || getCell(d1, y + 1) === ACID) {
+      const t = getCell(d1, y + 1);
+      setCell(d1, y + 1, SAND); setCell(x, y, t); return;
+    }
+    if (getCell(d2, y + 1) === EMPTY) {
+      setCell(d2, y + 1, SAND); setCell(x, y, EMPTY); return;
+    }
+    if (getCell(d2, y + 1) === WATER || getCell(d2, y + 1) === ACID) {
+      const t = getCell(d2, y + 1);
+      setCell(d2, y + 1, SAND); setCell(x, y, t); return;
+    }
+  }
+
+  function updateWater(x, y) {
+    const below = getCell(x, y + 1);
+    if (below === EMPTY) {
+      setCell(x, y + 1, WATER); setCell(x, y, EMPTY); return;
+    }
+    // Sink through acid (swap) — water is heavier than acid? Let's say water sinks through acid
+    if (below === ACID) {
+      setCell(x, y + 1, WATER); setCell(x, y, ACID); return;
+    }
+    // Spread horizontally
+    const dir = Math.random() < 0.5 ? -1 : 1;
+    const d1 = x + dir, d2 = x - dir;
+    if (getCell(d1, y) === EMPTY) {
+      setCell(d1, y, WATER); setCell(x, y, EMPTY); return;
+    }
+    if (getCell(d2, y) === EMPTY) {
+      setCell(d2, y, WATER); setCell(x, y, EMPTY); return;
+    }
+    // Try diagonal down
+    if (getCell(d1, y + 1) === EMPTY) {
+      setCell(d1, y + 1, WATER); setCell(x, y, EMPTY); return;
+    }
+    if (getCell(d2, y + 1) === EMPTY) {
+      setCell(d2, y + 1, WATER); setCell(x, y, EMPTY); return;
+    }
+  }
+
+  function updateAcid(x, y) {
+    // Dissolve adjacent sand/wall first
+    const neighbors = [[x, y+1], [x, y-1], [x-1, y], [x+1, y]];
+    let dissolved = false;
+    for (const [nx, ny] of neighbors) {
+      if (!inBounds(nx, ny)) continue;
+      const n = getCell(nx, ny);
+      if (n === SAND || n === WALL) {
+        setCell(nx, ny, EMPTY);
+        dissolved = true;
+      }
+    }
+    if (dissolved) {
+      // Acid disappears after dissolving
+      setCell(x, y, EMPTY);
+      return;
+    }
+    // Move like water
+    const below = getCell(x, y + 1);
+    if (below === EMPTY) {
+      setCell(x, y + 1, ACID); setCell(x, y, EMPTY); return;
+    }
+    const dir = Math.random() < 0.5 ? -1 : 1;
+    const d1 = x + dir, d2 = x - dir;
+    if (getCell(d1, y) === EMPTY) {
+      setCell(d1, y, ACID); setCell(x, y, EMPTY); return;
+    }
+    if (getCell(d2, y) === EMPTY) {
+      setCell(d2, y, ACID); setCell(x, y, EMPTY); return;
+    }
+    if (getCell(d1, y + 1) === EMPTY) {
+      setCell(d1, y + 1, ACID); setCell(x, y, EMPTY); return;
+    }
+    if (getCell(d2, y + 1) === EMPTY) {
+      setCell(d2, y + 1, ACID); setCell(x, y, EMPTY); return;
+    }
+  }
+
+  // --- Rendering ---
+  const imageData = ctx.createImageData(canvas.width, canvas.height);
+  const pixels = imageData.data;
+
+  function render() {
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const ci = idx(x, y);
+        const mat = grid[ci];
+        const [r, g, b] = COLORS[mat];
+        const v = variation[ci];
+        const pr = Math.round(r * v);
+        const pg = Math.round(g * v);
+        const pb = Math.round(b * v);
+        // Fill CELL x CELL block
+        for (let cy = 0; cy < CELL; cy++) {
+          const rowOff = ((y * CELL + cy) * canvas.width + x * CELL) * 4;
+          for (let cx = 0; cx < CELL; cx++) {
+            const p = rowOff + cx * 4;
+            pixels[p] = pr;
+            pixels[p + 1] = pg;
+            pixels[p + 2] = pb;
+            pixels[p + 3] = 255;
+          }
+        }
+      }
+    }
+    ctx.putImageData(imageData, 0, 0);
+  }
+
+  // --- Input handling ---
+  let selectedMat = SAND;
+  let painting = false;
+  let paintMat = null;
+
+  function getGridPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const px = (e.clientX - rect.left) * scaleX;
+    const py = (e.clientY - rect.top) * scaleY;
+    return { x: Math.floor(px / CELL), y: Math.floor(py / CELL) };
+  }
+
+  function paintAt(gx, gy) {
+    const brush = 3;
+    for (let dy = -brush; dy <= brush; dy++) {
+      for (let dx = -brush; dx <= brush; dx++) {
+        if (dx * dx + dy * dy > brush * brush + 1) continue;
+        const nx = gx + dx, ny = gy + dy;
+        if (inBounds(nx, ny)) {
+          grid[idx(nx, ny)] = paintMat;
+        }
+      }
+    }
+  }
+
+  canvas.addEventListener("mousedown", function(e) {
+    e.preventDefault();
+    painting = true;
+    paintMat = selectedMat;
+    const { x, y } = getGridPos(e);
+    paintAt(x, y);
+  });
+  canvas.addEventListener("mousemove", function(e) {
+    if (!painting) return;
+    const { x, y } = getGridPos(e);
+    paintAt(x, y);
+  });
+  window.addEventListener("mouseup", function() { painting = false; });
+
+  // Touch support
+  canvas.addEventListener("touchstart", function(e) {
+    e.preventDefault();
+    painting = true;
+    paintMat = selectedMat;
+    const touch = e.touches[0];
+    const { x, y } = getGridPos(touch);
+    paintAt(x, y);
+  }, { passive: false });
+  canvas.addEventListener("touchmove", function(e) {
+    e.preventDefault();
+    if (!painting) return;
+    const touch = e.touches[0];
+    const { x, y } = getGridPos(touch);
+    paintAt(x, y);
+  }, { passive: false });
+  canvas.addEventListener("touchend", function() { painting = false; });
+
+  // --- Buttons ---
+  const matButtons = {
+    "mat-sand": SAND,
+    "mat-water": WATER,
+    "mat-wall": WALL,
+    "mat-acid": ACID,
+    "mat-empty": EMPTY,
+  };
+
+  Object.entries(matButtons).forEach(([id, val]) => {
+    document.getElementById(id).addEventListener("click", function() {
+      selectedMat = val;
+      document.querySelectorAll(".mat-btn").forEach(b => b.classList.remove("active"));
+      this.classList.add("active");
+    });
+  });
+
+  document.getElementById("clear").addEventListener("click", function() {
+    window.sim.clear();
+  });
+
+  // --- Animation loop ---
+  let lastTime = 0;
+  const TICK_INTERVAL = 1000 / 30; // ~30 ticks per second
+
+  function loop(timestamp) {
+    if (timestamp - lastTime >= TICK_INTERVAL) {
+      step();
+      render();
+      lastTime = timestamp;
+    }
+    requestAnimationFrame(loop);
+  }
+
+  // Initial render
+  render();
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>

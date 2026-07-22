@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: "Courier New", monospace;
+    background: #fafafa;
+    color: #222;
+  }
+  .app {
+    min-width: 600px;
+    min-height: 400px;
+  }
+  h1 { font-size: 16px; margin: 0 0 10px; }
+  .grid {
+    display: grid;
+    grid-template-columns: 34px repeat(10, minmax(54px, 1fr));
+    grid-template-rows: 26px repeat(10, 28px);
+    border: 1px solid #bbb;
+    background: #fff;
+    width: fit-content;
+    max-width: 100%;
+  }
+  .hdr {
+    background: #e8e8e8;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #ccc;
+    font-weight: bold;
+    font-size: 12px;
+    user-select: none;
+  }
+  input.cell {
+    border: 1px solid #ddd;
+    padding: 2px 4px;
+    font: 12px "Courier New", monospace;
+    width: 100%;
+    height: 100%;
+    background: #fff;
+    outline: none;
+  }
+  input.cell:focus {
+    border-color: #4a90d9;
+    box-shadow: inset 0 0 0 1px #4a90d9;
+    background: #fffbe6;
+  }
+  .toolbar { margin: 10px 0; display: flex; gap: 8px; align-items: center; }
+  button {
+    padding: 6px 14px;
+    cursor: pointer;
+    font: 13px "Courier New", monospace;
+    border: 1px solid #888;
+    background: #f0f0f0;
+  }
+  button:hover { background: #e0e0e0; }
+  button:active { background: #d0d0d0; }
+  textarea {
+    width: 100%;
+    height: 130px;
+    font: 12px "Courier New", monospace;
+    padding: 6px;
+    border: 1px solid #bbb;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Mini Spreadsheet — 10×10</h1>
+  <div class="grid" id="grid"></div>
+  <div class="toolbar">
+    <button id="export">Export CSV</button>
+  </div>
+  <textarea id="csv" placeholder="CSV output appears here..."></textarea>
+</div>
+<script>
+(function () {
+  "use strict";
+
+  var COLS = "ABCDEFGHIJ";
+  var cells = {};      // cellId -> raw text
+  var displays = {};   // cellId -> displayed string
+
+  // ---------- Build grid ----------
+  var grid = document.getElementById("grid");
+
+  var corner = document.createElement("div");
+  corner.className = "hdr";
+  grid.appendChild(corner);
+
+  for (var ci = 0; ci < COLS.length; ci++) {
+    var ch = document.createElement("div");
+    ch.className = "hdr";
+    ch.textContent = COLS[ci];
+    grid.appendChild(ch);
+  }
+
+  for (var r = 1; r <= 10; r++) {
+    var rh = document.createElement("div");
+    rh.className = "hdr";
+    rh.textContent = r;
+    grid.appendChild(rh);
+    for (var cj = 0; cj < COLS.length; cj++) {
+      var c = COLS[cj];
+      var inp = document.createElement("input");
+      inp.className = "cell";
+      inp.type = "text";
+      inp.id = "cell-" + c + r;
+      inp.setAttribute("data-cell", c + r);
+      (function (el, id) {
+        el.addEventListener("focus", function () {
+          el.value = cells[id] || "";
+        });
+        el.addEventListener("blur", function () {
+          cells[id] = el.value;
+          recalc();
+        });
+        el.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            el.blur();
+          } else if (e.key === "Escape") {
+            el.value = cells[id] || "";
+            el.blur();
+          }
+        });
+      })(inp, c + r);
+      grid.appendChild(inp);
+    }
+  }
+
+  // ---------- Formula engine ----------
+  var CYCLE = { _cycle: true };
+  var ERROR = { _error: true };
+
+  function isSpecial(v) {
+    return v !== null && typeof v === "object";
+  }
+
+  function tokenize(expr) {
+    var tokens = [];
+    var i = 0;
+    while (i < expr.length) {
+      var ch = expr[i];
+      if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") { i++; continue; }
+      if (ch === "+" || ch === "-" || ch === "*" || ch === "/") {
+        tokens.push({ type: "op", value: ch }); i++;
+      } else if (ch === "(") {
+        tokens.push({ type: "lparen" }); i++;
+      } else if (ch === ")") {
+        tokens.push({ type: "rparen" }); i++;
+      } else if ((ch >= "0" && ch <= "9") || (ch === "." && expr[i + 1] >= "0" && expr[i + 1] <= "9")) {
+        var num = "";
+        var seenDot = false;
+        while (i < expr.length && ((expr[i] >= "0" && expr[i] <= "9") || expr[i] === ".")) {
+          if (expr[i] === ".") { if (seenDot) break; seenDot = true; }
+          num += expr[i]; i++;
+        }
+        var val = parseFloat(num);
+        if (isNaN(val)) throw new Error("bad number");
+        tokens.push({ type: "number", value: val });
+      } else if ((ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z")) {
+        var ident = "";
+        while (i < expr.length && /[A-Za-z0-9]/.test(expr[i])) {
+          ident += expr[i]; i++;
+        }
+        tokens.push({ type: "ident", value: ident });
+      } else {
+        throw new Error("unexpected char: " + ch);
+      }
+    }
+    return tokens;
+  }
+
+  function applyOp(op, a, b) {
+    if (isSpecial(a)) return a;
+    if (isSpecial(b)) return b;
+    if (typeof a === "string" || typeof b === "string") return ERROR;
+    switch (op) {
+      case "+": return a + b;
+      case "-": return a - b;
+      case "*": return a * b;
+      case "/":
+        if (b === 0) return ERROR;
+        return a / b;
+    }
+    return ERROR;
+  }
+
+  function evalFormula(formula, evalRef) {
+    var tokens = tokenize(formula);
+    var pos = 0;
+
+    function peek() { return tokens[pos]; }
+    function next() { return tokens[pos++]; }
+
+    function parseExpr() {
+      var left = parseTerm();
+      while (peek() && peek().type === "op" && (peek().value === "+" || peek().value === "-")) {
+        var op = next().value;
+        var right = parseTerm();
+        left = applyOp(op, left, right);
+      }
+      return left;
+    }
+
+    function parseTerm() {
+      var left = parseFactor();
+      while (peek() && peek().type === "op" && (peek().value === "*" || peek().value === "/")) {
+        var op = next().value;
+        var right = parseFactor();
+        left = applyOp(op, left, right);
+      }
+      return left;
+    }
+
+    function parseFactor() {
+      var t = peek();
+      if (!t) throw new Error("unexpected end");
+      if (t.type === "number") { next(); return t.value; }
+      if (t.type === "op" && t.value === "-") {
+        next();
+        var v = parseFactor();
+        if (isSpecial(v)) return v;
+        if (typeof v === "string") return ERROR;
+        return -v;
+      }
+      if (t.type === "op" && t.value === "+") {
+        next();
+        return parseFactor();
+      }
+      if (t.type === "lparen") {
+        next();
+        var inner = parseExpr();
+        if (!peek() || peek().type !== "rparen") throw new Error("expected )");
+        next();
+        return inner;
+      }
+      if (t.type === "ident") {
+        next();
+        var ref = t.value.toUpperCase();
+        if (!/^[A-J](10|[1-9])$/.test(ref)) {
+          throw new Error("invalid ref: " + ref);
+        }
+        return evalRef(ref);
+      }
+      throw new Error("unexpected token");
+    }
+
+    var result = parseExpr();
+    if (pos < tokens.length) throw new Error("trailing tokens");
+    return result;
+  }
+
+  function formatNumber(n) {
+    if (!isFinite(n)) return "#ERR";
+    if (Number.isInteger(n)) return String(n);
+    return String(parseFloat(n.toPrecision(12)));
+  }
+
+  function recalc() {
+    var computed = {};
+    var visiting = {};
+
+    function evalCell(cellId) {
+      if (cellId in computed) return computed[cellId];
+      if (visiting[cellId]) return CYCLE;
+      visiting[cellId] = true;
+
+      var raw = cells[cellId] || "";
+      var result;
+
+      if (raw === "" || raw.trim() === "") {
+        result = { type: "empty", value: 0, display: "" };
+      } else if (raw.charAt(0) === "=") {
+        try {
+          var evalRef = function (ref) {
+            var r = evalCell(ref);
+            if (r.type === "cycle") return CYCLE;
+            if (r.type === "error") return ERROR;
+            if (r.type === "empty") return 0;
+            return r.value; // number or string
+          };
+          var val = evalFormula(raw.slice(1), evalRef);
+          if (isSpecial(val)) {
+            if (val._cycle) result = { type: "cycle", display: "#CYCLE" };
+            else result = { type: "error", display: "#ERR" };
+          } else if (typeof val === "string") {
+            result = { type: "text", value: val, display: val };
+          } else {
+            result = { type: "value", value: val, display: formatNumber(val) };
+          }
+        } catch (e) {
+          result = { type: "error", display: "#ERR" };
+        }
+      } else {
+        var num = Number(raw);
+        if (isNaN(num)) {
+          result = { type: "text", value: raw, display: raw };
+        } else {
+          result = { type: "value", value: num, display: formatNumber(num) };
+        }
+      }
+
+      visiting[cellId] = false;
+      computed[cellId] = result;
+      return result;
+    }
+
+    for (var r = 1; r <= 10; r++) {
+      for (var k = 0; k < COLS.length; k++) {
+        var id = COLS[k] + r;
+        var res = evalCell(id);
+        displays[id] = res.display;
+      }
+    }
+
+    for (var cellId in displays) {
+      var el = document.getElementById("cell-" + cellId);
+      if (el && document.activeElement !== el) {
+        el.value = displays[cellId];
+      }
+    }
+  }
+
+  // ---------- CSV export ----------
+  function csvEscape(s) {
+    if (/[",\n]/.test(s)) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  document.getElementById("export").addEventListener("click", function () {
+    var lines = [];
+    for (var r = 1; r <= 10; r++) {
+      var cols = [];
+      for (var k = 0; k < COLS.length; k++) {
+        cols.push(csvEscape(displays[COLS[k] + r] || ""));
+      }
+      lines.push(cols.join(","));
+    }
+    document.getElementById("csv").value = lines.join("\n");
+  });
+
+  // ---------- Scripting API ----------
+  window.sheet = {
+    set: function (cellId, text) {
+      cells[cellId] = String(text);
+      recalc();
+    },
+    get: function (cellId) {
+      return displays[cellId] !== undefined ? displays[cellId] : "";
+    },
+    raw: function (cellId) {
+      return cells[cellId] !== undefined ? cells[cellId] : "";
+    }
+  };
+
+  // Initial calculation
+  recalc();
+})();
+</script>
+</body>
+</html>

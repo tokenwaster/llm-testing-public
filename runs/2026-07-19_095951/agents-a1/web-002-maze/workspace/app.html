@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Maze Exploration Game</title>
+    <style>
+        body { font-family: Arial, sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; margin: 0; padding: 20px; }
+        #maze-container { position: relative; margin: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        #maze { border: 2px solid #333; background: white; display: block; }
+        #controls { display: flex; gap: 20px; align-items: center; margin-top: 10px; font-size: 18px; }
+        #timer, #completed { font-weight: bold; color: #333; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #4CAF50; color: white; border: none; border-radius: 4px; }
+        button:hover { background: #45a049; }
+    </style>
+</head>
+<body>
+    <div id="maze-container">
+        <canvas id="maze" width="600" height="600"></canvas>
+    </div>
+    <div id="controls">
+        <div id="timer">Time: 0</div>
+        <div id="completed">Completed: 0/24</div>
+        <button id="reset">Reset</button>
+    </div>
+
+    <script>
+        // Seeded PRNG (Linear Congruential Generator)
+        class SeededRandom {
+            constructor(seed) {
+                this.seed = seed >>> 0; // Ensure unsigned 32-bit
+            }
+            
+            next() {
+                // LCG parameters (same as glibc)
+                this.seed = (this.seed * 1103515245 + 12345) & 0x7fffffff;
+                return this.seed / 0x7fffffff;
+            }
+            
+            nextInt(min, max) {
+                return Math.floor(this.next() * (max - min + 1)) + min;
+            }
+        }
+
+        // Bot class for exploration
+        class Bot {
+            constructor(id, seed, rows, cols) {
+                this.id = id;
+                this.seed = seed;
+                this.rng = new SeededRandom(seed);
+                
+                // Position (with interpolation)
+                this.currentR = 0;
+                this.currentC = 0;
+                this.targetR = 0;
+                this.targetC = 0;
+                this.progress = 1.0;
+                
+                // Exploration state
+                this.path = [{r: 0, c: 0}];
+                this.deadEnds = [];
+                this.finishTick = null;
+                
+                // Discovered map: key "r,c" -> {n, e, s, w} booleans (true means wall exists)
+                this.discovered = {};
+                this.discovered["0,0"] = {n: true, e: true, s: true, w: true};
+                
+                // Stack for DFS backtracking - cells to return to
+                this.stack = [];
+                
+                // Direction preference order (different for each bot) - shuffled deterministically
+                this.directionOrder = this.shuffleArray(['n', 'e', 's', 'w']);
+                
+                // Edge traversal count: key "r1,c1,r2,c2" -> count (undirected edge)
+                this.edgeCount = {};
+                
+                this.rows = rows;
+                this.cols = cols;
+            }
+            
+            shuffleArray(arr) {
+                const result = arr.slice();
+                for (let i = result.length - 1; i > 0; i--) {
+                    const j = this.rng.nextInt(0, i);
+                    [result[i], result[j]] = [result[j], result[i]];
+                }
+                return result;
+            }
+            
+            getEdgeKey(r1, c1, r2, c2) {
+                if (r1 < r2 || (r1 === r2 && c1 < c2)) {
+                    return `${r1},${c1},${r2},${c2}`;
+                } else {
+                    return `${r2},${c2},${r1},${c1}`;
+                }
+            }
+            
+            getNeighbor(r, c, dir) {
+                if (dir === 'n') return r > 0 ? [r-1, c] : null;
+                if (dir === 'e') return c < this.cols-1 ? [r, c+1] : null;
+                if (dir === 's') return r < this.rows-1 ? [r+1, c] : null;
+                if (dir === 'w') return c > 0 ? [r, c-1] : null;
+                return null;
+            }
+            
+            getOpposite(dir) {
+                if (dir === 'n') return 's';
+                if (dir === 'e') return 'w';
+                if (dir === 's') return 'n';
+                if (dir === 'w') return 'e';
+                return null;
+            }
+            
+            update(game) {
+                if (this.finishTick !== null) return;
+                
+                // Check if reached exit after movement
+                if (this.currentR === game.exit.r && this.currentC === game.exit.c) {
+                    this.finishTick = game.elapsed;
+                    return;
+                }
+                
+                // If moving, continue movement
+                if (this.progress < 1.0) {
+                    this.progress += 0.2;
+                    if (this.progress >= 1.0) {
+                        this.progress = 1.0;
+                        this.currentR = this.targetR;
+                        this.currentC = this.targetC;
+                        
+                        // Record cell entry
+                        const key = `${this.currentR},${this.currentC}`;
+                        if (!this.path.some(cell => cell.r === this.currentR && cell.c === this.currentC)) {
+                            this.path.push({r: this.currentR, c: this.currentC});
+                        }
+                        
+                        // Check exit again after arrival
+                        if (this.currentR === game.exit.r && this.currentC === game.exit.c) {
+                            this.finishTick = game.elapsed;
+                        }
+                    }
+                    return;
+                }
+                
+                // We're at a cell, decide next move using DFS
+                
+                // Look for an unexplored neighbor to move to
+                let foundMove = false;
+                
+                for (const dir of this.directionOrder) {
+                    const next = this.getNeighbor(this.currentR, this.currentC, dir);
+                    if (!next) continue;
+                    
+                    const [nr, nc] = next;
+                    const neighborKey = `${nr},${nc}`;
+                    
+                    // Check if passage exists (from discovered map or actual maze)
+                    const wallInfo = game.walls(this.currentR, this.currentC);
+                    let canMove = false;
+                    
+                    if (dir === 'n' && !wallInfo.n) canMove = true;
+                    if (dir === 'e' && !wallInfo.e) canMove = true;
+                    if (dir === 's' && !wallInfo.s) canMove = true;
+                    if (dir === 'w' && !wallInfo.w) canMove = true;
+                    
+                    // Check edge count - no more than 2 traversals total
+                    const edgeKey = this.getEdgeKey(this.currentR, this.currentC, nr, nc);
+                    const count = this.edgeCount[edgeKey] || 0;
+                    
+                    if (canMove && count < 2) {
+                        // Check if neighbor is not a known dead end
+                        const isDeadEnd = this.deadEnds.some(cell => cell.r === nr && cell.c === nc);
+                        
+                        if (!isDeadEnd) {
+                            // Move to neighbor
+                            this.targetR = nr;
+                            this.targetC = nc;
+                            this.progress = 0;
+                            
+                            // Update discovered map for current cell
+                            const currentKey = `${this.currentR},${this.currentC}`;
+                            if (!this.discovered[currentKey]) {
+                                this.discovered[currentKey] = {n: true, e: true, s: true, w: true};
+                            }
+                            this.discovered[currentKey][dir] = false;
+                            
+                            // Update discovered map for neighbor cell (opposite direction)
+                            const oppDir = this.getOpposite(dir);
+                            if (!this.discovered[neighborKey]) {
+                                this.discovered[neighborKey] = {n: true, e: true, s: true, w: true};
+                            }
+                            this.discovered[neighborKey][oppDir] = false;
+                            
+                            // Increment edge count
+                            this.edgeCount[edgeKey] = (count || 0) + 1;
+                            
+                            // Push current cell to stack for backtracking
+                            this.stack.push({r: this.currentR, c: this.currentC});
+                            
+                            foundMove = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (foundMove) {
+                    return;
+                }
+                
+                // No valid move found - need to backtrack or mark as dead end
+                
+                if (this.stack.length > 0) {
+                    // Backtrack to previous cell
+                    const prev = this.stack.pop();
+                    
+                    // Increment edge count for backward traversal
+                    const edgeKey = this.getEdgeKey(this.currentR, this.currentC, prev.r, prev.c);
+                    const count = this.edgeCount[edgeKey] || 0;
+                    if (count < 2) {
+                        this.edgeCount[edgeKey] = count + 1;
+                    }
+                    
+                    this.targetR = prev.r;
+                    this.targetC = prev.c;
+                    this.progress = 0;
+                    
+                    // Mark current cell as dead end after backtracking from it
+                    const currentKey = `${this.currentR},${this.currentC}`;
+                    if (!this.deadEnds.some(cell => cell.r === this.currentR && cell.c === this.currentC)) {
+                        this.deadEnds.push({r: this.currentR, c: this.currentC});
+                    }
+                } else {
+                    // No stack - might be at start or stuck
+                    // Check if we're at exit
+                    if (this.currentR === game.exit.r && this.currentC === game.exit.c) {
+                        this.finishTick = game.elapsed;
+                    }
+                }
+            }
+        }
+
+        // Maze generation using recursive backtracking
+        function generateMaze(rows, cols, rng) {
+            // Initialize all walls present
+            const maze = [];
+            for (let r = 0; r < rows; r++) {
+                maze[r] = [];
+                for (let c = 0; c < cols; c++) {
+                    maze[r][c] = { n: true, e: true, s: true, w: true };
+                }
+            }
+            
+            const visited = Array(rows).fill().map(() => Array(cols).fill(false));
+            const stack = [{r: 0, c: 0}];
+            visited[0][0] = true;
+            
+            while (stack.length > 0) {
+                const current = stack[stack.length - 1];
+                
+                // Get unvisited neighbors in fixed order for determinism
+                const neighbors = [];
+                if (current.r > 0 && !visited[current.r-1][current.c]) {
+                    neighbors.push({r: current.r-1, c: current.c, dir: 's'});
+                }
+                if (current.c < cols-1 && !visited[current.r][current.c+1]) {
+                    neighbors.push({r: current.r, c: current.c+1, dir: 'w'});
+                }
+                if (current.r < rows-1 && !visited[current.r+1][current.c]) {
+                    neighbors.push({r: current.r+1, c: current.c, dir: 'n'});
+                }
+                if (current.c > 0 && !visited[current.r][current.c-1]) {
+                    neighbors.push({r: current.r, c: current.c-1, dir: 'e'});
+                }
+                
+                if (neighbors.length > 0) {
+                    // Pick random neighbor based on RNG
+                    const idx = rng.nextInt(0, neighbors.length - 1);
+                    const next = neighbors[idx];
+                    
+                    // Remove walls between current and next
+                    if (next.dir === 's') {
+                        maze[current.r][current.c].n = false;
+                        maze[next.r][next.c].s = false;
+                    } else if (next.dir === 'w') {
+                        maze[current.r][current.c].e = false;
+                        maze[next.r][next.c].w = false;
+                    } else if (next.dir === 'n') {
+                        maze[current.r][current.c].s = false;
+                        maze[next.r][next.c].n = false;
+                    } else if (next.dir === 'e') {
+                        maze[current.r][current.c].w = false;
+                        maze[next.r][next.c].e = false;
+                    }
+                    
+                    visited[next.r][next.c] = true;
+                    stack.push({r: next.r, c: next.c});
+                } else {
+                    stack.pop();
+                }
+            }
+            
+            return maze;
+        }
+
+        // Game object
+        const game = {
+            rows: 20,
+            cols: 20,
+            seed: null,
+            maze: null,
+            spawn: {r: 0, c: 0},
+            exit: {r: 0, c: 0},
+            bots: [],
+            elapsed: 0,
+            allFinished: false,
+            
+            get size() {
+                return { rows: this.rows, cols: this.cols };
+            },
+            
+            init(seed) {
+                this.seed = seed !== undefined ? seed : Math.floor(Math.random() * 10000);
+                const rng = new SeededRandom(this.seed);
+                
+                // Generate maze (at least 15x15)
+                this.rows = 20;
+                this.cols = 20;
+                this.maze = generateMaze(this.rows, this.cols, rng);
+                
+                // Set spawn and exit
+                this.spawn = {r: 0, c: 0};
+                this.exit = {r: this.rows-1, c: this.cols-1};
+                
+                // Create bots with different seeds for direction preferences
+                this.bots = [];
+                for (let i = 0; i < 24; i++) {
+                    this.bots.push(new Bot(i, this.seed + i*1000, this.rows, this.cols));
+                }
+                
+                this.elapsed = 0;
+                this.allFinished = false;
+                
+                // Reset timer display
+                document.getElementById('timer').textContent = `Time: ${this.elapsed}`;
+                document.getElementById('completed').textContent = `Completed: 0/24`;
+                
+                this.render();
+            },
+            
+            tick(n) {
+                for (let t = 0; t < n; t++) {
+                    if (this.allFinished) break;
+                    
+                    // Update each bot in order (deterministic)
+                    for (const bot of this.bots) {
+                        bot.update(this);
+                    }
+                    
+                    // Check if all bots finished
+                    const stillSearching = this.bots.some(bot => bot.finishTick === null);
+                    if (!stillSearching && !this.allFinished) {
+                        this.allFinished = true;
+                    } else if (stillSearching) {
+                        this.elapsed++;
+                    }
+                    
+                    // Update displays
+                    document.getElementById('timer').textContent = `Time: ${this.elapsed}`;
+                    const completedCount = this.bots.filter(bot => bot.finishTick !== null).length;
+                    document.getElementById('completed').textContent = `Completed: ${completedCount}/24`;
+                    
+                    // Render
+                    this.render();
+                }
+            },
+            
+            reset(seed) {
+                this.init(seed);
+            },
+            
+            walls(r, c) {
+                return this.maze[r][c];
+            },
+            
+            render() {
+                const canvas = document.getElementById('maze');
+                const ctx = canvas.getContext('2d');
+                const cellSize = 30;
+                
+                // Clear canvas
+                ctx.fillStyle = 'white';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                // Draw walls
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 2;
+                
+                for (let r = 0; r < this.rows; r++) {
+                    for (let c = 0; c < this.cols; c++) {
+                        const x = c * cellSize;
+                        const y = r * cellSize;
+                        
+                        const walls = this.walls(r, c);
+                        
+                        ctx.beginPath();
+                        if (walls.n) {
+                            ctx.moveTo(x, y);
+                            ctx.lineTo(x + cellSize, y);
+                        }
+                        if (walls.e) {
+                            ctx.moveTo(x + cellSize, y);
+                            ctx.lineTo(x + cellSize, y + cellSize);
+                        }
+                        if (walls.s) {
+                            ctx.moveTo(x + cellSize, y + cellSize);
+                            ctx.lineTo(x, y + cellSize);
+                        }
+                        if (walls.w) {
+                            ctx.moveTo(x, y + cellSize);
+                            ctx.lineTo(x, y);
+                        }
+                        ctx.stroke();
+                    }
+                }
+                
+                // Draw exit
+                const exitX = this.exit.c * cellSize + cellSize/2;
+                const exitY = this.exit.r * cellSize + cellSize/2;
+                ctx.fillStyle = 'green';
+                ctx.beginPath();
+                ctx.arc(exitX, exitY, cellSize/4, 0, Math.PI*2);
+                ctx.fill();
+                
+                // Draw bots with interpolation
+                for (const bot of this.bots) {
+                    const x = bot.currentC * cellSize + cellSize/2;
+                    const y = bot.currentR * cellSize + cellSize/2;
+                    
+                    let drawX, drawY;
+                    if (bot.progress < 1.0) {
+                        const nextX = bot.targetC * cellSize + cellSize/2;
+                        const nextY = bot.targetR * cellSize + cellSize/2;
+                        
+                        drawX = x + (nextX - x) * bot.progress;
+                        drawY = y + (nextY - y) * bot.progress;
+                    } else {
+                        drawX = x;
+                        drawY = y;
+                    }
+                    
+                    ctx.fillStyle = `hsl(${bot.id * 15}, 70%, 50%)`;
+                    ctx.beginPath();
+                    ctx.arc(drawX, drawY, cellSize/4, 0, Math.PI*2);
+                    ctx.fill();
+                }
+            }
+        };
+
+        // Initialize game on load
+        window.onload = () => {
+            game.init();
+            
+            document.getElementById('reset').addEventListener('click', () => {
+                game.reset();
+            });
+        };
+
+        // Expose to global scope for API testing
+        window.game = game;
+    </script>
+</body>
+</html>
