@@ -517,6 +517,8 @@ h2 { font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:
 .tile .v { font-size:27px; font-weight:750; letter-spacing:-.02em; line-height:1;
   font-variant-numeric:tabular-nums; }
 .tile .v small { font-size:13px; color:var(--ink-2); font-weight:500; margin-left:2px; }
+.tile .v .vsub { font-size:13px; color:var(--muted); font-weight:500; margin-left:5px;
+  letter-spacing:0; }
 .tile .k { font-family:var(--mono); font-size:10px; letter-spacing:.11em;
   text-transform:uppercase; color:var(--muted); margin-top:7px; }
 
@@ -699,6 +701,8 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 .pcard .score { font-size:34px; font-weight:750; letter-spacing:-.02em;
   line-height:1; font-variant-numeric:tabular-nums; }
 .pcard .score small { font-size:13px; font-weight:500; color:var(--muted); }
+.pcard .score .pci { font-size:12px; font-weight:500; color:var(--muted);
+  margin-left:6px; letter-spacing:0; }
 .pcard .subs { font-size:11.5px; color:var(--muted); margin-top:11px;
   line-height:1.75; }
 .pcard .subs b { color:var(--ink-2); font-variant-numeric:tabular-nums; }
@@ -851,7 +855,7 @@ RUN_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 </div>
 
 <div class="tiles">
-{% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}</div><div class="k">{{ t.k }}</div></div>
+{% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}{% if t.sub %}<span class="vsub" title="{{ t.sub_tip }}">{{ t.sub }}</span>{% endif %}</div><div class="k">{{ t.k }}</div></div>
 {% endfor %}</div>
 
 {% if run_rollup %}
@@ -922,7 +926,7 @@ TASK_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 </div>
 
 <div class="tiles">
-{% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}</div><div class="k">{{ t.k }}</div></div>
+{% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}{% if t.sub %}<span class="vsub" title="{{ t.sub_tip }}">{{ t.sub }}</span>{% endif %}</div><div class="k">{{ t.k }}</div></div>
 {% endfor %}</div>
 
 {% if prompt %}
@@ -1128,7 +1132,7 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
   <div class="rank">{% if p.partial %}<span style="color:var(--warn)">unranked</span>{% else %}{% if loop.index == 1 %}★ {% endif %}#{{ loop.index }}{% endif %}</div>
   <div class="name">{{ p.model }}</div>
   {% if p.model_id and p.model_id != p.model %}<div class="small muted" style="margin:-2px 0 4px;font-size:11px">{{ p.model_id }}</div>{% endif %}
-  <div class="score">{{ p.score }}<small> / 1.000</small></div>
+  <div class="score">{{ p.score }}<small> / 1.000</small>{% if p.ci %}<span class="pci" title="95% confidence band across tasks (±1.96·SE)">{{ p.ci }}</span>{% endif %}</div>
   <div class="subs">
   {% if p.partial %}<b style="color:var(--warn)">partial — {{ p.coverage }} tasks</b><br>{% else %}<span class="muted">{{ p.coverage }} tasks</span><br>{% endif %}
   <b>{{ p.app }}</b> tries/pass
@@ -2675,7 +2679,7 @@ MODEL_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 </div>
 
 <div class="tiles">
-{% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}</div><div class="k">{{ t.k }}</div></div>
+{% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}{% if t.sub %}<span class="vsub" title="{{ t.sub_tip }}">{{ t.sub }}</span>{% endif %}</div><div class="k">{{ t.k }}</div></div>
 {% endfor %}</div>
 
 {% if detail_rows %}
@@ -2993,11 +2997,11 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
     attr_disp = (f"{am['attributed_score']:.3f}"
                  if am["attributed_score"] is not None else "—")
     _ci = s.get("score_ci95")
-    _raw_k = ("raw score" if _ci is None
-              else f"raw score · 95% ±{('%.3f' % _ci).lstrip('0')}")
     tiles = [
         {"v": s["chip"] if s["avg_score_val"] is None else
-         f"{s['avg_score_val']:.3f}", "k": _raw_k},
+         f"{s['avg_score_val']:.3f}", "k": "raw score",
+         "sub": ("" if _ci is None else "±" + f"{_ci:.3f}".lstrip("0")),
+         "sub_tip": "95% confidence band across tasks (±1.96·SE)"},
         {"v": attr_disp, "k": "attributed score"},
         {"v": f"{npass}/{len(graded)}", "k": "tasks ≥ 0.80"},
         {"v": s["att_per_pass"], "k": "tries / pass (lower=better)"},
@@ -3340,6 +3344,8 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             "model_id": mids.get(m, ""),
             "score": (_fmt_score(s["avg_score_val"])
                       if s["avg_score_val"] is not None else "—"),
+            "ci": ("" if s.get("score_ci95") is None
+                   else "±" + f"{s['score_ci95']:.3f}".lstrip("0")),
             "app": s["att_per_pass"], "app_ctx": s["app_ctx"],
             "tps": s["tps"], "cost": s["cost"],
             "where": "local" if s["local"] else "cloud / CLI",
@@ -4520,7 +4526,7 @@ separates nobody — it just adds noise. Sorted by spread (σ), weakest
 discriminators first. Basis: every run per model·task, aggregated.</p>
 
 <div class="tiles">
-{% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}</div><div class="k">{{ t.k }}</div></div>
+{% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}{% if t.sub %}<span class="vsub" title="{{ t.sub_tip }}">{{ t.sub }}</span>{% endif %}</div><div class="k">{{ t.k }}</div></div>
 {% endfor %}</div>
 
 <div class="card" style="margin:14px 0;padding:12px 16px">

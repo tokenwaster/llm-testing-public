@@ -26,6 +26,30 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+## 0.6.15 — confidence bands + public-site fixes
+
+**Headline confidence (G2).** Every model's score now carries its 95% band
+(±1.96·SE across the task set), shown on the overview matrix, the leaderboard
+podium, and the model-page raw-score tile. On the matrix, a model is marked ≈
+when its band overlaps the leader's — i.e. it is not statistically
+distinguishable from #1 on this suite. On the current data that flags the top 8
+as one tied cohort, the honest reading of the frontier compression the
+discriminate page already reports. Computed from scores already on hand — no new
+runs. Presentation only, but bundled here under a patch tag.
+
+**Cost is one pass, by design (confirmed, not changed).** Cost and total time
+aggregate as the MEAN per model·task (`cost_usd` is in `_aggregate`'s
+`_MEAN_FIELDS`), summed across tasks — i.e. the cost of one full pass, not
+inflated by how many times a model was re-tested. Uniform across the tile,
+podium, and leaderboard.
+
+**Public-site fixes** shipped this cycle: model pages link out to Hugging
+Face / OpenRouter without needing the private model yaml; the `/data` browser
+resolves archived-dataset runs (was 404ing ~2600 links); the info-page catalog
+and run-report grid no longer emit dead task links; the public build defaults to
+port 9001; the rendered `reports/` site now ships in the public repo. A stale
+call convention that crashed the operator `/backend` endpoint was fixed.
+
 ## 0.6.14 — price refresh + free-tier honesty
 
 `harness prices` re-reads gateway list prices into the model yamls and stamps
