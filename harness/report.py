@@ -791,8 +791,11 @@ _MATRIX_CSS = """
 .mx-rail .nm a { font-weight:600; }
 .mx-rail .sc { font-family:var(--mono); font-size:12px; font-weight:600; text-align:right;
   font-variant-numeric:tabular-nums; }
+.mx-rail .sc .ci { font-weight:400; font-size:9.5px; color:var(--muted); margin-left:3px;
+  vertical-align:1px; }
 .mx-rail .gp { font-family:var(--mono); font-size:11px; color:var(--muted); text-align:right;
   min-width:44px; font-variant-numeric:tabular-nums; }
+.mx-rail .gp .tie { color:var(--accent); font-weight:700; margin-right:2px; cursor:help; }
 .mx-row.lead .mx-rail { box-shadow:inset 3px 0 0 var(--accent); }
 .mx-row.lead .rk, .mx-row.lead .sc, .mx-row.lead .gp { color:var(--accent); }
 .mx-row.head .rk, .mx-row.head .nm, .mx-row.head .sc, .mx-row.head .gp { color:var(--muted);
@@ -1033,7 +1036,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 </div>
 
 {% if matrix %}
-<h2>Every model, every task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· rows ranked by mean · columns grouped by category · hover a cell for the task · <a href="info.html#fail">what the colours mean →</a></span></h2>
+<h2>Every model, every task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· rows ranked by mean · ± is the 95% band across tasks · <span class="tie" style="color:var(--accent);font-weight:700">≈</span> marks models tied with the leader within noise · hover a cell for the task · <a href="info.html#fail">what the colours mean →</a></span></h2>
 <div class="seg" id="mxseg" title="narrow the grid to one end of the suite — rows re-rank by that subset's mean">
   <button type="button" data-mx="all" class="on">All ({{ matrix.n_all }})</button>
   <button type="button" data-mx="hard">◆ Hard ({{ matrix.n_hard }})</button>
@@ -1046,7 +1049,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   </div>
   {% for r in matrix.rows %}
   <div class="mx-row{% if r.lead %} lead{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-easy="{{ r.m_easy }}">
-    <div class="mx-rail"><span class="rk">{{ r.rank }}</span><span class="nm">{{ r.model }}</span><span class="sc">{{ r.score }}</span><span class="gp">{{ r.gap }}</span></div>
+    <div class="mx-rail"><span class="rk">{{ r.rank }}</span><span class="nm">{{ r.model }}</span><span class="sc">{{ r.score }}{% if r.ci %}<span class="ci" title="95% confidence band across tasks (±1.96·SE)">{{ r.ci }}</span>{% endif %}</span><span class="gp">{% if r.tied %}<span class="tie" title="within the leader's 95% band — not statistically distinguishable on this task set">≈</span>{% endif %}{{ r.gap }}</span></div>
     <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
   {% endfor %}
@@ -1741,6 +1744,11 @@ def _summarize(rs: list[dict]) -> dict:
     """Aggregate any set of task results into the summary-row metrics."""
     scored = [r["score"]["score"] for r in rs if r["score"].get("status") == "scored"]
     avg = _avg(scored)
+    score_se = score_ci95 = None
+    if len(scored) >= 2:
+        import statistics as _st
+        score_se = _st.stdev(scored) / (len(scored) ** 0.5)
+        score_ci95 = 1.96 * score_se
     scored_pairs = [(r["score"]["score"], r.get("task", "")) for r in rs
                     if r["score"].get("status") == "scored"]
     lowest_val, lowest_task = min(scored_pairs) if scored_pairs else (None, "")
@@ -1771,6 +1779,9 @@ def _summarize(rs: list[dict]) -> dict:
     walls = [r["wall_ms"] for r in rs]
     return {
         "avg_score_val": avg,
+        "score_se": score_se,
+        "score_ci95": score_ci95,
+        "n_scored_tasks": len(scored),
         "lowest_val": lowest_val,
         "lowest_task": lowest_task,
         "chip": _score_cell(avg),
@@ -2832,6 +2843,9 @@ def _model_links(model: str, mo=None, *, local: bool | None = None,
     """
     from urllib.parse import quote
 
+    if not isinstance(model, str):
+        mo, model = model, getattr(model, "name", "")
+
     if mo and mo.model:
         mid = mo.model
         is_local = bool(mo.local)
@@ -2978,9 +2992,12 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
 
     attr_disp = (f"{am['attributed_score']:.3f}"
                  if am["attributed_score"] is not None else "—")
+    _ci = s.get("score_ci95")
+    _raw_k = ("raw score" if _ci is None
+              else f"raw score · 95% ±{('%.3f' % _ci).lstrip('0')}")
     tiles = [
         {"v": s["chip"] if s["avg_score_val"] is None else
-         f"{s['avg_score_val']:.3f}", "k": "raw score"},
+         f"{s['avg_score_val']:.3f}", "k": _raw_k},
         {"v": attr_disp, "k": "attributed score"},
         {"v": f"{npass}/{len(graded)}", "k": "tasks ≥ 0.80"},
         {"v": s["att_per_pass"], "k": "tries / pass (lower=better)"},
@@ -3483,6 +3500,9 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
           if summaries[m]["avg_score_val"] is not None else -1.0), m))
     _lead_v = next((summaries[m]["avg_score_val"] for m in _mrank
                     if summaries[m]["avg_score_val"] is not None), None)
+    _lead_m = next((m for m in _mrank
+                    if summaries[m]["avg_score_val"] is not None), None)
+    _lead_ci = summaries[_lead_m]["score_ci95"] if _lead_m else None
     _flag_of = {r["tid"]: r["flag"] for r in _dstats["rows"]}
     _sub_of = {tid: ("hard" if _flag_of.get(tid) in ("frontier", "discriminator")
                      else "easy" if _flag_of.get(tid) in ("ceiling", "dead")
@@ -3503,16 +3523,22 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         groups = [[{**_mcell(task_data[tid]["agg"].get(m), tdefs[tid], m),
                     "sub": _sub_of[tid]}
                    for tid in _cat_tids[c]] for c in _live_cats]
+        ci = summaries[m]["score_ci95"]
         if agg is None:
-            score_s, gap_s = "—", ""
+            score_s, gap_s, ci_s, tied = "—", "", "", False
         else:
             score_s = f"{agg:.3f}"
             gap_s = ("—" if (i == 0 or _lead_v is None
                              or abs(agg - _lead_v) < 1e-9)
                      else "+" + f"{_lead_v - agg:.3f}".lstrip("0"))
+            ci_s = "" if ci is None else "±" + f"{ci:.3f}".lstrip("0")
+            tied = (i != 0 and _lead_v is not None and ci is not None
+                    and _lead_ci is not None
+                    and (agg + ci) >= (_lead_v - _lead_ci))
         _mh, _me = _sub_mean(m, _hard_ids), _sub_mean(m, _easy_ids)
         matrix_rows.append({
             "rank": i + 1, "model": _mlink(m), "score": score_s,
+            "ci": ci_s, "tied": tied,
             "gap": gap_s, "lead": (i == 0 and agg is not None),
             "m_all": ("" if agg is None else f"{agg:.6f}"),
             "m_hard": ("" if _mh is None else f"{_mh:.6f}"),

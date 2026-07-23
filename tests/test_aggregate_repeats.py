@@ -150,3 +150,24 @@ def test_separate_models_do_not_mix():
 def test_means(scores, expect):
     agg = _aggregate([_entry(f"r{i}", s) for i, s in enumerate(scores)])
     assert agg["score"]["score"] == expect
+
+
+def test_summarize_reports_a_confidence_band_across_tasks():
+    """The headline score carries a 95% band (±1.96·SE across tasks) so the
+    reader can tell a real ordering from noise. Needs >=2 scored tasks; the band
+    shrinks as scores tighten and vanishes for a single task."""
+    from harness.report import _summarize
+
+    rs = [_entry(f"r{i}", s) for i, s in enumerate([1.0, 0.0, 1.0, 0.0])]
+    s = _summarize(rs)
+    assert s["n_scored_tasks"] == 4
+    assert s["score_se"] is not None and s["score_ci95"] is not None
+    assert abs(s["score_se"] - 0.2887) < 1e-3
+    assert abs(s["score_ci95"] - 1.96 * s["score_se"]) < 1e-9
+
+    tight = _summarize([_entry(f"t{i}", s) for i, s in enumerate([0.6, 0.5, 0.5, 0.4])])
+    assert tight["score_ci95"] < s["score_ci95"]
+
+    one = _summarize([_entry("only", 1.0)])
+    assert one["score_se"] is None and one["score_ci95"] is None
+    assert one["n_scored_tasks"] == 1
