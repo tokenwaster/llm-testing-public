@@ -26,6 +26,28 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+## 0.6.16 — compare page, contamination & sample-size honesty, freshness
+
+Four roadmap items (`docs/PUBLIC-FEEDBACK-ROADMAP.md`), all working in the
+operator and public builds:
+
+- **Head-to-head compare (D3).** New `/compare` page: two model dropdowns in the
+  header, a side-by-side metric table with per-metric winners and deltas, and a
+  per-task matrix grouped by category with a swatch + delta per task. All numbers
+  are embedded once as JSON and rendered client-side, so it works on a static
+  host with no server. Linked in the nav; routed in both servers.
+- **Contamination & memorization (G3).** New `info.html#contamination` section
+  stating the guards — original (non-public) tasks, twisted-classics that score
+  memorized answers zero, behaviour-graded apps, freshly-assembled long-context
+  payloads, content-hashing — and what is *not* claimed.
+- **Sample-size honesty (G5).** New `info.html#samplesize` section with the real
+  counts (runs, models, scored cells, total graded trials, % of cells with
+  repeats) and how the 95% band is computed, all derived from the data.
+- **Freshness (G6).** The overview shows "data as of <newest run date>" and links
+  an Atom `feed.xml` of models entering the benchmark. Both derive from run
+  dates, not the wall clock, so the shipped `reports/` stay byte-stable between
+  publishes.
+
 ## 0.6.15 — confidence bands + public-site fixes
 
 **Headline confidence (G2).** Every model's score now carries its 95% band

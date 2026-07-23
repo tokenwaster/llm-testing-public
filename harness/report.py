@@ -42,6 +42,7 @@ _PUBLIC_NAV = False
 _NAV = [
     ("Overview", "index.html", False), ("Families", "family.html", False),
     ("Discriminate", "discriminate.html", False),
+    ("Compare", "compare.html", False),
     ("Run", "/run", True), ("Watch", "/watch", True),
     ("Review", "/review", True),
     ("Backend", "/backend", True), ("Manage data", "/manage", True),
@@ -615,6 +616,38 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 .hsw { display:inline-block; width:11px; height:11px; border-radius:2px; flex:none;
   margin-right:7px; background:rgba(var(--cell-rgb),var(--a,.2)); }
 .hsw.pend { background:transparent; box-shadow:inset 0 0 0 1px var(--hair); }
+/* head-to-head compare page */
+.cmp-pick { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:6px 0 22px; }
+.cmp-sel { flex:1 1 260px; min-width:200px; font-size:15px; font-weight:600;
+  padding:9px 12px; border-radius:8px; border:1px solid var(--border);
+  background:var(--surface); color:var(--ink); font-family:inherit; }
+.cmp-swap { flex:none; font-size:18px; line-height:1; padding:8px 12px; cursor:pointer;
+  border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--ink); }
+.cmp-swap:hover { border-color:var(--accent); color:var(--accent); }
+.cmp-head { margin:0 0 28px; overflow-x:auto; }
+.cmp-tbl { border-collapse:collapse; width:100%; }
+.cmp-tbl th, .cmp-tbl td { padding:9px 14px; text-align:center; border-bottom:1px solid var(--hair); }
+.cmp-tbl thead th { font-size:15px; font-weight:700; border-bottom:1px solid var(--rule); }
+.cmp-tbl thead th a { font-weight:700; }
+.cmp-k { text-align:left !important; font-family:var(--mono); font-size:11px;
+  letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+.cmp-c { font-variant-numeric:tabular-nums; font-size:15px; }
+.cmp-c.win { color:var(--good); font-weight:750; }
+.cmp-d { font-family:var(--mono); font-size:11.5px; color:var(--muted); min-width:64px; }
+.cmp-cat { margin:0 0 18px; }
+.cmp-cath { font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--muted); padding:6px 0 4px; border-bottom:1px solid var(--rule); margin-bottom:4px; }
+.cmp-row { display:grid; grid-template-columns:1fr 90px 96px 90px; align-items:center;
+  gap:10px; padding:3px 4px; border-bottom:1px solid var(--hair); }
+.cmp-row:hover { background:var(--surface); }
+.cmp-t { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cmp-row .scv { justify-content:flex-start; font-variant-numeric:tabular-nums; }
+.cmp-row .scv.ra { justify-content:flex-end; }
+.cmp-row .scv.ra .hsw { margin-right:0; margin-left:7px; }
+.cmp-dc { text-align:center; }
+.cmp-td { font-family:var(--mono); font-size:11px; white-space:nowrap; }
+.cmp-td.ga { color:var(--good); } .cmp-td.gb { color:var(--accent); }
+.cmp-td.tie { color:var(--muted); }
 
 /* marks */
 .spark path { fill:none; stroke:var(--accent); stroke-width:2;
@@ -982,7 +1015,9 @@ truncated for display — full text lives in runs/…/transcript.jsonl.</div>
 
 INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LLM Testing · Overview</title><style>{{ css }}
+<title>LLM Testing · Overview</title>
+<link rel="alternate" type="application/atom+xml" title="LLM Testing — models tested" href="feed.xml">
+<style>{{ css }}
 /* .seg (segmented toggle) now lives in BASE_CSS — shared with /discriminate */
 /* ---- matrix-first overview hero (tokens live in BASE_CSS) ---- */
 .mast { border-bottom:2px solid var(--ink); padding-bottom:16px; margin:18px 0 4px; }
@@ -1004,7 +1039,8 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="topbar">
   <div><h1>LLM Testing</h1>
   <div class="sub">{% if dataset_label %}{{ dataset_label }} · {% endif %}one
-  suite version per dataset · suite v{{ suite_version }}</div></div>
+  suite version per dataset · suite v{{ suite_version }}{% if data_asof %} ·
+  <strong>data as of {{ data_asof }}</strong> · <a href="feed.xml">feed</a>{% endif %}</div></div>
   <div class="nav"><select id="dsnav" title="switch dataset version"
     style="background:var(--surface);color:var(--ink);border:1px solid var(--border);
     border-radius:7px;padding:4px 8px;font:inherit;font-size:12.5px"></select>
@@ -3625,6 +3661,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         value_rows=value_rows, dataset_label=dataset_label,
         dataset_key=dataset_key, dataset_caveat=_pre_v05_caveat(dataset_key),
         suite_version=config.suite_version(),
+        data_asof=(runs[-1]["run_id"].split("_")[0] if runs else ""),
         categories=all_cats, cat_rows=cat_rows,
         fit_rows=fit_rows, fit_local=fit_local, fit_remote=fit_remote,
         fit_note=fitres["directives"].get("note", ""),
@@ -4102,6 +4139,62 @@ transcripts, metrics, scores and the model's actual workspace. Reports are a pur
 function of it — delete <code>reports/</code> and regenerate at any time.</li>
 </ul>
 
+<h2 id="contamination">Contamination &amp; memorization</h2>
+<p>The hard question for any benchmark is whether a model scores well because it
+<em>reasons</em> or because it has <em>seen the answer</em> in training. We can't
+prove a private model's training set, so instead of claiming immunity we design
+the tasks to make memorization not pay, and we tell you exactly how:</p>
+<ul>
+<li><strong>Original constructions, not public sets.</strong> The tasks are
+written for this suite. They are not lifted from MMLU, HumanEval, GSM8K, or any
+public leaderboard, so a model that memorized those gains nothing here.</li>
+<li><strong>Twisted classics.</strong> Several reasoning tasks take a famous
+puzzle and change the constraint that matters (the reversed river-crossing, the
+Monty <em>Fall</em> variant). A model regurgitating the well-known answer scores
+<em>zero</em> — the memorized response is now the wrong one. That is a
+contamination detector, not just a question.</li>
+<li><strong>Behaviour over recall.</strong> The one-shot-app and agentic tasks
+are graded on what the model <em>builds</em> — a Playwright suite drives the
+generated app, a pytest checker runs the model's code. You cannot memorize your
+way through "make this maze solvable"; the artifact either works or it doesn't.</li>
+<li><strong>Fresh long-context payloads.</strong> Long-context tasks assemble
+their haystack at generation time, so the specific facts to retrieve aren't a
+fixed string sitting in any crawl.</li>
+<li><strong>Content-hashed and dated.</strong> Every result records the task's
+content hash and the run date, so if a task ever leaked and were quietly
+revised, the break is visible rather than silent — and you can see whether a
+model was tested before or after a given model's training cutoff.</li>
+</ul>
+<p class="small">What we do <em>not</em> claim: that any closed model definitely
+never saw a task. We claim the tasks are built so that seeing them helps little,
+and that the twisted-classic scores are direct evidence a model is reasoning
+rather than reciting.</p>
+
+<h2 id="samplesize">Sample size &amp; how much to trust a number</h2>
+<p>Be a skeptic — here is exactly how much data is behind each figure, stated
+plainly rather than buried.</p>
+<ul>
+<li>This dataset holds <strong>{{ ss.n_runs }} runs</strong> across
+<strong>{{ ss.n_models }} models</strong> and <strong>{{ ss.n_tasks }}
+tasks</strong>, for <strong>{{ ss.n_cells }} scored model·task cells</strong>
+totalling <strong>{{ ss.n_trials }} individual graded trials</strong>.</li>
+<li><strong>Trials per cell.</strong> {{ ss.repeat_pct }}% of cells are backed by
+more than one run; the rest are a single trial. A cell run more than once shows
+its spread (σ) and its mean is over every scored run — see the aggregation rule
+above.</li>
+<li><strong>The headline band.</strong> Each model's score carries a 95%
+confidence band (±1.96·SE) computed <em>across the task set</em> — treating the
+{{ ss.n_tasks }} tasks as a sample. Two models whose bands overlap are not
+distinguishable on this suite; the overview marks them tied (≈). This is why the
+top cohort reads as a near-tie rather than a clean ranking.</li>
+<li><strong>Small by design, honest about it.</strong> {{ ss.n_tasks }} tasks is
+a deliberately small, hand-verified set, not a scraped thousand. Only a handful
+currently separate the frontier models (see <a href="discriminate.html">task
+discrimination</a>) — the number the suite is least sure of is <em>who is #1
+among the top few</em>, and it says so rather than manufacturing a decisive
+gap.</li>
+</ul>
+
 <h2 id="caveats">Caveats — read this before trusting a number</h2>
 <p>Every benchmark has edges where the number means less than it looks like it
 does. These are ours.</p>
@@ -4275,6 +4368,26 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
     from . import assess
 
     tasks = sorted(tdefs.values(), key=lambda t: (t.category, t.id))
+
+    _td = {tid: info for tid, info in collect_task_data(runs).items()
+           if tid in tdefs}
+    _cells = _repeat = _trials = 0
+    for _info in _td.values():
+        for _e in _info["agg"].values():
+            if (_e.get("n_scored") or 0) > 0:
+                _cells += 1
+                _trials += _e["n_scored"]
+                if _e.get("n_runs", 1) > 1:
+                    _repeat += 1
+    ss = {
+        "n_runs": len(runs),
+        "n_models": len({res["model"] for r in runs for res in r["results"]}),
+        "n_tasks": len(tdefs),
+        "n_cells": _cells,
+        "n_trials": _trials,
+        "repeat_pct": round(100 * _repeat / _cells) if _cells else 0,
+    }
+
     human_graded = []
     for t in tasks:
         cap = float((t.scoring or {}).get("automated_max", 1.0))
@@ -4346,6 +4459,7 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         human_graded=human_graded,
         dataset_label=dataset_label, dataset_key=dataset_key,
         n_tasks=len(tasks), n_models=n_models, n_runs=len(runs),
+        ss=ss,
         categories=cats,
         lanes=LANE_BLURBS,
         metrics=METRIC_GLOSSARY,
@@ -5024,6 +5138,265 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         suite_version=config.suite_version())
 
 
+COMPARE_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compare · LLM Testing</title><style>{{ css }}</style></head><body>
+<div class="topbar">
+  <div><h1>Head to head</h1>
+  <div class="sub">two models, every task, side by side · {{ dataset_label or "live dataset" }}</div></div>
+  <div class="nav">{{ nav }}</div>
+</div>
+
+<div class="cmp-pick">
+  <select id="selA" class="cmp-sel"></select>
+  <button id="swap" class="cmp-swap" title="swap sides">&#8646;</button>
+  <select id="selB" class="cmp-sel"></select>
+</div>
+
+<div id="cmp-head" class="cmp-head"></div>
+<h2>Per-task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· swatch ink ramps with the score · Δ colours the winner · grouped by category</span></h2>
+<div id="cmp-grid"></div>
+
+<script>const D = {{ data_json|safe }};</script>
+<script>
+const $ = s => document.querySelector(s);
+function q(v){ // score -> swatch opacity
+  return (0.10 + 0.90*Math.max(0,Math.min(1,v))).toFixed(3);
+}
+function sc(v){ // score -> {cls, txt, sw}
+  if (v === null || v === undefined)
+    return {cls:'muted', txt:'\\u2014', sw:'<span class="hsw pend"></span>'};
+  const st = v >= 0.8 ? 'good' : (v >= 0.4 ? 'warn' : 'crit');
+  return {cls:st, txt:v.toFixed(3),
+          sw:'<span class="hsw" style="--a:'+q(v)+'"></span>'};
+}
+function num(x){ return (x === null || x === undefined) ? null : x; }
+function fmtPct(v){ return v === null ? '\\u2014' : Math.round(v*100)+'%'; }
+
+// metric rows: [label, key, higherBetter, format(model)->string]
+const METRICS = [
+  ['Raw score', 'score', true, m => m.score===null?'\\u2014':m.score.toFixed(3)+(m.ci!==null?' \\u00b1'+m.ci.toFixed(3).replace(/^0/,''):'')],
+  ['Tasks \\u2265 0.80', 'passrate', true, m => m.graded?((m.pass/m.graded))?(m.pass+'/'+m.graded):'\\u2014':'\\u2014'],
+  ['Cost / pass', 'cost', false, m => m.costStr],
+  ['Gen tok/s', 'tps', true, m => m.tps===null?'\\u2014':m.tps.toFixed(1)],
+  ['Total time', 'wall', false, m => m.timeStr],
+  ['First-try clean', 'ft', true, m => fmtPct(m.ft)],
+];
+function metricVal(m, key){
+  if (key==='passrate') return m.graded ? m.pass/m.graded : null;
+  if (key==='cost') return num(m.costVal);
+  if (key==='wall') return num(m.wall);
+  if (key==='tps') return num(m.tps);
+  if (key==='ft') return num(m.ft);
+  return num(m.score);
+}
+function renderHead(a, b){
+  const A = D.data[a], B = D.data[b];
+  let h = '<table class="cmp-tbl"><thead><tr><th></th>'
+        + '<th class="cmp-c"><a href="models/'+A.slug+'.html">'+a+'</a>'
+        + '<div class="small muted">#'+A.rank+' \\u00b7 '+A.where+'</div></th>'
+        + '<th class="cmp-d">\\u0394</th>'
+        + '<th class="cmp-c"><a href="models/'+B.slug+'.html">'+b+'</a>'
+        + '<div class="small muted">#'+B.rank+' \\u00b7 '+B.where+'</div></th></tr></thead><tbody>';
+  for (const [label, key, hi, fmt] of METRICS){
+    const va = metricVal(A, key), vb = metricVal(B, key);
+    let wa='', wb='', delta='';
+    if (va!==null && vb!==null && va!==vb){
+      const aWins = hi ? va>vb : va<vb;
+      wa = aWins ? 'win' : ''; wb = aWins ? '' : 'win';
+    }
+    if (va!==null && vb!==null){
+      const d = va - vb;
+      if (Math.abs(d) > 1e-9){
+        const sign = d>0?'+':'';
+        let dv = (key==='cost') ? sign+d.toFixed(4)
+               : (key==='wall') ? '' : sign+(Math.abs(d)<1?d.toFixed(3):d.toFixed(1));
+        delta = dv;
+      }
+    }
+    h += '<tr><td class="cmp-k">'+label+'</td>'
+       + '<td class="cmp-c '+wa+'">'+fmt(A)+'</td>'
+       + '<td class="cmp-d">'+delta+'</td>'
+       + '<td class="cmp-c '+wb+'">'+fmt(B)+'</td></tr>';
+  }
+  h += '</tbody></table>';
+  $('#cmp-head').innerHTML = h;
+}
+function renderGrid(a, b){
+  const A = D.data[a], B = D.data[b];
+  let h = '';
+  for (const cat of D.cats){
+    h += '<div class="cmp-cat"><div class="cmp-cath">'+cat.key+'</div>';
+    for (const tid of cat.tids){
+      const va = A.t[tid] ?? null, vb = B.t[tid] ?? null;
+      const A1 = sc(va), B1 = sc(vb);
+      let d = '';
+      if (va!==null && vb!==null && Math.abs(va-vb) > 1e-9){
+        const diff = va - vb;
+        d = '<span class="cmp-td '+(diff>0?'ga':'gb')+'">'
+          + (diff>0?'\\u25c0 ':'') + (diff>0?'+':'') + diff.toFixed(3)
+          + (diff<0?' \\u25b6':'') + '</span>';
+      } else if (va!==null && vb!==null){ d = '<span class="cmp-td tie">=</span>'; }
+      h += '<div class="cmp-row">'
+         + '<a class="cmp-t" href="tasks/'+tid+'.html">'+tid+'</a>'
+         + '<span class="scv '+A1.cls+' ra">'+A1.txt+A1.sw+'</span>'
+         + '<span class="cmp-dc">'+d+'</span>'
+         + '<span class="scv '+B1.cls+'">'+B1.sw+'<b>'+B1.txt+'</b></span>'
+         + '</div>';
+    }
+    h += '</div>';
+  }
+  $('#cmp-grid').innerHTML = h;
+}
+function render(){
+  const a = $('#selA').value, b = $('#selB').value;
+  renderHead(a, b); renderGrid(a, b);
+  const u = new URL(location); u.searchParams.set('a',a); u.searchParams.set('b',b);
+  history.replaceState(null,'',u);
+}
+(function init(){
+  const opts = D.models.map(m => '<option value="'+m+'">'+m+'</option>').join('');
+  $('#selA').innerHTML = opts; $('#selB').innerHTML = opts;
+  const p = new URLSearchParams(location.search);
+  $('#selA').value = p.get('a') && D.data[p.get('a')] ? p.get('a') : D.models[0];
+  $('#selB').value = p.get('b') && D.data[p.get('b')] ? p.get('b')
+                   : (D.models[1] || D.models[0]);
+  $('#selA').onchange = render; $('#selB').onchange = render;
+  $('#swap').onclick = () => { const t=$('#selA').value;
+    $('#selA').value=$('#selB').value; $('#selB').value=t; render(); };
+  render();
+})();
+</script>
+</body></html>"""
+
+
+def build_feed(runs: list[dict], tdefs: dict) -> str:
+    """Atom feed of 'model first tested' events, newest first (G6 freshness).
+
+    Every entry's date is a RUN date, not the wall clock, so the feed is a pure
+    function of the data: it only changes when a new model actually lands, and
+    the shipped reports stay byte-stable between publishes. That is also the
+    honest 'last updated' for a benchmark — when the data moved, not when the
+    generator last ran."""
+    from xml.sax.saxutils import escape
+
+    task_data = {tid: info for tid, info in collect_task_data(runs).items()
+                 if tid in tdefs}
+
+    first_seen: dict[str, str] = {}
+    for r in sorted(runs, key=lambda r: r["run_id"]):
+        started = r["manifest"].get("started") or r["run_id"]
+        for res in r["results"]:
+            first_seen.setdefault(res["model"], started)
+
+    def _score(m):
+        xs = [e["score"]["score"] for info in task_data.values()
+              if (e := info["agg"].get(m))
+              and e["score"].get("status") == "scored"
+              and e["score"].get("score") is not None]
+        return sum(xs) / len(xs) if xs else None
+
+    events = sorted(first_seen.items(), key=lambda kv: kv[1], reverse=True)
+    updated = events[0][1] if events else "1970-01-01T00:00:00Z"
+    site = "https://tokenwaster.github.io/llm-testing-public"
+    ver = config.suite_version()
+
+    entries = []
+    for m, when in events:
+        sc = _score(m)
+        summ = (f"{m} entered the benchmark. Mean score {sc:.3f} across the "
+                f"suite (v{ver})." if sc is not None
+                else f"{m} entered the benchmark (v{ver}).")
+        entries.append(
+            f"  <entry>\n"
+            f"    <title>{escape(m)} added to the benchmark</title>\n"
+            f"    <id>tag:llm-testing,{when[:10]}:{escape(m)}</id>\n"
+            f"    <updated>{escape(when)}</updated>\n"
+            f"    <link href=\"{site}/reports/models/{_slug_name(m)}.html\"/>\n"
+            f"    <summary>{escape(summ)}</summary>\n"
+            f"  </entry>")
+
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<feed xmlns="http://www.w3.org/2005/Atom">\n'
+        '  <title>LLM Testing — models tested</title>\n'
+        f'  <id>tag:llm-testing,2026:feed</id>\n'
+        f'  <updated>{escape(updated)}</updated>\n'
+        f'  <link href="{site}/reports/index.html"/>\n'
+        f'  <link rel="self" href="{site}/reports/feed.xml"/>\n'
+        + "\n".join(entries) + "\n</feed>\n")
+
+
+def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
+                       dataset_key: str = "live") -> str:
+    """Head-to-head: pick any two models, see every task side by side.
+
+    All the per-model, per-task numbers are embedded once as JSON and the page
+    renders client-side, so a static host needs no server — the two dropdowns
+    just re-read the blob. Scores are the same aggregated means the leaderboard
+    uses, and the swatch ramp mirrors the overview matrix so a cell reads the
+    same everywhere."""
+    import json as _json
+
+    _, hidden = _model_prefs()
+    task_data = {tid: info for tid, info in collect_task_data(runs).items()
+                 if tid in tdefs}
+    by_model: dict[str, list] = {}
+    for tid, info in task_data.items():
+        for m, e in info["agg"].items():
+            if m not in hidden:
+                by_model.setdefault(m, []).append(e)
+    summaries = {m: _summarize(rs) for m, rs in by_model.items()}
+
+    ranked = sorted(summaries, key=lambda m: (
+        -(summaries[m]["avg_score_val"]
+          if summaries[m]["avg_score_val"] is not None else -1.0), m))
+    rank_of = {m: i + 1 for i, m in enumerate(ranked)}
+
+    def _score_on(m, tid):
+        e = task_data[tid]["agg"].get(m)
+        if e and e["score"].get("status") == "scored" \
+                and e["score"].get("score") is not None:
+            return round(e["score"]["score"], 6)
+        return None
+
+    data = {}
+    for m in ranked:
+        s = summaries[m]
+        graded = sum(1 for tid in task_data
+                     if _score_on(m, tid) is not None)
+        npass = sum(1 for tid in task_data
+                    if (v := _score_on(m, tid)) is not None and v >= 0.8)
+        data[m] = {
+            "slug": _slug_name(m),
+            "rank": rank_of[m],
+            "where": "local" if s["local"] else "cloud / CLI",
+            "score": (round(s["avg_score_val"], 6)
+                      if s["avg_score_val"] is not None else None),
+            "ci": (round(s["score_ci95"], 6)
+                   if s.get("score_ci95") is not None else None),
+            "pass": npass, "graded": graded,
+            "costVal": round(s["cost_val"], 6) if s.get("cost_val") else 0,
+            "costStr": s["cost"],
+            "tps": (float(s["tps"]) if s["tps"] not in ("—", None) else None),
+            "wall": s["wall_ms_sum"],
+            "timeStr": fmt_span(s["wall_ms_sum"]),
+            "ft": s.get("first_try_val"),
+            "t": {tid: _score_on(m, tid) for tid in task_data},
+        }
+
+    cats: dict[str, list] = {}
+    for tid in task_data:
+        cats.setdefault(tdefs[tid].category, []).append(tid)
+    cat_list = [{"key": c, "tids": sorted(cats[c])} for c in sorted(cats)]
+
+    payload = {"models": ranked, "data": data, "cats": cat_list}
+    data_json = _json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    return _env.from_string(COMPARE_TEMPLATE).render(
+        nav=_nav(""), css=BASE_CSS, data_json=data_json,
+        dataset_label=dataset_label, dataset_key=dataset_key)
+
+
 def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
                  dataset_label: str = "", dataset_key: str = "live",
                  tasks_dir: Path | None = None, public_nav: bool = False) -> Path:
@@ -5078,6 +5451,10 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
            build_discriminate_page(runs, tdefs, dataset_label, dataset_key))
         _w(out_dir / "family.html",
            build_family_page(runs, tdefs, dataset_label, dataset_key, versions))
+        _w(out_dir / "compare.html",
+           build_compare_page(runs, tdefs, dataset_label, dataset_key))
+        if dataset_key == "live":
+            _w(out_dir / "feed.xml", build_feed(runs, tdefs))
         index = out_dir / "index.html"
         _w(index, build_index(runs, tasks_dir=tasks_dir,
                               dataset_label=dataset_label, dataset_key=dataset_key,

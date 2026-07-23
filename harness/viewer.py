@@ -119,6 +119,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file("discriminate.html")
         elif path in ("/family", "/family/", "/families", "/family.html"):
             self._send_file("family.html")
+        elif path in ("/compare", "/compare/", "/compare.html"):
+            self._send_file("compare.html")
+        elif path == "/feed.xml":
+            p = config.REPORTS_DIR / "feed.xml"
+            if p.is_file():
+                self._send(200, p.read_bytes(),
+                           "application/atom+xml; charset=utf-8")
+            else:
+                self._send(404, b"not found")
         elif path.startswith(("/runs/", "/tasks/", "/models/", "/datasets/")) \
                 and path.endswith(".html"):
             rel = path.lstrip("/")

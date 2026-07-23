@@ -54,9 +54,18 @@ hosting the folder anywhere.
 - `models/<name>.html` — one model's per-task detail and its run-over-run matrix
 - `discriminate.html` — which tasks actually separate models, and who wins the
   ones that do
+- `compare.html` — head-to-head: pick any two models and see every task side by
+  side, with per-metric winners and per-task deltas
 - `info.html` — what everything means: scoring lanes, tiers, the metrics
-  glossary, the failure taxonomy, pricing caveats, and the changelog
+  glossary, the failure taxonomy, contamination guards, sample-size honesty,
+  pricing caveats, and the changelog
 - `data/…` — a read-only browser over the raw `runs/` tree
+- `feed.xml` — an Atom feed of models entering the benchmark, newest first
+
+Each score carries a 95% confidence band (±1.96·SE across the task set); models
+whose bands overlap the leader's are marked tied, because on a suite this size
+the top of the board is a near-tie, not a clean ranking. See `info.html` for the
+contamination guards and the exact sample size behind every number.
 
 ## The task suite
 
