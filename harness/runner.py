@@ -38,7 +38,8 @@ def active_run() -> str | None:
     runs/ is the one thing every process shares, so it is the honest lock.
     """
     from .util import read_json
-    for base in (config.RUNS_DIR, getattr(config, "SCOUTS_DIR", None)):
+    for base in (config.RUNS_DIR, getattr(config, "SCOUTS_DIR", None),
+                 getattr(config, "SPECIAL_DIR", None)):
         if not base or not base.is_dir():
             continue
         for run_dir in sorted(p for p in base.iterdir() if p.is_dir()):
@@ -46,6 +47,85 @@ def active_run() -> str | None:
             if manifest and not manifest.get("finished"):
                 return run_dir.name
     return None
+
+
+def _window_limited() -> dict[str, dict[str, str]]:
+    """{model: {task: reason}} for the cells a bigger WINDOW might rescue, across
+    the live runs/. Both qualifying modes are time-bound — the model just needed
+    more wall-clock:
+
+      * "silence" — legacy rumination_spiral: the claude CLI thought with no
+                    output until the (now retired) no-output guard killed it.
+                    Silence was never a spiral, only a too-tight window.
+      * "timeout" — hit the wall-clock deadline unrecovered (status stayed error
+                    through the last attempt); this is also where claude silence
+                    lands now that the guard is gone.
+
+    A runaway (token ceiling) and a repetition_loop (a real spiral, going in
+    circles) are both EXCLUDED: neither is fixed by more time."""
+    from .util import read_json
+    out: dict[str, dict[str, str]] = {}
+    if not config.RUNS_DIR.is_dir():
+        return {}
+    for mfile in config.RUNS_DIR.glob("*/*/*/metrics.json"):
+        d = read_json(mfile, {})
+        if d.get("status") != "error":
+            continue
+        atts = d.get("attempts") or [{}]
+        if atts[0].get("error_kind") == "rumination_spiral":
+            reason = "silence"
+        elif atts[-1].get("error_kind") == "timeout":
+            reason = "timeout"
+        else:
+            continue
+        model, task = mfile.parents[1].name, mfile.parent.name
+        cur = out.setdefault(model, {})
+        if cur.get(task) != "silence":
+            cur[task] = reason
+    return out
+
+
+def spiral_matrix() -> dict[str, list[str]]:
+    """{model: [task ids]} a wider window might rescue — rumination spirals plus
+    unrecovered timeouts. Feeds the Special window probe (which raises each
+    task's own timeout to the window, so both modes get the extra time). See
+    _window_limited for why runaways are excluded."""
+    return {m: sorted(t) for m, t in sorted(_window_limited().items())}
+
+
+def window_reasons() -> dict[str, dict[str, str]]:
+    """Per-cell reason ('spiral' | 'timeout') behind spiral_matrix(), so the
+    special page can label why each cell is in the probe set."""
+    return _window_limited()
+
+
+def turns_matrix() -> dict[str, list[str]]:
+    """{model: [agentic task ids]} where the model FAILED by exhausting the turn
+    budget — status=="max_turns" AND it did not reach a passing score. Feeds the
+    Special turn-budget probe, which re-runs these with a raised max_turns to see
+    whether more steps let the model converge.
+
+    A max_turns run that still PASSED (finished the work, just never emitted a
+    clean stop before the cap) is excluded — the cap didn't cost it anything. A
+    partial score IS included: extra turns might carry it the rest of the way.
+    This is the turn-count analog of _window_limited (time); the two are separate
+    because more time and more turns are different remedies."""
+    from .util import read_json
+    from . import assess
+    thr = assess.load_cfg().get("pass_threshold", 0.8)
+    out: dict[str, set] = {}
+    if not config.RUNS_DIR.is_dir():
+        return {}
+    for mfile in config.RUNS_DIR.glob("*/*/*/metrics.json"):
+        d = read_json(mfile, {})
+        if d.get("status") != "max_turns":
+            continue
+        sc = read_json(mfile.parent / "score.json", {})
+        score = sc.get("score")
+        if sc.get("status") == "scored" and score is not None and score >= thr:
+            continue
+        out.setdefault(mfile.parents[1].name, set()).add(mfile.parent.name)
+    return {m: sorted(t) for m, t in sorted(out.items())}
 
 
 class UsageLimitReached(Exception):
@@ -181,6 +261,8 @@ class TaskRunner:
             "error": None, "error_kind": None,
             "total_ms": round(res.total_ms, 1),
             "ttft_ms": round(res.ttft_ms, 1) if res.ttft_ms is not None else None,
+            "first_text_ms": (round(res.first_text_ms, 1)
+                              if res.first_text_ms is not None else None),
             "tokens_in": res.tokens_in, "tokens_out": res.tokens_out,
             "cache_read_tokens": res.cache_read_tokens,
             "cache_write_tokens": res.cache_write_tokens,
@@ -454,6 +536,8 @@ def _failure_mode(attempts: list[dict], status: str) -> str | None:
     if not attempts:
         return None
     last = attempts[-1]
+    if last.get("error_kind") == "repetition_loop":
+        return "repetition_loop"
     if last.get("error_kind") == "runaway":
         return "runaway"
     if last.get("error_kind") == "timeout":
@@ -659,6 +743,7 @@ def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
                 task_dir = run_dir / model.name / task.id
                 if task_dir.exists():
                     shutil.rmtree(task_dir, ignore_errors=True)
+                _record_dropped(run_dir, model.name, task.id, "rate_limit")
                 rl_streak += 1
                 progress(f"[{model.name}] {task.id}: provider rate-limited "
                          f"(429) - dropped UNSCORED, not zeroed. Re-run to fill "
@@ -685,6 +770,7 @@ def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
                 task_dir = run_dir / model.name / task.id
                 if task_dir.exists():
                     shutil.rmtree(task_dir, ignore_errors=True)
+                _record_dropped(run_dir, model.name, task.id, "usage_limit")
                 when = ul.reset_hint or (f"resets {_fmt_epoch(ul.reset_at)}"
                                          if ul.reset_at else "")
                 done = sum(1 for t in tasks
@@ -755,6 +841,54 @@ def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
                 pass
 
 
+def _record_dropped(run_dir: Path, model: str, task: str, reason: str) -> None:
+    """Append (model, task, reason) to the manifest's dropped_unscored list.
+
+    A task dropped WITHOUT a score — rate-limited (429) below the streak
+    threshold, or usage-capped — otherwise leaves a SILENT coverage gap: no
+    dir, no result row, and (below the streak) no stopped_models entry either,
+    so the cell just reads "not run" with no explanation. This makes the drop
+    queryable from run.json. Best-effort — a logging failure must not abort the
+    run. (Matches the existing unlocked read-modify-write of run.json; serial is
+    the default and only mode where the manifest is contended.)"""
+    from .util import read_json, write_json
+    try:
+        mani_path = run_dir / "run.json"
+        mani = read_json(mani_path, {})
+        lst = mani.setdefault("dropped_unscored", [])
+        entry = {"model": model, "task": task, "reason": reason}
+        if entry not in lst:
+            lst.append(entry)
+        write_json(mani_path, mani)
+    except OSError:
+        pass
+
+
+def _persisting_progress(run_dir: Path, progress, lock=None):
+    """Wrap a progress callback so every narration line is ALSO appended to
+    run_dir/run.log (timestamped), then forwarded to the original sink.
+
+    The output window only ever held the last ~200 lines in memory and nothing
+    reached disk, so a model that got skipped, rate-limited, usage-capped or
+    crashed left no record of WHY — the reason had to be reverse-engineered from
+    task timestamps. Lines are model-prefixed by their callers (`[<model>] …`),
+    so the run log is grep-able per model. Logging must never break a run, so
+    every write is best-effort. Thread-safe for parallel (per-model-thread) runs."""
+    import threading
+    lock = lock or threading.Lock()
+    log_path = run_dir / "run.log"
+
+    def wrapped(line):
+        try:
+            with lock, open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"{now_iso()} {line}\n")
+        except OSError:
+            pass
+        progress(line)
+
+    return wrapped
+
+
 def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = None,
               tag: str = "", progress=print, parallel: bool = False,
               cancel=None, force: bool = False) -> Path:
@@ -793,10 +927,12 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
 
     from .util import keep_awake, read_json
     with keep_awake():
-        _run_all(models, tasks, run_dir, progress, parallel, cancel)
+        _run_all(models, tasks, run_dir,
+                 _persisting_progress(run_dir, progress), parallel, cancel)
 
     disk = read_json(run_dir / "run.json", {})
-    for k in ("stopped_reason", "reset_at", "reset_hint", "stopped_models"):
+    for k in ("stopped_reason", "reset_at", "reset_hint", "stopped_models",
+              "dropped_unscored"):
         if k in disk:
             manifest[k] = disk[k]
     manifest["finished"] = now_iso()

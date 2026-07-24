@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Billiards</title>
+<style>
+  body { margin:0; background:#222; font-family:Arial,Helvetica,sans-serif; color:#fff; overflow:hidden; }
+  #ui { position:absolute; top:10px; left:10px; z-index:10; }
+  #ui button { padding:5px 10px; margin-right:10px; }
+  #instructions { position:absolute; bottom:10px; left:10px; right:10px; background:rgba(0,0,0,0.5); padding:8px; font-size:14px; }
+  canvas { display:block; margin:0 auto; background:#006400; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <button id="resetBtn">Reset / Rack</button>
+</div>
+<canvas id="c"></canvas>
+<div id="instructions">
+  Click &amp; drag the white cue ball backwards to aim. Release to shoot. Drag distance = power.
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  // ----- Simulation constants -----
+  const W = 800, H = 400, R = 10;
+  const FRICTION = 200; // px/s^2 deceleration
+  const ELASTICITY = 0.98; // ball‑ball restitution
+  const POCKET_R = 2 * R; // pocket radius
+  const POCKET_POS = [
+    {x:0, y:0},
+    {x:W/2, y:0},
+    {x:W, y:0},
+    {x:0, y:H},
+    {x:W/2, y:H},
+    {x:W, y:H}
+  ];
+
+  canvas.width = W;
+  canvas.height = H;
+
+  // ----- Global simulation object -----
+  const sim = {
+    W, H, R,
+    _balls: [],          // internal ball list
+    _animId: null,
+    _lastTime: null,
+    _paused: false,
+
+    reset(balls) {
+      this._balls = balls.map(b => ({
+        x: b.x, y: b.y,
+        vx: b.vx||0, vy: b.vy||0,
+        cue: !!b.cue,
+        potted: false
+      }));
+      this._draw();
+    },
+
+    step(dt) {
+      const balls = this._balls;
+      // move balls
+      for (let b of balls) if (!b.potted) {
+        // friction
+        const speed = Math.hypot(b.vx, b.vy);
+        if (speed > 0) {
+          const dec = FRICTION * dt;
+          const newSpeed = Math.max(0, speed - dec);
+          const scale = newSpeed / speed;
+          b.vx *= scale;
+          b.vy *= scale;
+        }
+        // position update
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+      }
+
+      // wall collisions
+      for (let b of balls) if (!b.potted) {
+        if (b.x < R) { b.x = R; b.vx = -b.vx; }
+        if (b.x > W - R) { b.x = W - R; b.vx = -b.vx; }
+        if (b.y < R) { b.y = R; b.vy = -b.vy; }
+        if (b.y > H - R) { b.y = H - R; b.vy = -b.vy; }
+      }
+
+      // ball‑ball collisions
+      for (let i=0;i<balls.length;i++) {
+        const bi = balls[i];
+        if (bi.potted) continue;
+        for (let j=i+1;j<balls.length;j++) {
+          const bj = balls[j];
+          if (bj.potted) continue;
+          const dx = bj.x - bi.x;
+          const dy = bj.y - bi.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < 2*R && dist > 0) {
+            // resolve overlap
+            const overlap = 2*R - dist;
+            const nx = dx / dist;
+            const ny = dy / dist;
+            bi.x -= nx * overlap/2;
+            bi.y -= ny * overlap/2;
+            bj.x += nx * overlap/2;
+            bj.y += ny * overlap/2;
+
+            // relative velocity
+            const rvx = bi.vx - bj.vx;
+            const rvy = bi.vy - bj.vy;
+            const velAlongNormal = rvx*nx + rvy*ny;
+            if (velAlongNormal > 0) continue; // moving apart
+
+            const e = ELASTICITY;
+            const jImpulse = -(1+e) * velAlongNormal / 2; // equal mass
+            const impulseX = jImpulse * nx;
+            const impulseY = jImpulse * ny;
+
+            bi.vx += impulseX;
+            bi.vy += impulseY;
+            bj.vx -= impulseX;
+            bj.vy -= impulseY;
+          }
+        }
+      }
+
+      // pocket detection
+      for (let b of balls) if (!b.potted) {
+        for (let p of POCKET_POS) {
+          const dx = b.x - p.x;
+          const dy = b.y - p.y;
+          if (Math.hypot(dx, dy) <= POCKET_R) {
+            b.potted = true;
+            b.vx = b.vy = 0;
+            break;
+          }
+        }
+      }
+
+      this._draw();
+    },
+
+    state() {
+      return this._balls.map(b => ({
+        x: b.x, y: b.y,
+        vx: b.vx, vy: b.vy,
+        potted: b.potted,
+        cue: b.cue
+      }));
+    },
+
+    shoot(vx, vy) {
+      const cue = this._balls.find(b=>b.cue && !b.potted);
+      if (cue) { cue.vx = vx; cue.vy = vy; }
+    },
+
+    pause() {
+      this._paused = true;
+      if (this._animId) cancelAnimationFrame(this._animId);
+      this._animId = null;
+    },
+
+    resume() {
+      if (!this._paused) return;
+      this._paused = false;
+      this._lastTime = null;
+      this._loop();
+    },
+
+    // internal draw routine
+    _draw() {
+      // felt
+      ctx.fillStyle = '#006400';
+      ctx.fillRect(0,0,W,H);
+
+      // rails
+      const rail = 20;
+      ctx.fillStyle = '#654321';
+      ctx.fillRect(0,0,W,rail);
+      ctx.fillRect(0,H-rail,W,rail);
+      ctx.fillRect(0,0,rail,H);
+      ctx.fillRect(W-rail,0,rail,H);
+
+      // pockets
+      ctx.fillStyle = '#000';
+      for (let p of POCKET_POS) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, POCKET_R, 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      // balls
+      for (let b of this._balls) if (!b.potted) {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, R, 0, Math.PI*2);
+        ctx.fillStyle = b.cue ? '#fff' : '#ff0000';
+        ctx.fill();
+        ctx.strokeStyle = '#000';
+        ctx.stroke();
+
+        // small dot on cue ball
+        if (b.cue) {
+          ctx.beginPath();
+          ctx.arc(b.x-3, b.y-3, 2, 0, Math.PI*2);
+          ctx.fillStyle = '#000';
+          ctx.fill();
+        }
+      }
+
+      // aim line (drawn by UI code)
+      if (dragging && aimPos) {
+        const cue = this._balls.find(b=>b.cue && !b.potted);
+        if (cue) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([5,5]);
+          ctx.beginPath();
+          ctx.moveTo(cue.x, cue.y);
+          ctx.lineTo(aimPos.x, aimPos.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+    },
+
+    // animation loop
+    _loop(timestamp) {
+      if (this._paused) return;
+      if (!this._lastTime) this._lastTime = timestamp;
+      const dt = (timestamp - this._lastTime) / 1000;
+      this._lastTime = timestamp;
+      this.step(dt);
+      this._animId = requestAnimationFrame(this._loop.bind(this));
+    }
+  };
+
+  // expose globally
+  window.sim = sim;
+
+  // ----- UI interaction -----
+  let dragging = false;
+  let dragStart = null;
+  let aimPos = null;
+  const MAX_SHOT_SPEED = 800; // px/s
+  const SHOT_SCALE = 5; // pixels of drag => px/s
+
+  canvas.addEventListener('mousedown', e => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const cue = sim._balls.find(b=>b.cue && !b.potted);
+    if (!cue) return;
+    const dist = Math.hypot(mx - cue.x, my - cue.y);
+    if (dist <= R && Math.hypot(cue.vx, cue.vy) < 5) { // only when cue is still
+      dragging = true;
+      dragStart = {x: cue.x, y: cue.y};
+      aimPos = {x: mx, y: my};
+    }
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const rect = canvas.getBoundingClientRect();
+    aimPos.x = e.clientX - rect.left;
+    aimPos.y = e.clientY - rect.top;
+    sim._draw(); // redraw with aim line
+  });
+
+  canvas.addEventListener('mouseup', e => {
+    if (!dragging) return;
+    dragging = false;
+    const dx = dragStart.x - aimPos.x;
+    const dy = dragStart.y - aimPos.y;
+    const mag = Math.hypot(dx, dy);
+    if (mag > 0) {
+      const speed = Math.min(mag * SHOT_SCALE, MAX_SHOT_SPEED);
+      const vx = (dx / mag) * speed;
+      const vy = (dy / mag) * speed;
+      sim.shoot(vx, vy);
+    }
+    aimPos = null;
+    sim._draw();
+  });
+
+  // Reset button
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    const startBalls = [
+      // cue ball
+      {x: W*0.25, y: H/2, cue:true},
+      // triangle of 5 balls
+      {x: W*0.75, y: H/2},
+      {x: W*0.75 + Math.sqrt(3)*R, y: H/2 - R},
+      {x: W*0.75 + Math.sqrt(3)*R, y: H/2 + R},
+      {x: W*0.75 + 2*Math.sqrt(3)*R, y: H/2 - 2*R},
+      {x: W*0.75 + 2*Math.sqrt(3)*R, y: H/2 + 2*R}
+    ];
+    sim.reset(startBalls);
+  });
+
+  // start simulation
+  sim.reset([
+    {x: W*0.25, y: H/2, cue:true},
+    {x: W*0.75, y: H/2},
+    {x: W*0.75 + Math.sqrt(3)*R, y: H/2 - R},
+    {x: W*0.75 + Math.sqrt(3)*R, y: H/2 + R},
+    {x: W*0.75 + 2*Math.sqrt(3)*R, y: H/2 - 2*R},
+    {x: W*0.75 + 2*Math.sqrt(3)*R, y: H/2 + 2*R}
+  ]);
+  sim.resume();
+
+})();
+</script>
+</body>
+</html>

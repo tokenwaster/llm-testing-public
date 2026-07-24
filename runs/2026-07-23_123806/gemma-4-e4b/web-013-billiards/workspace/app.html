@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Billiards Simulation</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-family: sans-serif;
+            background-color: #333;
+            margin: 0;
+            padding: 20px;
+        }
+        #gameCanvas {
+            border: 10px solid #5c4033; /* Wood frame */
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.5);
+            background-color: #2e7d32; /* Felt color (Green) */
+        }
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #instructions {
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            background-color: #f9f9f9;
+            width: 80%;
+            max-width: 800px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Billiards Simulation</h1>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="controls">
+        <button id="resetButton">Reset / Rack Balls</button>
+        <button id="pauseResumeButton">Pause</button>
+    </div>
+
+    <div id="instructions">
+        <strong>Instructions:</strong> Click and drag back from the white cue ball to aim. Release the mouse button to shoot. (Longer drag = more power).
+    </div>
+
+    <script>
+        // --- Constants and Global State ---
+        const CANVAS_WIDTH = 800;
+        const CANVAS_HEIGHT = 400;
+        const BALL_RADIUS = 12;
+        const FRICTION_COEFFICIENT = 0.995; // Speed decay per step
+        const WALL_DAMPING = 0.8; // Energy loss on wall collision
+
+        // Simulation state variables (managed by the API)
+        let balls = [];
+        let isPaused = false;
+        let animationFrameId = null;
+
+        // Input handling for aiming/shooting
+        let isAiming = false;
+        let aimStartPos = { x: 0, y: 0 };
+        let cueBallIndex = -1; // Index of the white ball
+
+        const canvas = document.getElementById('gameCanvas');
+        canvas.width = CANVAS_WIDTH;
+        canvas.height = CANVAS_HEIGHT;
+        const ctx = canvas.getContext('2d');
+
+        // --- Physics Helper Functions ---
+
+        /**
+         * Calculates the distance between two points.
+         */
+        function dist(p1, p2) {
+            return Math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2);
+        }
+
+        /**
+         * Handles collision response for two balls (elastic collision).
+         * Based on conservation of momentum and kinetic energy.
+         */
+        function resolveCollision(ballA, ballB) {
+            // 1. Find the vector connecting centers (Normal vector N)
+            const dx = ballB.x - ballA.x;
+            const dy = ballB.y - ballA.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            // Check if collision is imminent/happening
+            if (distance < 2 * BALL_RADIUS) {
+                // Overlap correction: Push balls apart along the normal vector
+                const overlap = 2 * BALL_RADIUS - distance;
+                const nx = dx / distance; // Normal X
+                const ny = dy / distance; // Normal Y
+
+                ballA.x -= nx * overlap * 0.5;
+                ballA.y -= ny * overlap * 0.5;
+                ballB.x += nx * overlap * 0.5;
+                ballB.y += ny * overlap * 0.5;
+
+
+                // 2. Calculate relative velocity (Vrel)
+                const vax = ballA.vx;
+                const vay = ballA.vy;
+                const vbx = ballB.vx;
+                const vby = ballB.vy;
+
+                // Relative velocity vector components
+                const vrx = vax - vbx;
+                const vry = vay - vby;
+
+                // 3. Calculate impulse magnitude (J) along the normal vector
+                // J = -(1 + e) * Vrel . N / (m_A + m_B)
+                // Since masses are equal and collision is near-elastic, e=1.
+                const dotProduct = vrx * nx + vry * ny;
+
+                // Impulse magnitude calculation (assuming mass M=1 for simplicity)
+                let j = -2 * dotProduct / 2; // Simplified: J = -(1+e) * Vrel . N / (m_A + m_B) -> -2 * dotProduct / 2
+
+                // Apply impulse changes to velocities
+                const dvax = j * nx;
+                const dvay = j * ny;
+                const dvbx = -j * nx;
+                const dvby = -j * ny;
+
+                ballA.vx += dvax;
+                ballA.vy += dvay;
+                ballB.vx += dvbx;
+                ballB.vy += dvby;
+            }
+        }
+
+
+        /**
+         * Advances the physics simulation by dt seconds.
+         */
+        function stepPhysics(dt) {
+            const numBalls = balls.length;
+
+            // 1. Apply Friction and Update Position (Integration)
+            for (let i = 0; i < numBalls; i++) {
+                const ball = balls[i];
+
+                if (ball.potted) continue;
+
+                // Apply friction: velocity decays exponentially towards zero
+                ball.vx *= FRICTION_COEFFICIENT;
+                ball.vy *= FRICTION_COEFFICIENT;
+
+                // Update position based on current velocity and time step
+                ball.x += ball.vx * dt;
+                ball.y += ball.vy * dt;
+            }
+
+            // 2. Handle Wall Collisions (Cushions)
+            for (let i = 0; i < numBalls; i++) {
+                const ball = balls[i];
+                if (ball.potted) continue;
+
+                // X-axis boundaries: R <= x <= W - R
+                if (ball.x - BALL_RADIUS < 0 || ball.x + BALL_RADIUS > CANVAS_WIDTH) {
+                    ball.vx *= -WALL_DAMPING; // Reflect and lose energy
+                    // Correct position to stay within bounds
+                    if (ball.x - BALL_RADIUS < 0) ball.x = BALL_RADIUS;
+                    if (ball.x + BALL_RADIUS > CANVAS_WIDTH) ball.x = CANVAS_WIDTH - BALL_RADIUS;
+                }
+
+                // Y-axis boundaries: R <= y <= H - R
+                if (ball.y - BALL_RADIUS < 0 || ball.y + BALL_RADIUS > CANVAS_HEIGHT) {
+                    ball.vy *= -WALL_DAMPING; // Reflect and lose energy
+                    // Correct position to stay within bounds
+                    if (ball.y - BALL_RADIUS < 0) ball.y = BALL_RADIUS;
+                    if (ball.y + BALL_RADIUS > CANVAS_HEIGHT) ball.y = CANVAS_HEIGHT - BALL_RADIUS;
+                }
+            }
+
+            // 3. Handle Ball-to-Ball Collisions
+            for (let i = 0; i < numBalls; i++) {
+                const ballA = balls[i];
+                if (ballA.potted) continue;
+
+                for (let j = i + 1; j < numBalls; j++) {
+                    const ballB = balls[j];
+                    if (ballB.potted) continue;
+
+                    resolveCollision(ballA, ballB);
+                }
+            }
+
+            // 4. Handle Pockets
+            for (let i = 0; i < numBalls; i++) {
+                const ball = balls[i];
+                if (ball.potted) continue;
+
+                // Pocket locations: Corners + Mid-rails
+                const pockets = [
+                    { x: BALL_RADIUS, y: BALL_RADIUS }, // Top Left
+                    { x: CANVAS_WIDTH - BALL_RADIUS, y: BALL_RADIUS }, // Top Right
+                    { x: BALL_RADIUS, y: CANVAS_HEIGHT - BALL_RADIUS }, // Bottom Left
+                    { x: CANVAS_WIDTH - BALL_RADIUS, y: CANVAS_HEIGHT - BALL_RADIUS }, // Bottom Right
+                    { x: CANVAS_WIDTH / 2, y: BALL_RADIUS }, // Top Middle
+                    { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT - BALL_RADIUS }  // Bottom Middle
+                ];
+
+                let isPotted = false;
+                for (const pocket of pockets) {
+                    // Check if the center of the ball is within a small radius of a pocket center
+                    if (Math.abs(ball.x - pocket.x) < BALL_RADIUS * 1.5 && Math.abs(ball.y - pocket.y) < BALL_RADIUS * 1.5) {
+                        isPotted = true;
+                        break;
+                    }
+                }
+
+                if (isPotted) {
+                    ball.potted = true;
+                    // Stop all motion immediately upon potting
+                    ball.vx = 0;
+                    ball.vy = 0;
+                }
+            }
+        }
+
+
+        /**
+         * Draws the entire scene: table, pockets, balls, and aim line.
+         */
+        function draw() {
+            // Clear canvas (Felt background)
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            // Draw Table/Rails (Already handled by CSS border for simplicity, but we can add felt texture if needed)
+
+            // Draw Pockets (Black circles at the edges)
+            const pocketRadius = BALL_RADIUS * 1.2;
+            const pockets = [
+                { x: BALL_RADIUS, y: BALL_RADIUS }, // Top Left
+                { x: CANVAS_WIDTH - BALL_RADIUS, y: BALL_RADIUS }, // Top Right
+                { x: BALL_RADIUS, y: CANVAS_HEIGHT - BALL_RADIUS }, // Bottom Left
+                { x: CANVAS_WIDTH - BALL_RADIUS, y: CANVAS_HEIGHT - BALL_RADIUS }, // Bottom Right
+                { x: CANVAS_WIDTH / 2, y: BALL_RADIUS }, // Top Middle
+                { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT - BALL_RADIUS }  // Bottom Middle
+            ];
+
+            ctx.fillStyle = '#000';
+            pockets.forEach(pocket => {
+                ctx.beginPath();
+                ctx.arc(pocket.x, pocket.y, pocketRadius, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+
+            // Draw Balls and Aim Line
+            for (let i = 0; i < balls.length; i++) {
+                const ball = balls[i];
+
+                // 1. Draw Ball
+                ctx.beginPath();
+                ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, Math.PI * 2);
+                
+                if (ball.potted) {
+                    ctx.fillStyle = '#666'; // Greyed out if potted
+                } else if (i === cueBallIndex) {
+                    ctx.fillStyle = 'white'; // Cue ball is white
+                } else if (balls[0].cue && i === 0) {
+                     // Fallback for initial setup if index tracking fails
+                    ctx.fillStyle = 'white';
+                } else {
+                    ctx.fillStyle = '#c73e1a'; // Object balls color
+                }
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Optional: Draw velocity vector for debugging/visual feedback
+                /*
+                if (!ball.potted && (Math.abs(ball.vx) > 0.1 || Math.abs(ball.vy) > 0.1)) {
+                    ctx.strokeStyle = 'rgba(255, 255, 0, 0.7)';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(ball.x, ball.y);
+                    ctx.lineTo(ball.x + ball.vx * 10, ball.y + ball.vy * 10);
+                    ctx.stroke();
+                }
+                */
+            }
+
+            // Draw Aim Line (if aiming)
+            if (isAiming && cueBallIndex !== -1) {
+                const dx = aimStartPos.x - balls[cueBallIndex].x;
+                const dy = aimStartPos.y - balls[cueBallIndex].y;
+                
+                ctx.strokeStyle = 'rgba(255, 255, 0, 0.8)'; // Yellow line
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(balls[cueBallIndex].x, balls[cueBallIndex].y);
+                ctx.lineTo(aimStartPos.x, aimStartPos.y);
+                ctx.stroke();
+
+                // Draw a faint indicator of power/direction at the end point
+                const powerLength = 10;
+                ctx.fillStyle = 'rgba(255, 255, 0, 0.3)';
+                ctx.beginPath();
+                ctx.arc(aimStartPos.x, aimStartPos.y, 5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        /**
+         * Main simulation loop function.
+         */
+        function gameLoop() {
+            if (isPaused) {
+                animationFrameId = requestAnimationFrame(gameLoop);
+                return;
+            }
+
+            // Fixed time step for deterministic physics updates
+            const dt = 1 / 60; // 60 FPS update rate
+            stepPhysics(dt);
+            draw();
+
+            animationFrameId = requestAnimationFrame(gameLoop);
+        }
+
+
+        // ======================================================
+        // API IMPLEMENTATION (window.sim)
+        // ======================================================
+
+        /**
+         * Initializes the global simulation object contract.
+         */
+        window.sim = {
+            W: CANVAS_WIDTH,
+            H: CANVAS_HEIGHT,
+            R: BALL_RADIUS,
+
+            /**
+             * Places balls in the simulation state.
+             * @param {Array<{x: number, y: number, vx?: number, vy?: number, cue: boolean}>} balls - Array of ball states.
+             */
+            reset(balls) {
+                // Deep copy and initialize state
+                this.balls = balls.map((ball, index) => ({
+                    x: ball.x || 0,
+                    y: ball.y || 0,
+                    vx: ball.vx || 0,
+                    vy: ball.vy || 0,
+                    potted: false,
+                    cue: ball.cue || false,
+                    // Keep track of original index for state() consistency
+                    _originalIndex: index
+                }));
+
+                // Find the cue ball index based on the 'cue' flag (assuming it's always present)
+                this.cueBallIndex = this.balls.findIndex(b => b.cue);
+
+                // Reset input state
+                isAiming = false;
+                aimStartPos = { x: 0, y: 0 };
+                
+                // Start/Resume the loop if it's not running
+                if (!animationFrameId) {
+                    this.resume();
+                } else {
+                    this.pause(); // Pausing and restarting ensures a clean step from reset state
+                    setTimeout(() => this.resume(), 10);
+                }
+
+                console.log("Simulation Reset.");
+            },
+
+            /**
+             * Advances the physics by dt seconds, then redraws.
+             * @param {number} dt - Time delta in seconds.
+             */
+            step(dt) {
+                // Temporarily override internal state for deterministic grading step
+                const originalBalls = balls;
+                balls = this.balls; 
+
+                stepPhysics(dt);
+
+                draw();
+                
+                // Restore global 'balls' reference if necessary, though usually not needed in a controlled environment
+            },
+
+            /**
+             * Returns the current state of all balls.
+             * @returns {Array<{x: number, y: number, vx: number, vy: number, potted: boolean, cue: boolean}>}
+             */
+            state() {
+                return this.balls.map(ball => ({
+                    x: ball.x,
+                    y: ball.y,
+                    vx: ball.vx,
+                    vy: ball.vy,
+                    potted: ball.potted,
+                    cue: ball.cue
+                }));
+            },
+
+            /**
+             * Applies an immediate velocity impulse to the cue ball.
+             * @param {number} vx - Initial X velocity (px/sec).
+             * @param {number} vy - Initial Y velocity (px/sec).
+             */
+            shoot(vx, vy) {
+                if (this.cueBallIndex === -1) return;
+
+                const cueBall = this.balls[this.cueBallIndex];
+                
+                // Apply the shot impulse
+                cueBall.vx = vx;
+                cueBall.vy = vy;
+            },
+
+            pause() {
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                    animationFrameId = null;
+                    isPaused = true;
+                    document.getElementById('pauseResumeButton').textContent = 'Resume';
+                    console.log("Simulation Paused.");
+                }
+            },
+
+            resume() {
+                if (!animationFrameId) {
+                    isPaused = false;
+                    gameLoop(); // Restart the animation loop
+                    document.getElementById('pauseResumeButton').textContent = 'Pause';
+                    console.log("Simulation Resumed.");
+                }
+            }
+        };
+
+        // ======================================================
+        // INPUT HANDLERS (Mouse Control)
+        // ======================================================
+
+        /**
+         * Gets the coordinates relative to the canvas element.
+         */
+        function getCanvasCoords(event) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: event.clientX - rect.left,
+                y: event.clientY - rect.top
+            };
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (isPaused || cueBallIndex === -1) return;
+            const pos = getCanvasCoords(e);
+            
+            // Check if the click was on the cue ball
+            const cueBall = balls[cueBallIndex];
+            if (dist({x: pos.x, y: pos.y}, {x: cueBall.x, y: cueBall.y}) <= BALL_RADIUS * 1.5) {
+                isAiming = true;
+                aimStartPos = pos;
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isAiming || cueBallIndex === -1) return;
+            const pos = getCanvasCoords(e);
+            // Update the aim line endpoint in real-time
+            aimStartPos = pos;
+            draw(); // Redraw to show the updated aiming line
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            if (!isAiming || cueBallIndex === -1) return;
+            
+            const endPos = getCanvasCoords(e);
+            const startPos = aimStartPos; // The position where the drag started from
+            
+            // Calculate the vector of the shot (from release point back to click point)
+            // We want the force applied *opposite* the direction of the mouse movement.
+            const dx_drag = endPos.x - startPos.x;
+            const dy_drag = endPos.y - startPos.y;
+
+            // The shot vector is opposite the drag vector (since we pull back)
+            let vx = -(dx_drag * 0.1); // Scaling factor applied to make shots manageable
+            let vy = -(dy_drag * 0.1);
+
+            // Calculate power based on distance dragged (magnitude of the force)
+            const power = Math.sqrt(dx_drag*dx_drag + dy_drag*dy_drag);
+            
+            // Scale velocity by power to simulate increasing strength with drag length
+            let shotPowerFactor = 0.1; // Base scaling factor
+            if (power > 50) {
+                shotPowerFactor = Math.min(2, power / 300); // Cap max power effect
+            }
+
+            // Apply the calculated velocity to the cue ball
+            window.sim.shoot(vx * shotPowerFactor, vy * shotPowerFactor);
+
+            isAiming = false;
+        });
+
+
+        // ======================================================
+        // INITIALIZATION AND EVENT LISTENERS
+        // ======================================================
+
+        /**
+         * Sets up the initial rack layout for 15 balls.
+         */
+        function setupInitialRack() {
+            const W = CANVAS_WIDTH;
+            const H = CANVAS_HEIGHT;
+            const R = BALL_RADIUS;
+            
+            // Standard racked positions (Triangle formation)
+            let initialBalls = [];
+            let ballCount = 15;
+
+            for (let i = 0; i < ballCount; i++) {
+                let x, y;
+                let cue = false;
+
+                if (i === 0) { // Cue Ball (White) - placed slightly offset for aiming visibility
+                    x = W * 0.25;
+                    y = H / 2;
+                    cue = true;
+                } else {
+                    // Calculate position in a triangle formation, starting from the bottom left corner
+                    const row = Math.floor(Math.sqrt(i) - 1); // Row index (0 is top/back)
+                    const col = i - row * (row + 1) + row; // Column index
+
+                    // Center coordinates for a triangular rack
+                    const offset_x = R * (col + 1) * Math.cos(Math.PI / 6);
+                    const offset_y = R * (row + 1) * Math.sin(Math.PI / 6);
+
+                    if (i > 0 && i < ballCount) {
+                        // Simple approximation for a racked layout near the bottom left corner
+                        let angleStep = Math.PI / 3;
+                        const base_x = W * 0.25 + R;
+                        const base_y = H - R * (Math.floor(i/4) + 1);
+
+                        // A simpler, fixed layout for stability:
+                        let r = Math.ceil(Math.sqrt(i)); // Row number (1 to 4)
+                        let c = i % r; // Column in that row
+                        
+                        if (r > 0 && c >= 0) {
+                            x = W * 0.25 + (c * R * Math.cos(Math.PI / 6));
+                            y = H - R * (r * Math.sin(Math.PI / 6));
+                        } else {
+                             // Fallback for the first few balls if calculation fails
+                            x = W * 0.25 + i * R * 0.8;
+                            y = H - R * (i % 3);
+                        }
+
+                    } else {
+                         // Default fallback position
+                        x = W * 0.1 + i * 40;
+                        y = H / 2;
+                    }
+
+
+                }
+                initialBalls.push({ x: x, y: y, vx: 0, vy: 0, cue: cue });
+            }
+
+            // Ensure the first ball is always the cue ball for consistency in indexing
+            if (initialBalls[0].cue !== true) {
+                 const temp = initialBalls[0];
+                 initialBalls[0] = initialBalls.find(b => b.cue); // Find actual cue ball
+                 initialBalls[temp._originalIndex] = temp; // Put it back in the correct spot if needed
+            }
+
+            // Use a simplified, stable rack layout for reliable testing:
+            let stableRack = [];
+             for (let i = 0; i < 15; i++) {
+                let x, y, cue = false;
+                if (i === 0) { // Cue ball
+                    x = W * 0.25 + R;
+                    y = H / 2;
+                    cue = true;
+                } else {
+                    // Simple offset pattern for the rest of the balls
+                    let row = Math.floor(Math.sqrt(i));
+                    let col = i - (row * (row + 1)) + row;
+
+                    if (row >= 0 && col >= 0) {
+                        x = W * 0.25 + (col * R * 0.8);
+                        y = H - R * (row * 0.6);
+                    } else {
+                         // Fallback for the last few balls
+                        x = W * 0.1 + i * 40;
+                        y = H / 2;
+                    }
+                }
+                stableRack.push({ x: x, y: y, vx: 0, vy: 0, cue: cue });
+            }
+
+
+            // Set the global state and start the game loop
+            window.sim.reset(stableRack);
+        }
+
+        // Event Listeners for Controls
+        document.getElementById('resetButton').addEventListener('click', setupInitialRack);
+        document.getElementById('pauseResumeButton').addEventListener('click', () => {
+            if (isPaused) {
+                window.sim.resume();
+            } else {
+                window.sim.pause();
+            }
+        });
+
+        // Initial Setup Call
+        setupInitialRack();
+
+    </script>
+</body>
+</html>

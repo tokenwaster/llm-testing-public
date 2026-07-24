@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canvas Billiards</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background:
+      radial-gradient(circle at 50% 10%, #26313a 0, #151b20 45%, #090c0f 100%);
+    color: #f5f7f8;
+  }
+
+  .app {
+    width: min(1100px, 96vw);
+    padding: 20px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 12px;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(1.35rem, 3vw, 2.15rem);
+    letter-spacing: .03em;
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  button {
+    border: 1px solid #e9c377;
+    border-radius: 9px;
+    padding: 10px 16px;
+    background: linear-gradient(#9b632d, #6e3d18);
+    color: white;
+    font: inherit;
+    font-weight: 750;
+    cursor: pointer;
+    box-shadow: 0 3px 9px #0008, inset 0 1px #fff4;
+  }
+
+  button:hover { filter: brightness(1.13); }
+  button:active { transform: translateY(1px); }
+
+  .table-wrap {
+    overflow: hidden;
+    border-radius: 24px;
+    box-shadow: 0 20px 50px #000b, 0 0 0 1px #ffffff18;
+    background: #301b0f;
+  }
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    touch-action: none;
+    cursor: crosshair;
+    user-select: none;
+  }
+
+  .below {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 4px 0;
+  }
+
+  .instructions {
+    color: #dbe5e5;
+    line-height: 1.45;
+  }
+
+  .instructions strong { color: #ffe099; }
+
+  #status {
+    min-width: 150px;
+    text-align: right;
+    color: #8ff0c5;
+    font-weight: 700;
+  }
+
+  @media (max-width: 650px) {
+    header, .below {
+      align-items: stretch;
+      flex-direction: column;
+      grid-template-columns: 1fr;
+    }
+
+    header { display: flex; }
+    .controls { justify-content: space-between; }
+    #status { text-align: left; }
+  }
+</style>
+</head>
+<body>
+<main class="app">
+  <header>
+    <h1>Canvas Billiards</h1>
+    <div class="controls">
+      <button id="resetButton" type="button">Reset / rack</button>
+    </div>
+  </header>
+
+  <div class="table-wrap">
+    <canvas id="table" width="960" height="560" aria-label="Playable billiards table"></canvas>
+  </div>
+
+  <div class="below">
+    <div class="instructions">
+      <strong>How to shoot:</strong> press the white cue ball, drag backward to
+      choose direction and power, then release. Longer drag = harder shot.
+    </div>
+    <div id="status">Ready</div>
+  </div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const W = 900;
+  const H = 500;
+  const R = 11;
+  const OX = 30;
+  const OY = 30;
+  const CW = W + OX * 2;
+  const CH = H + OY * 2;
+  const POCKET_R = 27;
+  const FRICTION = 22;
+  const STOP_SPEED = 1.25;
+  const MAX_SHOT_SPEED = 1400;
+
+  const canvas = document.getElementById("table");
+  const ctx = canvas.getContext("2d");
+  const statusEl = document.getElementById("status");
+  const resetButton = document.getElementById("resetButton");
+
+  const pockets = [
+    [0, 0],
+    [W / 2, 0],
+    [W, 0],
+    [0, H],
+    [W / 2, H],
+    [W, H]
+  ];
+
+  const colors = [
+    "#f3cf28", "#276fd2", "#d92d32", "#7046ae", "#f17c22",
+    "#16884f", "#7b1e27", "#18191b", "#f3cf28", "#276fd2",
+    "#d92d32", "#7046ae", "#f17c22", "#16884f", "#7b1e27"
+  ];
+
+  let balls = [];
+  let running = true;
+  let rafId = 0;
+  let lastFrame = performance.now();
+
+  let aiming = false;
+  let pointerId = null;
+  let aimStart = { x: 0, y: 0 };
+  let aimCurrent = { x: 0, y: 0 };
+
+  function finiteNumber(value, fallback = 0) {
+    return Number.isFinite(Number(value)) ? Number(value) : fallback;
+  }
+
+  function makeRack() {
+    const result = [{
+      x: 235,
+      y: H / 2,
+      vx: 0,
+      vy: 0,
+      cue: true
+    }];
+
+    const apexX = 625;
+    const rowStep = Math.sqrt(3) * R + 1;
+    const spacing = R * 2 + 1;
+
+    for (let row = 0; row < 5; row++) {
+      for (let i = 0; i <= row; i++) {
+        result.push({
+          x: apexX + row * rowStep,
+          y: H / 2 + (i - row / 2) * spacing,
+          vx: 0,
+          vy: 0,
+          cue: false
+        });
+      }
+    }
+    return result;
+  }
+
+  function reset(inputBalls) {
+    const source = Array.isArray(inputBalls) ? inputBalls : [];
+    balls = source.map((b, index) => ({
+      x: finiteNumber(b && b.x, W / 2),
+      y: finiteNumber(b && b.y, H / 2),
+      vx: finiteNumber(b && b.vx, 0),
+      vy: finiteNumber(b && b.vy, 0),
+      potted: false,
+      cue: !!(b && b.cue),
+      index
+    }));
+    aiming = false;
+    pointerId = null;
+    draw();
+  }
+
+  function getCueBall() {
+    for (const ball of balls) {
+      if (ball.cue) return ball;
+    }
+    return null;
+  }
+
+  function allStopped() {
+    for (const ball of balls) {
+      if (!ball.potted && (ball.vx * ball.vx + ball.vy * ball.vy) > 4) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function pocketOrCushion(ball) {
+    if (ball.potted) return;
+
+    for (const pocket of pockets) {
+      const dx = ball.x - pocket[0];
+      const dy = ball.y - pocket[1];
+      if (dx * dx + dy * dy <= POCKET_R * POCKET_R) {
+        ball.potted = true;
+        ball.vx = 0;
+        ball.vy = 0;
+        return;
+      }
+    }
+
+    if (ball.x < R) {
+      ball.x = R + (R - ball.x);
+      ball.vx = Math.abs(ball.vx);
+    } else if (ball.x > W - R) {
+      ball.x = W - R - (ball.x - (W - R));
+      ball.vx = -Math.abs(ball.vx);
+    }
+
+    if (ball.y < R) {
+      ball.y = R + (R - ball.y);
+      ball.vy = Math.abs(ball.vy);
+    } else if (ball.y > H - R) {
+      ball.y = H - R - (ball.y - (H - R));
+      ball.vy = -Math.abs(ball.vy);
+    }
+
+    ball.x = Math.max(R, Math.min(W - R, ball.x));
+    ball.y = Math.max(R, Math.min(H - R, ball.y));
+  }
+
+  function resolveBallCollisions() {
+    const minDistance = R * 2;
+    const minDistanceSq = minDistance * minDistance;
+
+    for (let i = 0; i < balls.length; i++) {
+      const a = balls[i];
+      if (a.potted) continue;
+
+      for (let j = i + 1; j < balls.length; j++) {
+        const b = balls[j];
+        if (b.potted) continue;
+
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let distSq = dx * dx + dy * dy;
+
+        if (distSq >= minDistanceSq) continue;
+
+        let dist;
+        let nx;
+        let ny;
+
+        if (distSq < 1e-14) {
+          dist = 0;
+          nx = ((i + j) & 1) ? 1 : 0;
+          ny = nx ? 0 : 1;
+        } else {
+          dist = Math.sqrt(distSq);
+          nx = dx / dist;
+          ny = dy / dist;
+        }
+
+        const overlap = minDistance - dist;
+        const correction = overlap * 0.5 + 1e-7;
+        a.x -= nx * correction;
+        a.y -= ny * correction;
+        b.x += nx * correction;
+        b.y += ny * correction;
+
+        const relativeNormalVelocity =
+          (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+
+        if (relativeNormalVelocity < 0) {
+          // Equal masses and restitution 1: exchange the normal components.
+          const impulse = -relativeNormalVelocity;
+          a.vx -= impulse * nx;
+          a.vy -= impulse * ny;
+          b.vx += impulse * nx;
+          b.vy += impulse * ny;
+        }
+      }
+    }
+  }
+
+  function applyFriction(ball, dt) {
+    if (ball.potted) return;
+
+    const speed = Math.hypot(ball.vx, ball.vy);
+    if (speed <= STOP_SPEED) {
+      ball.vx = 0;
+      ball.vy = 0;
+      return;
+    }
+
+    const nextSpeed = Math.max(0, speed - FRICTION * dt);
+    if (nextSpeed <= STOP_SPEED) {
+      ball.vx = 0;
+      ball.vy = 0;
+    } else {
+      const scale = nextSpeed / speed;
+      ball.vx *= scale;
+      ball.vy *= scale;
+    }
+  }
+
+  function step(dt) {
+    dt = finiteNumber(dt, 0);
+    if (dt <= 0) {
+      draw();
+      return;
+    }
+
+    let maxSpeed = 0;
+    for (const ball of balls) {
+      if (!ball.potted) {
+        maxSpeed = Math.max(maxSpeed, Math.hypot(ball.vx, ball.vy));
+      }
+    }
+
+    const timeSlices = Math.ceil(dt * 180);
+    const travelSlices = Math.ceil((maxSpeed * dt) / (R * 0.30));
+    const slices = Math.max(1, timeSlices, travelSlices);
+    const h = dt / slices;
+
+    for (let slice = 0; slice < slices; slice++) {
+      for (const ball of balls) {
+        if (ball.potted) continue;
+        ball.x += ball.vx * h;
+        ball.y += ball.vy * h;
+      }
+
+      for (const ball of balls) pocketOrCushion(ball);
+
+      // Several deterministic passes improve simultaneous rack collisions.
+      for (let pass = 0; pass < 4; pass++) {
+        resolveBallCollisions();
+        for (const ball of balls) pocketOrCushion(ball);
+      }
+
+      for (const ball of balls) applyFriction(ball, h);
+    }
+
+    draw();
+  }
+
+  function state() {
+    return balls.map(ball => ({
+      x: ball.x,
+      y: ball.y,
+      vx: ball.vx,
+      vy: ball.vy,
+      potted: ball.potted,
+      cue: ball.cue
+    }));
+  }
+
+  function shoot(vx, vy) {
+    const cue = getCueBall();
+    if (!cue || cue.potted) return;
+    cue.vx = finiteNumber(vx, 0);
+    cue.vy = finiteNumber(vy, 0);
+    aiming = false;
+    draw();
+  }
+
+  function pause() {
+    running = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
+  }
+
+  function resume() {
+    if (running && rafId) return;
+    running = true;
+    lastFrame = performance.now();
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function frame(now) {
+    if (!running) return;
+    const dt = Math.min(0.033, Math.max(0, (now - lastFrame) / 1000));
+    lastFrame = now;
+    step(dt);
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function roundedRect(x, y, w, h, radius) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+  }
+
+  function drawTable() {
+    ctx.clearRect(0, 0, CW, CH);
+
+    const wood = ctx.createLinearGradient(0, 0, 0, CH);
+    wood.addColorStop(0, "#9d6030");
+    wood.addColorStop(0.45, "#633515");
+    wood.addColorStop(1, "#3b1e0e");
+    ctx.fillStyle = wood;
+    roundedRect(0, 0, CW, CH, 25);
+    ctx.fill();
+
+    ctx.strokeStyle = "#d49753";
+    ctx.lineWidth = 3;
+    roundedRect(6, 6, CW - 12, CH - 12, 20);
+    ctx.stroke();
+
+    const felt = ctx.createRadialGradient(
+      OX + W * 0.48, OY + H * 0.43, 20,
+      OX + W * 0.5, OY + H * 0.5, W * 0.72
+    );
+    felt.addColorStop(0, "#18865e");
+    felt.addColorStop(0.65, "#0d684a");
+    felt.addColorStop(1, "#074c38");
+    ctx.fillStyle = felt;
+    ctx.fillRect(OX, OY, W, H);
+
+    ctx.strokeStyle = "#043a2a";
+    ctx.lineWidth = 7;
+    ctx.strokeRect(OX + 3.5, OY + 3.5, W - 7, H - 7);
+
+    ctx.save();
+    ctx.translate(OX, OY);
+    for (const [px, py] of pockets) {
+      const g = ctx.createRadialGradient(px - 4, py - 4, 2, px, py, POCKET_R);
+      g.addColorStop(0, "#080909");
+      g.addColorStop(0.7, "#020303");
+      g.addColorStop(1, "#000");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(px, py, POCKET_R, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#1e160f";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.fillStyle = "#e8bc70";
+    const sights = [
+      [W * .25, 15], [W * .75, 15],
+      [W * .25, H - 15], [W * .75, H - 15],
+      [15, H * .25], [15, H * .75],
+      [W - 15, H * .25], [W - 15, H * .75]
+    ];
+    ctx.save();
+    ctx.translate(OX, OY);
+    for (const [x, y] of sights) {
+      ctx.beginPath();
+      ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function ballColor(ball, visibleIndex) {
+    return ball.cue ? "#f7f7ee" : colors[visibleIndex % colors.length];
+  }
+
+  function drawBall(ball, visibleIndex) {
+    const x = OX + ball.x;
+    const y = OY + ball.y;
+
+    ctx.save();
+    ctx.shadowColor = "#0009";
+    ctx.shadowBlur = 7;
+    ctx.shadowOffsetX = 3;
+    ctx.shadowOffsetY = 4;
+
+    const base = ballColor(ball, visibleIndex);
+    const gradient = ctx.createRadialGradient(
+      x - R * .38, y - R * .42, 1,
+      x, y, R * 1.12
+    );
+    gradient.addColorStop(0, "#ffffff");
+    gradient.addColorStop(.2, base);
+    gradient.addColorStop(1, ball.cue ? "#aaa99e" : "#121212");
+
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(x, y, R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowColor = "transparent";
+
+    ctx.strokeStyle = "#0008";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    if (!ball.cue) {
+      ctx.fillStyle = "#f2eee0";
+      ctx.beginPath();
+      ctx.arc(x, y, R * .38, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#171717";
+      ctx.font = `bold ${Math.max(7, R * .62)}px system-ui`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(visibleIndex + 1), x, y + .3);
+    }
+
+    ctx.restore();
+  }
+
+  function drawAimGuide() {
+    if (!aiming) return;
+
+    const cue = getCueBall();
+    if (!cue || cue.potted) return;
+
+    let dx = aimStart.x - aimCurrent.x;
+    let dy = aimStart.y - aimCurrent.y;
+    const drag = Math.hypot(dx, dy);
+    if (drag < 0.1) return;
+
+    const nx = dx / drag;
+    const ny = dy / drag;
+    const guideLength = Math.min(560, 130 + drag * 2.2);
+    const cx = OX + cue.x;
+    const cy = OY + cue.y;
+
+    ctx.save();
+
+    ctx.setLineDash([10, 7]);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(255,255,255,.82)";
+    ctx.beginPath();
+    ctx.moveTo(cx + nx * (R + 3), cy + ny * (R + 3));
+    ctx.lineTo(cx + nx * guideLength, cy + ny * guideLength);
+    ctx.stroke();
+
+    ctx.setLineDash([]);
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "#d7a35b";
+    ctx.beginPath();
+    ctx.moveTo(cx - nx * (R + 3), cy - ny * (R + 3));
+    ctx.lineTo(
+      OX + aimCurrent.x + nx * 12,
+      OY + aimCurrent.y + ny * 12
+    );
+    ctx.stroke();
+
+    const power = Math.min(1, drag * 7 / MAX_SHOT_SPEED);
+    const barW = 180;
+    const barX = OX + W / 2 - barW / 2;
+    const barY = OY + H - 35;
+
+    ctx.fillStyle = "#0009";
+    ctx.fillRect(barX - 3, barY - 3, barW + 6, 18);
+    const powerGradient = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    powerGradient.addColorStop(0, "#55df86");
+    powerGradient.addColorStop(.65, "#f4d34e");
+    powerGradient.addColorStop(1, "#ef493d");
+    ctx.fillStyle = powerGradient;
+    ctx.fillRect(barX, barY, barW * power, 12);
+    ctx.strokeStyle = "#fff8";
+    ctx.strokeRect(barX, barY, barW, 12);
+
+    ctx.restore();
+  }
+
+  function updateStatus() {
+    const cue = getCueBall();
+    const pottedObjects = balls.filter(b => b.potted && !b.cue).length;
+
+    if (cue && cue.potted) {
+      statusEl.textContent = `Cue ball potted · Reset to continue`;
+    } else if (aiming) {
+      const power = Math.min(
+        100,
+        Math.round(Math.hypot(
+          aimStart.x - aimCurrent.x,
+          aimStart.y - aimCurrent.y
+        ) * 7 / MAX_SHOT_SPEED * 100)
+      );
+      statusEl.textContent = `Aiming · Power ${power}%`;
+    } else if (!allStopped()) {
+      statusEl.textContent = `Balls moving · Potted ${pottedObjects}`;
+    } else {
+      statusEl.textContent = `Ready · Potted ${pottedObjects}`;
+    }
+  }
+
+  function draw() {
+    drawTable();
+    drawAimGuide();
+
+    let objectIndex = 0;
+    for (const ball of balls) {
+      if (ball.potted) continue;
+      drawBall(ball, ball.cue ? 0 : objectIndex++);
+    }
+
+    updateStatus();
+  }
+
+  function pointerPosition(event) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * canvas.width / rect.width - OX,
+      y: (event.clientY - rect.top) * canvas.height / rect.height - OY
+    };
+  }
+
+  canvas.addEventListener("pointerdown", event => {
+    if (aiming || !allStopped()) return;
+
+    const cue = getCueBall();
+    if (!cue || cue.potted) return;
+
+    const p = pointerPosition(event);
+    if (Math.hypot(p.x - cue.x, p.y - cue.y) > R * 1.65) return;
+
+    aiming = true;
+    pointerId = event.pointerId;
+    aimStart = { x: p.x, y: p.y };
+    aimCurrent = { x: p.x, y: p.y };
+    canvas.setPointerCapture(event.pointerId);
+    draw();
+    event.preventDefault();
+  });
+
+  canvas.addEventListener("pointermove", event => {
+    if (!aiming || event.pointerId !== pointerId) return;
+    const p = pointerPosition(event);
+    aimCurrent = { x: p.x, y: p.y };
+    draw();
+    event.preventDefault();
+  });
+
+  canvas.addEventListener("pointerup", event => {
+    if (!aiming || event.pointerId !== pointerId) return;
+
+    const p = pointerPosition(event);
+    aimCurrent = { x: p.x, y: p.y };
+
+    let vx = (aimStart.x - aimCurrent.x) * 7;
+    let vy = (aimStart.y - aimCurrent.y) * 7;
+    const speed = Math.hypot(vx, vy);
+
+    aiming = false;
+    pointerId = null;
+
+    if (speed >= 25) {
+      if (speed > MAX_SHOT_SPEED) {
+        const scale = MAX_SHOT_SPEED / speed;
+        vx *= scale;
+        vy *= scale;
+      }
+      shoot(vx, vy);
+    } else {
+      draw();
+    }
+
+    event.preventDefault();
+  });
+
+  canvas.addEventListener("pointercancel", event => {
+    if (event.pointerId !== pointerId) return;
+    aiming = false;
+    pointerId = null;
+    draw();
+  });
+
+  resetButton.addEventListener("click", () => reset(makeRack()));
+
+  window.sim = {
+    W,
+    H,
+    R,
+    reset,
+    step,
+    state,
+    shoot,
+    pause,
+    resume
+  };
+
+  reset(makeRack());
+  rafId = requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

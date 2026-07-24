@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Billiards Pro</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #222;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            color: white;
+            font-ray: sans-serif;
+            overflow: hidden;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 50px rgba(0,0,0,0.5);
+            border: 15px solid #5d3a1a;
+            border-radius: 10px;
+        }
+        canvas {
+            display: block;
+            background: #2e7d32;
+            cursor: crosshair;
+        }
+        #ui {
+            position: absolute;
+            top: -50px;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .controls {
+            font-size: 14px;
+            background: rgba(0,0,0,0.6);
+            padding: 5px 15px;
+            border-radius: 20px;
+        }
+        button {
+            padding: 8px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            background: #d32f2f;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        button:hover { background: #f44336; }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui">
+        <div class="controls">Drag back on white ball to aim & shoot</div>
+        <button onclick="resetGame()">Reset / Rack</button>
+    </div>
+    <canvas id="billiardsCanvas"></canvas>
+</div>
+
+<script>
+/**
+ * PHYSICS SIMULATION ENGINE (window.sim)
+ */
+(function() {
+    const canvas = document.getElementById('billiardsCanvas');
+    const ctx = canvas.getContext('2d');
+
+    const sim = {
+        W: 800,
+        H: 400,
+        R: 15,
+        balls: [],
+        running: true,
+        pockets: [
+            {x: 0, y: 0}, {x: 400, y: 0}, {x: 800, y: 0},
+            {x: 0, y: 400}, {x: 400, y: 400}, {x: 800, y: 400}
+        ],
+        pocketRadius: 25,
+
+        reset(ballsData) {
+            this.balls = ballsData.map(b => ({
+                x: b.x,
+                y: b.y,
+                vx: b.vx || 0,
+                vy: b.vy || 0,
+                cue: !!b.cue,
+                potted: false
+            }));
+        },
+
+        state() {
+            return this.balls.map(b => ({
+                x: b.x, y: b.y, vx: b.vx, vy: b.vy, potted: b.potted, cue: b.cue
+            }));
+        },
+
+        shoot(vx, vy) {
+            const cueBall = this.balls.find(b => b.cue && !b.potted);
+            if (cueBall) {
+                cueBall.vx = vx;
+                cueBall.vy = vy;
+            }
+        },
+
+        pause() { this.running = false; },
+        resume() { this.running = true; },
+
+        step(dt) {
+            // 1. Update positions and friction
+            const friction = 0.985; // Simple decay per step
+            for (let b of this.balls) {
+                if (b.potted) continue;
+
+                b.x += b.vx * dt;
+                b.y += b.vy * dt;
+
+                // Friction: reduce velocity over time
+                b.vx *= Math.pow(friction, dt * 60);
+                b.vy *= Math.pow(friction, dt * 60);
+
+                // Stop tiny movements
+                if (Math.abs(b.vx) < 0.1) b.vx = 0;
+                if (Math.abs(b.vy) < 0.1) b.vy = 0;
+
+                // 2. Wall collisions
+                const margin = this.R;
+                if (b.x < margin) { b.x = margin; b.vx *= -0.8; }
+                else if (b.x > this.W - margin) { b.x = this.W - margin; b.vx *= -0.8; }
+
+                if (b.y < margin) { b.y = margin; b.vy *= -0.8; }
+                else if (b.y > this.H - margin) { b.y = this.H - margin; b.vy *= -0.8; }
+
+                // 3. Pocket detection
+                for (let p of this.pockets) {
+                    const dx = b.x - p.x;
+                    const dy = b.y - p.y;
+                    if (dx*dx + dy*dy < this.pocketRadius * this.pocketRadius) {
+                        b.potted = true;
+                        b.vx = 0;
+                        b.vy = 0;
+                    }
+                }
+            }
+
+            // 4. Ball-to-ball collisions (Elastic)
+            for (let i = 0; i < this.balls.length; i++) {
+                for (let j = i + 1; j < this.balls.length; j++) {
+                    const b1 = this.balls[i];
+                    const b2 = this.balls[j];
+                    if (b1.potted || b2.potted) continue;
+
+                    const dx = b2.x - b1.x;
+                    const dy = b2.y - b1.y;
+                    const distSq = dx*dx + dy*dy;
+                    const minDist = this.R * 2;
+
+                    if (distSq < minDist * minDist) {
+                        const dist = Math.sqrt(distSq);
+                        // Resolve overlap (prevent sticking)
+                        const overlap = (minDist - dist) / 2;
+                        const nx = dx / dist;
+                        const ny = dy / dist;
+
+                        b1.x -= nx * overlap;
+                        b1.y -= ny * overlap;
+                        b2.x += nx * overlap;
+                        b2.y += ny * overlap;
+
+                        // Impulse calculation (equal mass)
+                        const rvx = b2.vx - b1.vx;
+                        const rvy = b2.vy - b1.vy;
+                        const velAlongNormal = rvx * nx + rvy * ny;
+
+                        if (velAlongNormal < 0) {
+                            const restitution = 0.9;
+                            let j_impulse = -(1 + restitution) * velAlongNormal;
+                            j_impulse /= 2; // mass sum: 1/1 + 1/1 = 2
+
+                            b1.vx -= j_impulse * nx;
+                            b1.vy -= j_impulse * ny;
+                            b2.vx += j_impulse * nx;
+                            b2.vy += j_impulse * ny;
+                        }
+                    }
+                }
+            }
+
+            this.draw(ctx, this.W, this.H, this.R, this.balls, this.pockets);
+        },
+
+        draw(ctx, W, H, R, balls, pockets) {
+            // Draw Table
+            ctx.fillStyle = '#2e7d32'; // Felt
+            ctx.fillRect(0, 0, W, H);
+
+            // Draw Rails/Border
+            ctx.strokeStyle = '#5d3a1a';
+            ctx.lineWidth = 20;
+            ctx.strokeRect(10, 10, W - 20, H - 20);
+
+            // Draw Pockets
+            ctx.fillStyle = '#111';
+            for (let p of pockets) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 25, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw Balls
+            for (let b of balls) {
+                if (b.potted) continue;
+                ctx.beginPath();
+                ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+                ctx.fillStyle = b.cue ? '#fff' : '#d32f2f'; // Cue ball white, others red
+                ctx.fill();
+                // Shine/Detail
+                ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+    };
+
+    window.sim = sim;
+    canvas.width = sim.W;
+    canvas.height = sim.H;
+})();
+
+/**
+ * GAME LOGIC & INTERACTION
+ */
+const canvas = document.getElementById('billiardsCanvas');
+const ctx = canvas.getContext('2d');
+
+function resetGame() {
+    const W = window.sim.W;
+    const H = window.sim.H;
+    const R = window.sim.R;
+    const balls = [];
+
+    // Cue ball
+    balls.push({ x: 200, y: H / 2, cue: true });
+
+    // Rack setup (Triangle)
+    let row = 1;
+    let count = 0;
+    for (let i = 0; i < 5; i++) {
+        for (let j = 0; j <= i; j++) {
+            count++;
+            balls.push({
+                x: 500 + i * (R * 1.75),
+                y: (H / 2) - (i * R) + (j * R * 2.1),
+                cue: false
+            });
+        }
+    }
+    window.sim.reset(balls);
+}
+
+// Input Handling
+let isDragging = false;
+let dragStart = { x: 0, y: 0 };
+let mousePos = { x: 0, y: 0 };
+
+canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    // Check if clicking cue ball
+    const cueBall = window.sim.balls.find(b => b.cue && !b.potted);
+    if (cueBall) {
+        const dx = mx - cueBall.x;
+        const dy = my - cueBall.y;
+        if (Math.sqrt(dx*dx + dy*dy) < window.sim.R * 2) {
+            isDragging = true;
+            dragStart = { x: cueBall.x, y: cueBall.y };
+            mousePos = { x: mx, y: my };
+        }
+    }
+});
+
+window.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    mousePos.x = e.clientX - rect.left;
+    mousePos.y = e.clientY - rect.top;
+});
+
+window.addEventListener('mouseup', () => {
+    if (isDragging) {
+        // Vector from drag point to start point (pull back logic)
+        const vx = (dragStart.x - mousePos.x) * 0.15;
+        const vy = (dragStart.y - mousePos.y) * 0.15;
+        window.sim.shoot(vx, vy);
+        isDragging = false;
+    }
+});
+
+// Main Loop
+let lastTime = performance.now();
+function loop(now) {
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+
+    if (window.sim.running) {
+        // Use a fixed step for deterministic physics
+        window.sim.step(Math.min(dt, 0.032)); 
+    }
+
+    // Draw aim line if dragging
+    if (isDragging) {
+        ctx.beginPath();
+        ctx.setLineDash([5, 5]);
+        ctx.moveTo(dragStart.x, dragStart.y);
+        ctx.lineTo(dragStart.x + (dragStart.x - mousePos.x), dragStart.y + (dragStart.y - mousePos.y));
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    requestAnimationFrame(loop);
+}
+
+// Initialize
+resetGame();
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>

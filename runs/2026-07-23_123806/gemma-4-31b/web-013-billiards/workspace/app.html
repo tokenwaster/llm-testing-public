@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Billiards Simulation</title>
+    <style>
+        body {
+            background: #2c3e50;
+            color: white;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+            border: 12px solid #5d4037;
+            border-radius: 10px;
+        }
+        canvas {
+            background: #2e7d32;
+            display: block;
+            cursor: crosshair;
+        }
+        #ui {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .instructions {
+            font-size: 14px;
+            color: #bdc3c7;
+            margin-bottom: 15px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background: #e67e22;
+            border: none;
+            color: white;
+            border-radius: 5px;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #d35400;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <canvas id="billiardsCanvas"></canvas>
+    </div>
+
+    <div id="ui">
+        <div class="instructions">
+            <strong>How to Play:</strong> Click and drag <b>backwards</b> from the white cue ball to aim and set power. Release to shoot.
+        </div>
+        <button onclick="rackBalls()">Reset / Rack</button>
+    </div>
+
+<script>
+/**
+ * BILLIARDS PHYSICS ENGINE & GAME
+ */
+
+const canvas = document.getElementById('billiardsCanvas');
+const ctx = canvas.getContext('2d');
+
+// Simulation Constants
+const W = 800;
+const H = 400;
+const R = 12;
+const FRICTION = 0.985; // Velocity multiplier per frame (approx)
+const POCKET_R = 22;
+const MAX_POWER = 1500;
+
+canvas.width = W;
+canvas.height = H;
+
+// Internal state
+let balls = [];
+let isPaused = false;
+let isDragging = false;
+let dragStart = { x: 0, y: 0 };
+let mousePos = { x: 0, y: 0 };
+
+/**
+ * window.sim implementation as required by the benchmark harness
+ */
+window.sim = {
+    W: W,
+    H: H,
+    R: R,
+
+    reset: function(ballsInput) {
+        balls = ballsInput.map(b => ({
+            x: b.x,
+            y: b.y,
+            vx: b.vx || 0,
+            vy: b.vy || 0,
+            cue: !!b.cue,
+            potted: false
+        }));
+    },
+
+    step: function(dt) {
+        if (isPaused) return;
+
+        // 1. Motion & Friction
+        for (let i = 0; i < balls.length; i++) {
+            let b = balls[i];
+            if (b.potted) continue;
+
+            b.x += b.vx * dt;
+            b.y += b.vy * dt;
+
+            // Apply friction: v = v * (friction ^ (dt * 60))
+            const decay = Math.pow(FRICTION, dt * 60);
+            b.vx *= decay;
+            b.vy *= decay;
+
+            if (Math.abs(b.vx) < 1) b.vx = 0;
+            if (Math.abs(b.vy) < 1) b.vy = 0;
+
+            // 2. Cushions
+            if (b.x < R) { b.x = R; b.vx *= -0.8; }
+            if (b.x > W - R) { b.x = W - R; b.vx *= -0.8; }
+            if (b.y < R) { b.y = R; b.vy *= -0.8; }
+            if (b.y > H - R) { b.y = H - R; b.vy *= -0.8; }
+        }
+
+        // 3. Ball-to-Ball Collisions
+        for (let i = 0; i < balls.length; i++) {
+            for (let j = i + 1; j < balls.length; j++) {
+                let b1 = balls[i];
+                let b2 = balls[j];
+                if (b1.potted || b2.potted) continue;
+
+                let dx = b2.x - b1.x;
+                let dy = b2.y - b1.y;
+                let distSq = dx * dx + dy * dy;
+                let minDist = 2 * R;
+
+                if (distSq <= minDist * minDist) {
+                    let dist = Math.sqrt(distSq);
+                    let nx = dx / dist; // Normal X
+                    let ny = dy / dist; // Normal Y
+
+                    // Resolve overlap to prevent sticking
+                    let overlap = minDist - dist;
+                    b1.x -= nx * (overlap / 2);
+                    b1.y -= ny * (overlap / 2);
+                    b2.x += nx * (overlap / 2);
+                    b2.y += ny * (overlap / 2);
+
+                    // Elastic collision along normal
+                    let v1n = b1.vx * nx + b1.vy * ny;
+                    let v2n = b2.vx * nx + b2.vy * ny;
+
+                    let impulse = v1n - v2n;
+                    if (impulse > 0) { // Only collide if moving towards each other
+                        b1.vx -= impulse * nx;
+                        b1.vy -= impulse * ny;
+                        b2.vx += impulse * nx;
+                        b2.vy += impulse * ny;
+                    }
+                }
+            }
+        }
+
+        // 4. Pockets
+        const pockets = [
+            {x: 0, y: 0}, {x: W/2, y: 0}, {x: W, y: 0},
+            {x: 0, y: H}, {x: W/2, y: H}, {x: W, y: H}
+        ];
+
+        for (let b of balls) {
+            if (b.potted) continue;
+            for (let p of pockets) {
+                let dx = b.x - p.x;
+                let dy = b.y - p.y;
+                if (dx*dx + dy*dy < POCKET_R * POCKET_R) {
+                    b.potted = true;
+                    b.vx = 0;
+                    b.vy = 0;
+                }
+            }
+        }
+
+        this.draw();
+    },
+
+    state: function() {
+        return balls.map(b => ({
+            x: b.x, y: b.y, vx: b.vx, vy: b.vy, potted: b.potted, cue: b.cue
+        }));
+    },
+
+    shoot: function(vx, vy) {
+        const cueBall = balls.find(b => b.cue);
+        if (cueBall && !cueBall.potted) {
+            cueBall.vx = vx;
+            cueBall.vy = vy;
+        }
+    },
+
+    pause: function() { isPaused = true; },
+    resume: function() { isPaused = false; },
+
+    draw: function() {
+        // Clear and draw table felt
+        ctx.fillStyle = '#2e7d32';
+        ctx.fillRect(0, 0, W, H);
+
+        // Draw pockets
+        ctx.fillStyle = '#1a1a1a';
+        const pockets = [
+            {x: 0, y: 0}, {x: W/2, y: 0}, {x: W, y: 0},
+            {x: 0, y: H}, {x: W/2, y: H}, {x: W, y: H}
+        ];
+        pockets.forEach(p => {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, POCKET_R, 0, Math.PI * 2);
+            ctx.fill();
+        });
+
+        // Draw balls
+        balls.forEach((b, idx) => {
+            if (b.potted) return;
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+            ctx.fillStyle = b.cue ? 'white' : `hsl(${(idx * 40) % 360}, 70%, 50%)`;
+            ctx.fill();
+            ctx.strokeStyle = '#333';
+            ctx.stroke();
+            ctx.closePath();
+        });
+
+        // Draw aim line
+        if (isDragging) {
+            const cueBall = balls.find(b => b.cue);
+            if (cueBall && !cueBall.potted) {
+                ctx.beginPath();
+                ctx.moveTo(cueBall.x, cueBall.y);
+                // Line points in the direction of the shot (opposite to drag)
+                let dx = cueBall.x - mousePos.x;
+                let dy = cueBall.y - mousePos.y;
+                ctx.lineTo(cueBall.x + dx, cueBall.y + dy);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+                ctx.setLineDash([5, 5]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.closePath();
+            }
+        }
+    }
+};
+
+/**
+ * Game Logic & Input
+ */
+
+function rackBalls() {
+    const setup = [];
+    // Cue ball
+    setup.push({ x: W * 0.25, y: H / 2, vx: 0, vy: 0, cue: true });
+
+    // Triangle of balls
+    const startX = W * 0.65;
+    const startY = H / 2;
+    const rowSpacing = R * 2.1;
+    let ballIdx = 0;
+    for (let col = 0; col < 5; col++) {
+        for (let row = 0; row <= col; row++) {
+            setup.push({
+                x: startX + col * (rowSpacing * 0.866),
+                y: startY + (col * rowSpacing / 2) - (row * rowSpacing / 2),
+                vx: 0, vy: 0, cue: false
+            });
+        }
+    }
+    window.sim.reset(setup);
+}
+
+// Input handling
+canvas.addEventListener('mousedown', e => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    
+    const cueBall = balls.find(b => b.cue);
+    if (!cueBall || cueBall.potted) return;
+
+    const dist = Math.hypot(mx - cueBall.x, my - cueBall.y);
+    if (dist < R * 2) {
+        isDragging = true;
+        dragStart = { x: mx, y: my };
+    }
+});
+
+window.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    mousePos.x = e.clientX - rect.left;
+    mousePos.y = e.clientY - rect.top;
+});
+
+window.addEventListener('mouseup', e => {
+    if (!isDragging) return;
+    isDragging = false;
+
+    const dx = mousePos.x - dragStart.x; // This is actually the distance from cue ball center if we started there
+    // But since we clicked on the ball, let's use current mouse vs cue position
+    const cueBall = balls.find(b => b.cue);
+    if (!cueBall) return;
+
+    const shotDx = cueBall.x - mousePos.x;
+    const shotDy = cueBall.y - mousePos.y;
+    const power = Math.min(Math.hypot(shotDx, shotDy), 200); // Cap drag distance
+    
+    const angle = Math.atan2(shotDy, shotDx);
+    const vx = Math.cos(angle) * (power * 7); // Scale factor for velocity
+    const vy = Math.sin(angle) * (power * 7);
+
+    window.sim.shoot(vx, vy);
+});
+
+// Main Loop
+let lastTime = performance.now();
+function loop(now) {
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+
+    // Cap dt to prevent physics explosion on tab switch
+    window.sim.step(Math.min(dt, 0.1));
+    requestAnimationFrame(loop);
+}
+
+// Initialize
+rackBalls();
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>

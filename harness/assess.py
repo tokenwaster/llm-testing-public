@@ -41,8 +41,14 @@ CATEGORIES = {
                       "timed out — almost always an infinite loop"),
     "forbidden-construct": ("model", "used a construct the task forbids "
                             "(e.g. eval / the re or json module)"),
-    "rumination-spiral": ("model", "thought until the token budget was gone, "
-                          "never produced a usable answer"),
+    "rumination-spiral": ("model", "repeated one short cycle over and over "
+                          "without terminating — a real, detected loop (only "
+                          "visible where the token stream is: local/API models, "
+                          "not the claude CLI). Silence alone is NOT this — that "
+                          "is a timeout (needs a bigger window)."),
+    "runaway": ("model", "ran to the token budget producing no usable answer — "
+                "a repetition loop or endless generation; more time will not "
+                "help (distinct from a rumination spiral, which stays silent)"),
     "incomplete-output": ("model", "answer was cut off when the token budget "
                            "ran out"),
     "format-miss": ("model", "produced output but not in the required format "
@@ -77,6 +83,30 @@ def load_cfg() -> dict:
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", "", (s or "").strip()).casefold()
+
+
+def _numeric_trap(got: str, traps, tdef) -> bool:
+    """Is `got` a registered trap answer, allowing units/prose around it?
+
+    _norm only strips whitespace, so "40 seconds" never matches the trap "40"
+    while the numeric SCORER happily parses the value out of prose. Attribution
+    has to match the scorer, or the same memorised-classic answer reads as a
+    generic wrong-answer and the task loses the exact signal it was built to
+    catch. Numeric-matched tasks only."""
+    if ((getattr(tdef, "scoring", None) or {}).get("match")) != "numeric":
+        return False
+    from .scoring import _to_float
+    try:
+        g = _to_float(got)
+    except (ValueError, TypeError, ZeroDivisionError):
+        return False
+    for t in traps:
+        try:
+            if abs(g - _to_float(str(t))) <= 1e-6:
+                return True
+        except (ValueError, TypeError, ZeroDivisionError):
+            continue
+    return False
 
 
 def _model_avgs(task_data: dict) -> dict:
@@ -169,12 +199,17 @@ def classify(result: dict, tdef, cfg: dict, suspect: dict | None = None) -> dict
             "context window", "context length", "context size",
             "maximum context", "available context", "exceeds the context")):
         return pack("context-overflow")
-    if "runaway" in kinds or "rumination_spiral" in kinds:
-        detail = ("aborted a repetition loop before the token ceiling"
-                  if "repetition loop" in errs
-                  else (f"burned {tok_out:,} tokens, produced no usable answer"
-                        if tok_out else "produced no usable answer"))
-        return pack("rumination-spiral", detail)
+    if "repetition_loop" in kinds or ("runaway" in kinds and "repetition loop" in errs):
+        return pack("rumination-spiral",
+                    "repeated one short cycle without terminating — a real loop")
+    if "rumination_spiral" in kinds:
+        return pack("timeout",
+                    "silent past the old no-output guard (legacy) — window-limited, "
+                    "not a spiral")
+    if "runaway" in kinds:
+        return pack("runaway",
+                    f"burned {tok_out:,} tokens, produced no usable answer"
+                    if tok_out else "produced no usable answer")
     if errored and ("connect" in kinds or "transport" in errs
                     or "stream broke" in errs or "peer closed" in errs):
         return pack("transport-drop")
@@ -209,15 +244,16 @@ def classify(result: dict, tdef, cfg: dict, suspect: dict | None = None) -> dict
     if getattr(tdef, "scoring_type", "") == "answer":
         gm = _GOT.search(summary_raw)
         got = gm.group(1) if gm else ""
-        traps = [_norm(t) for t in (cfg.get("traps") or {}).get(tid, [])]
-        if got and _norm(got) in traps:
+        traps_raw = (cfg.get("traps") or {}).get(tid, [])
+        traps = [_norm(t) for t in traps_raw]
+        if got and (_norm(got) in traps or _numeric_trap(got, traps_raw, tdef)):
             return pack("fell-for-trap", f"answered '{got}'")
         sus = suspect.get(tid)
         if sus and got and _norm(got) == sus["answer"]:
             return pack("suspect-answer-key",
                         f"{len(sus['models'])} models gave '{got}'")
         if stop == "length" and "no answer" in summary:
-            return pack("rumination-spiral",
+            return pack("runaway",
                         f"burned {tok_out:,} tokens, produced no ANSWER line")
         if "no answer" in summary:
             return pack("format-miss", "no ANSWER: line in the response")
@@ -226,13 +262,13 @@ def classify(result: dict, tdef, cfg: dict, suspect: dict | None = None) -> dict
         if got:
             return pack("wrong-answer", f"answered '{got}'")
         if stop == "length":
-            return pack("rumination-spiral",
+            return pack("runaway",
                         f"burned {tok_out:,} tokens, no output")
         return pack("unknown-error")
 
     if stop == "length":
         if any(s in summary for s in ("no python code", "no html", "run failed")):
-            return pack("rumination-spiral",
+            return pack("runaway",
                         f"burned {tok_out:,} tokens, emitted no usable code")
         return pack("incomplete-output", f"cut off at {tok_out:,} tokens")
     if "no python code" in summary or "no html" in summary:

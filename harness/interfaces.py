@@ -32,6 +32,13 @@ PRESETS = {
     "groq": {
         "kind": "openai", "base_url": "https://api.groq.com/openai/v1",
         "key_env": "GROQ_API_KEY", "note": "fast open-weight hosting"},
+    "kimi": {
+        "kind": "openai", "base_url": "https://api.moonshot.ai/v1",
+        "key_env": "MOONSHOT_API_KEY",
+        "note": "Kimi / Moonshot first-party (kimi-k3 etc.). Name any model "
+                "registered here distinctly from the OpenRouter-routed kimi-* "
+                "— the model name is the aggregation key, so a shared name "
+                "would pool two different routes into one identity"},
     "anthropic-api": {
         "kind": "anthropic", "base_url": "https://api.anthropic.com",
         "key_env": "ANTHROPIC_API_KEY",

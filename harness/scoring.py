@@ -96,11 +96,18 @@ def run_pytest_checker(task: Task, workspace: Path) -> dict:
                        detail=_tail(out))
     cap = float(task.scoring.get("automated_max", 1.0))
     frac = passed / total
-    return _record(frac * cap, "checker",
-                   f"{passed}/{total} tests passed"
-                   + (f" (machine max {cap:g}; craft is graded on /review)"
-                      if cap < 1.0 else ""),
-                   detail=_tail(out))
+    score = frac * cap
+    note = (f" (machine max {cap:g}; craft is graded on /review)"
+            if cap < 1.0 else "")
+    gate = task.scoring.get("gate") or {}
+    sub = gate.get("when_failed", "")
+    if sub and re.search(rf"(?im)^FAILED[^\n]*{re.escape(sub)}", out):
+        gcap = float(gate.get("cap", 0.5))
+        if score > gcap:
+            score = gcap
+            note += f" · GATE FAILED ({sub}): capped at {gcap:g}"
+    return _record(score, "checker",
+                   f"{passed}/{total} tests passed" + note, detail=_tail(out))
 
 
 def score_answer(task: Task, response_text: str) -> dict:

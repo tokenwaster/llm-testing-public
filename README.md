@@ -13,6 +13,20 @@ request that produced it.
 
 ## Browsing the results
 
+### Prerequisite: Python 3.11 or newer
+
+Install it first — the commands below won't run without it.
+
+- **Get it from [python.org/downloads](https://www.python.org/downloads/)** (or
+  your package manager: `brew install python`, `winget install Python.Python.3.12`,
+  `sudo apt install python3 python3-venv`).
+- **Windows:** tick **"Add python.exe to PATH"** in the installer, or `python`
+  won't be found.
+- Check your version with `python --version` (or `python3 --version`) — it must
+  print **3.11.x** or higher.
+
+### Run it
+
 Create a virtualenv, install the requirements, then run `serve` — three lines,
 below. `serve` opens the results site at http://127.0.0.1:9001 as a read-only
 viewer bound to localhost, and is the only command you need for every run after
@@ -41,14 +55,14 @@ equivalent on Windows, but it is PowerShell-only, and Windows blocks `.ps1`
 files under the default RemoteSigned policy if you unpacked a downloaded ZIP
 rather than cloning.
 
-Python 3.11+ is required. Add `--port N` to serve somewhere else.
+Add `--port N` to serve somewhere else.
 
 Or skip Python entirely — `reports/` is self-contained static HTML, so opening
 `reports/index.html` in a browser works with no install and no server, as does
 hosting the folder anywhere.
 
 - `index.html` — leaderboard, the model × task matrix (filterable to All / Hard /
-  Easy), score trends, speed and cost, and per-category task fit
+  Frontier / Easy), score trends, speed and cost, and per-category task fit
 - `tasks/<id>.html` — one task across every model: ranked comparison plus each
   model's verbatim output side by side
 - `models/<name>.html` — one model's per-task detail and its run-over-run matrix
@@ -59,6 +73,10 @@ hosting the folder anywhere.
 - `info.html` — what everything means: scoring lanes, tiers, the metrics
   glossary, the failure taxonomy, contamination guards, sample-size honesty,
   pricing caveats, and the changelog
+- `special.html` — read-only findings from **experimental** probes (e.g. the
+  spiral-window study: how long each model takes to *start* answering, and which
+  were being cut off by the timeout). These runs count toward **nothing** — not
+  the leaderboard, not a model's score
 - `data/…` — a read-only browser over the raw `runs/` tree
 - `feed.xml` — an Atom feed of models entering the benchmark, newest first
 

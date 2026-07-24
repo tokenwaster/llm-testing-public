@@ -1,0 +1,128 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Billiards</title>
+<style>
+  body { margin:0; background:#0b3d1a; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; height:100vh; gap:12px;
+    font-family:system-ui; color:#e8e6da; }
+  #table { background:#0f7a35; border:14px solid #5b3a1a; border-radius:10px;
+    touch-action:none; cursor:crosshair; }
+  .bar { display:flex; gap:16px; align-items:center; font-size:14px; }
+  #reset { font:inherit; padding:6px 14px; border-radius:7px; cursor:pointer;
+    border:1px solid #8a6a3a; background:#5b3a1a; color:#f4f4f0; }
+  #howto { font-size:13px; opacity:.85; }
+</style>
+<canvas id="table" width="800" height="400"></canvas>
+<div class="bar">
+  <button id="reset">Reset / Rack</button>
+  <span id="howto">Drag back from the white cue ball and release to shoot. Longer drag = harder shot.</span>
+</div>
+<script>
+(() => {
+  const W = 800, H = 400, R = 11, POCKET = 22, FRICTION = 0.55, SHOT = 3.2;
+  const POCKETS = [[0,0],[W/2,0],[W,0],[0,H],[W/2,H],[W,H]];
+  const cv = document.getElementById("table"), g = cv.getContext("2d");
+  let balls = [], paused = false, aim = null;
+
+  const RACK = () => {
+    const out = [{ x: 200, y: H/2, vx:0, vy:0, cue:true, color:"#f4f4f0" }];
+    const cols = [[0],[ -1,1],[ -2,0,2]];   // small triangle at the foot spot
+    const fx = 560, gap = 2*R + 1, pal = ["#c81d25","#f0a500","#1d4fc8","#0a9d55","#7a2fb0"];
+    let k = 0;
+    cols.forEach((rows, c) => rows.forEach(r => out.push({
+      x: fx + c*gap*0.87, y: H/2 + r*gap, vx:0, vy:0, cue:false,
+      color: pal[k++ % pal.length] })));
+    return out;
+  };
+
+  function reset(setup) {
+    balls = (setup || []).map(b => ({ x:b.x, y:b.y, vx:b.vx||0, vy:b.vy||0,
+      potted:false, cue:!!b.cue, color:b.color || (b.cue ? "#f4f4f0" : "#c81d25") }));
+    draw();
+  }
+  const rack = () => reset(RACK());
+
+  function potCheck(b) {
+    for (const [px, py] of POCKETS)
+      if (Math.hypot(b.x - px, b.y - py) <= POCKET) { b.potted = true; b.vx = 0; b.vy = 0; return; }
+  }
+
+  function step(dt) {
+    for (const b of balls) {
+      if (b.potted) continue;
+      b.x += b.vx*dt; b.y += b.vy*dt;
+      if (b.x < R) { b.x = R; b.vx = -b.vx; } else if (b.x > W-R) { b.x = W-R; b.vx = -b.vx; }
+      if (b.y < R) { b.y = R; b.vy = -b.vy; } else if (b.y > H-R) { b.y = H-R; b.vy = -b.vy; }
+      const damp = Math.max(0, 1 - FRICTION*dt);
+      b.vx *= damp; b.vy *= damp;
+      if (Math.hypot(b.vx, b.vy) < 1e-3) { b.vx = 0; b.vy = 0; }
+      potCheck(b);
+    }
+    for (let i = 0; i < balls.length; i++)
+      for (let j = i+1; j < balls.length; j++) {
+        const a = balls[i], c = balls[j];
+        if (a.potted || c.potted) continue;
+        let dx = c.x-a.x, dy = c.y-a.y, d = Math.hypot(dx, dy);
+        if (d > 0 && d < 2*R) {
+          const nx = dx/d, ny = dy/d, ov = 2*R - d;
+          a.x -= nx*ov/2; a.y -= ny*ov/2; c.x += nx*ov/2; c.y += ny*ov/2;
+          const vrel = (a.vx-c.vx)*nx + (a.vy-c.vy)*ny;
+          if (vrel > 0) { a.vx -= vrel*nx; a.vy -= vrel*ny; c.vx += vrel*nx; c.vy += vrel*ny; }
+        }
+      }
+    draw();
+  }
+
+  function draw() {
+    g.clearRect(0, 0, W, H);
+    for (const [px, py] of POCKETS) { g.beginPath(); g.fillStyle = "#06210f"; g.arc(px, py, POCKET, 0, 7); g.fill(); }
+    for (const b of balls) {
+      if (b.potted) continue;
+      g.beginPath(); g.fillStyle = b.color; g.arc(b.x, b.y, R, 0, 7); g.fill();
+      if (b.cue) { g.lineWidth = 2; g.strokeStyle = "#9a9a90"; g.stroke(); }
+    }
+    if (aim) {   // pull-back aim/power line while dragging
+      g.beginPath(); g.strokeStyle = "rgba(255,255,255,.7)"; g.lineWidth = 2;
+      g.moveTo(aim.cx, aim.cy); g.lineTo(aim.cx*2 - aim.mx, aim.cy*2 - aim.my); g.stroke();
+    }
+  }
+
+  const cue = () => balls.find(b => b.cue && !b.potted);
+  const moving = () => balls.some(b => !b.potted && (b.vx || b.vy));
+
+  function evPos(e) {
+    const r = cv.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+  }
+  cv.addEventListener("pointerdown", e => {
+    const c = cue(); if (!c || moving()) return;
+    const p = evPos(e);
+    if (Math.hypot(p.x - c.x, p.y - c.y) <= R*3) { aim = { cx:c.x, cy:c.y, mx:p.x, my:p.y }; draw(); }
+  });
+  cv.addEventListener("pointermove", e => { if (aim) { const p = evPos(e); aim.mx = p.x; aim.my = p.y; draw(); } });
+  window.addEventListener("pointerup", () => {
+    if (!aim) return;
+    const c = cue();
+    if (c) { c.vx = (aim.cx - aim.mx) * SHOT; c.vy = (aim.cy - aim.my) * SHOT; }
+    aim = null;
+  });
+  document.getElementById("reset").addEventListener("click", rack);
+
+  let last = 0;
+  function loop(t) {
+    const dt = last ? Math.min(0.05, (t - last) / 1000) : 0; last = t;
+    if (!paused && dt > 0) step(dt); else draw();
+    requestAnimationFrame(loop);
+  }
+  rack();
+  requestAnimationFrame(loop);
+
+  window.sim = {
+    W, H, R, friction: FRICTION, pockets: POCKETS,
+    reset, step, rack,
+    pause: () => { paused = true; }, resume: () => { paused = false; },
+    shoot: (vx, vy) => { const c = cue(); if (c) { c.vx = vx; c.vy = vy; } },
+    state: () => balls.map(b => ({ x:b.x, y:b.y, vx:b.vx, vy:b.vy, potted:b.potted, cue:b.cue })),
+  };
+})();
+</script>

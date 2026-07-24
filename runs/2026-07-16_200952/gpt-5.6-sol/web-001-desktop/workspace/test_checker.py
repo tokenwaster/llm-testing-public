@@ -54,12 +54,23 @@ def test_files_window_opens_at_root(page):
         assert any(required in n for n in names), f"root missing {required}: {names}"
 
 
+def _open_folder(page, name):
+    """Double-click the folder ENTRY, not the text inside it.
+
+    `.fs-item >> text=<name>` resolves to the innermost element holding the
+    label, and a correct app may set `pointer-events: none` on that icon/label
+    so the whole entry is the click target — a standard technique. Playwright
+    then can never land the dblclick on it and times out, failing an app whose
+    navigation works fine by hand. Target the `.fs-item` container, which is
+    where the handler lives and what a user actually double-clicks."""
+    page.locator(".fs-item").filter(has_text=name).first.dblclick()
+    page.wait_for_timeout(150)
+
+
 def test_files_navigation(page):
-    page.dblclick(".fs-item >> text=home")
-    page.wait_for_timeout(150)
+    _open_folder(page, "home")
     assert page.text_content("#files-path").strip() == "/home"
-    page.dblclick(".fs-item >> text=user")
-    page.wait_for_timeout(150)
+    _open_folder(page, "user")
     assert page.text_content("#files-path").strip() == "/home/user"
     names = [t.strip() for t in page.locator(".fs-item").all_text_contents()]
     for required in ("Documents", "Downloads", "Pictures"):

@@ -65,7 +65,8 @@ class Handler(BaseHTTPRequestHandler):
               ".md": "text/plain; charset=utf-8",
               ".py": "text/plain; charset=utf-8",
               ".txt": "text/plain; charset=utf-8",
-              ".csv": "text/plain; charset=utf-8"}
+              ".csv": "text/plain; charset=utf-8",
+              ".log": "text/plain; charset=utf-8"}
 
     def _send_run_data(self, rel: str):
         """Read-only browse of runs/ — transcripts, metrics, and each model's
@@ -121,6 +122,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file("family.html")
         elif path in ("/compare", "/compare/", "/compare.html"):
             self._send_file("compare.html")
+        elif path in ("/special", "/special/", "/special.html"):
+            self._send_file("special.html")
         elif path == "/feed.xml":
             p = config.REPORTS_DIR / "feed.xml"
             if p.is_file():

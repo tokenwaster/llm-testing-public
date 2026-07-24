@@ -73,6 +73,7 @@ MODELS_DIR = ROOT / "models"
 TASKS_DIR = ROOT / "tasks"
 RUNS_DIR = ROOT / "runs"
 SCOUTS_DIR = ROOT / "scouts"
+SPECIAL_DIR = ROOT / "special"
 REPORTS_DIR = ROOT / "reports"
 
 
@@ -107,17 +108,6 @@ CHECKER_TIMEOUT_S = 60
 TOOL_RUN_TIMEOUT_S = 60
 TOOL_OUTPUT_LIMIT = 6000
 
-HARDENED_TASKS = (
-    "web-012-coin",
-    "rs-010-ants-rod",
-    "ctx-012-aggregate-reversals-32k",
-    "web-003-sand",
-    "web-002-maze",
-    "ag-006-perf-optimize",
-    "ag-007-regression-hunt",
-    "rs-006-string-pipeline",
-    "py-005-csv-parser",
-)
 
 NEW_TASKS = (
     "if-001-format-exact",

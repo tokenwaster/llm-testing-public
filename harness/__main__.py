@@ -59,7 +59,9 @@ def cmd_run(args) -> int:
             return 2
         models = [m for m in models if m.name in wanted]
     if args.tasks == "hardened":
-        tasks = [t for t in tasks if t.id in config.HARDENED_TASKS]
+        from . import report
+        hs = set(report.hardened_ids())
+        tasks = [t for t in tasks if t.id in hs]
     elif args.tasks == "new":
         tasks = [t for t in tasks if t.id in config.NEW_TASKS]
     elif args.tasks:

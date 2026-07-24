@@ -37,6 +37,7 @@ class ChatResult:
     text: str
     total_ms: float
     ttft_ms: float | None = None
+    first_text_ms: float | None = None
     tokens_in: int | None = None
     tokens_out: int | None = None
     cache_read_tokens: int | None = None
@@ -313,10 +314,10 @@ class OpenAICompatAdapter(BaseAdapter):
                             text_parts.append(piece)
                         if guard.feed((piece or "") + (reasoning or "")):
                             raise AdapterError(
-                                "degenerate repetition loop — the model is "
-                                "repeating one short cycle without terminating; "
+                                "repetition loop — the model is repeating one "
+                                "short cycle without terminating (going nowhere); "
                                 "aborted before the token ceiling",
-                                kind="runaway", retryable=False)
+                                kind="repetition_loop", retryable=False)
                         if choice.get("finish_reason"):
                             stop_reason = choice["finish_reason"]
         except httpx.ConnectError as e:
@@ -582,8 +583,7 @@ class ClaudeCLIAdapter(BaseAdapter):
         with tempfile.TemporaryDirectory(prefix="llmtest-sandbox-",
                                          ignore_cleanup_errors=True) as sandbox:
             t0 = now_ms()
-            data = _stream_claude_cli(cmd, prompt, sandbox, timeout_s,
-                                      config.CLAUDE_SPIRAL_S)
+            data = _stream_claude_cli(cmd, prompt, sandbox, timeout_s)
         return self._parse_result(data, now_ms() - t0)
 
     def chat_agentic(self, prompt: str, workspace, max_turns: int,
@@ -604,8 +604,7 @@ class ClaudeCLIAdapter(BaseAdapter):
                "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash(python:*)",
                "--disallowedTools", "WebFetch,WebSearch,Task,NotebookEdit"]
         t0 = now_ms()
-        data = _stream_claude_cli(cmd, prompt, str(workspace), timeout_s,
-                                  config.CLAUDE_SPIRAL_S)
+        data = _stream_claude_cli(cmd, prompt, str(workspace), timeout_s)
         return self._parse_result(data, now_ms() - t0)
 
     def _parse_result(self, data: dict, total_ms: float) -> ChatResult:
@@ -638,6 +637,7 @@ class ClaudeCLIAdapter(BaseAdapter):
             text=data.get("result") or "",
             total_ms=total_ms,
             ttft_ms=None,
+            first_text_ms=data.get("_first_text_ms"),
             tokens_in=tokens_in,
             tokens_out=usage.get("output_tokens"),
             cache_read_tokens=cache_read or None,
@@ -676,15 +676,20 @@ def _safe_json(text: str) -> dict:
 from .util import terminate_tree as _terminate_tree
 
 
-def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str, timeout_s: int,
-                       spiral_s: int) -> dict:
+def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str,
+                       timeout_s: int) -> dict:
     """Run `claude -p --output-format stream-json` and watch it work.
 
-    With `--output-format json` the CLI emits nothing until it exits, so the
-    harness can't tell a model slowly producing an answer from one thinking
-    itself to death — and pays the full budget either way. Streaming lets us
-    stop a model that has emitted nothing but thinking tokens for `spiral_s`
-    (a rumination spiral) instead of burning the whole budget on a zero.
+    Streaming (over `--output-format json`, which emits nothing until exit) lets
+    us record time-to-first-answer-token and enforce the total `timeout_s`
+    deadline. It does NOT stop the model for being silent: the CLI exposes only
+    answer text and the final result — never the thinking content — so we cannot
+    tell genuine extended thinking from a loop, and silence alone means only
+    "needs a bigger window", never a spiral. A model that thinks the whole window
+    without answering hits `timeout_s` (a window/time result), and the operator
+    widens the window from the measured first-answer times. Real spirals — a
+    repeating cycle going nowhere — are only detectable where the token stream is
+    visible (_LoopGuard on local/API models), not here.
 
     Returns the CLI's final `result` event (same shape as --output-format json).
     """
@@ -725,6 +730,7 @@ def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str, timeout_s: int,
 
     t0 = now_ms()
     saw_text = False
+    first_text_ms: float | None = None
     final: dict | None = None
     tail: list[str] = []
 
@@ -735,11 +741,6 @@ def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str, timeout_s: int,
                 raise AdapterError(
                     f"claude CLI exceeded the {timeout_s}s budget",
                     kind="timeout", retryable=True)
-            if not saw_text and elapsed > spiral_s:
-                raise AdapterError(
-                    f"rumination spiral: {spiral_s}s of thinking with no output "
-                    "at all — stopped rather than burn the whole budget",
-                    kind="rumination_spiral", retryable=False)
             try:
                 line = lines.get(timeout=1.0)
             except _queue.Empty:
@@ -759,6 +760,8 @@ def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str, timeout_s: int,
                 content = (ev.get("message") or {}).get("content") or []
                 if any((b.get("text") or "").strip()
                        for b in content if isinstance(b, dict)):
+                    if not saw_text:
+                        first_text_ms = now_ms() - t0
                     saw_text = True
             elif kind == "result":
                 final = ev
@@ -773,6 +776,7 @@ def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str, timeout_s: int,
         raise AdapterError(
             "claude CLI produced no result event: " + " | ".join(tail)[:300],
             kind="api", retryable=True)
+    final["_first_text_ms"] = first_text_ms
     return final
 
 

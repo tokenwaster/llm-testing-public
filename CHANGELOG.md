@@ -26,6 +26,18 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+- **Three frontier tasks built + reference-verified (not yet in a version).**
+  Targeting the top-8 tied cohort, each on a lane that already discriminates and
+  each multi-checkpoint so partial credit spreads: `web-013-billiards` (webapp;
+  a `window.sim` physics API graded on reflection/friction/elastic
+  collisions/pockets/determinism, 13 checks), `ctx-013-ledger-supersede-64k`
+  (123k-char settled-balance aggregation under void/amend noise, response lane,
+  5 answers), `rs-013-statemachine-trace` (40-op adversarial stack-machine trace,
+  response lane, 5 answers). All 1.0-good / 0.0-empty; traps 0.15 / 0.20 / 0.00.
+  **Awaiting the top-8 calibration run and a version decision** — admit only if
+  σ(top-8) ≥ 0.15. Nothing here bumps SUITE_VERSION or archives yet. Generators
+  and reference apps in `tasks-refs/`; see `docs/PUBLIC-FEEDBACK-ROADMAP.md`.
+
 ## 0.6.16 — compare page, contamination & sample-size honesty, freshness
 
 Four roadmap items (`docs/PUBLIC-FEEDBACK-ROADMAP.md`), all working in the

@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Playable Billiards Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #222;
+            color: #eee;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 50px rgba(0,0,0,0.8);
+            border-radius: 4px;
+            border: 15px solid #5d4037; /* Wood rail color */
+        }
+
+        canvas {
+            display: block;
+            background-color: #2e7d32; /* Felt color */
+            cursor: crosshair;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            pointer-events: none;
+        }
+
+        .instruction {
+            background: rgba(0, 0, 0, 0.6);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin-bottom: 5px;
+            pointer-events: auto;
+        }
+
+        #reset-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 8px 16px;
+            background: #ff9800;
+            border: none;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 4px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        }
+
+        #reset-btn:hover {
+            background: #f57c00;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="simCanvas" width="960" height="540"></canvas>
+    
+    <div id="ui-layer">
+        <div class="instruction">🎯 Drag BACK from the white ball to aim and shoot.</div>
+        <div class="instruction">💡 Longer drag = Harder shot.</div>
+    </div>
+
+    <button id="reset-btn" onclick="window.sim.reset()">Reset / Rack</button>
+</div>
+
+<script>
+/**
+ * Billiards Physics Engine & Game Logic
+ */
+
+// --- Configuration ---
+const CONFIG = {
+    W: 960, // Table Width
+    H: 540, // Table Height
+    R: 12,  // Ball Radius
+    POCKET_RADIUS: 18,
+    FRICTION: 0.985, // Air resistance / rolling friction (per frame)
+    WALL_BOUNCE: 0.8, // Energy loss on cushion hit
+    MAX_POWER: 25, // Max velocity cap
+};
+
+// --- State Management ---
+let balls = [];
+let isDragging = false;
+let dragStartX = 0;
+let dragStartY = 0;
+let dragCurrentX = 0;
+let dragCurrentY = 0;
+let lastTime = 0;
+
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- Pocket Definitions (Center X, Center Y) ---
+// 4 Corners + 2 Middle Long Rails
+const POCKETS = [
+    {x: 0, y: 0},
+    {x: CONFIG.W, y: 0},
+    {x: 0, y: CONFIG.H},
+    {x: CONFIG.W, y: CONFIG.H},
+    // Middle of long rails (Top and Bottom)
+    {x: CONFIG.W / 2, y: 15}, 
+    {x: CONFIG.W / 2, y: CONFIG.H - 15}
+];
+
+// --- Physics Engine Implementation ---
+
+function initPhysics() {
+    balls = [];
+    
+    // Helper to create a ball object
+    const createBall = (x, y, vx=0, vy=0, cue=false) => ({
+        x: x,
+        y: y,
+        vx: vx,
+        vy: vy,
+        potted: false,
+        cue: cue,
+        color: cue ? '#ffffff' : getRandomColor()
+    });
+
+    // Default Rack Setup (Triangle formation)
+    const resetBalls = () => {
+        balls = [];
+        let startX = CONFIG.W / 2;
+        let startY = CONFIG.H - 10;
+        let rows = 5;
+        
+        // Cue ball placed at head of table for easy aiming, or standard position?
+        // Standard is usually near the foot rail. Let's put cue ball at bottom center (near pocket)
+        // Actually, standard rack: Cue ball is separate. Rack is triangle.
+        
+        let row = 0;
+        let col = 0;
+        let r = CONFIG.R;
+        
+        // Create Rack Balls
+        for (let i = 0; i < rows; i++) {
+            for (let j = 0; j <= i; j++) {
+                // Offset X based on row to form triangle
+                let bx = startX + (i * r * 1.732) / 2; // 1.732 is approx sqrt(3)
+                let by = startY - (i * r); 
+                
+                balls.push(createBall(bx, by, 0, 0, false));
+            }
+        }
+
+        // Add Cue Ball at a standard starting position (near foot rail)
+        // Let's put it near the bottom pocket area for better playability
+        let cueX = CONFIG.W / 2;
+        let cueY = CONFIG.H - r - 10; 
+        balls.push(createBall(cueX, cueY, 0, 0, true));
+    };
+
+    // --- Physics Step ---
+    function step(dt) {
+        if (balls.length === 0) return;
+
+        // 1. Update Positions & Friction
+        for (let i = 0; i < balls.length; i++) {
+            let b = balls[i];
+            
+            if (b.potted) continue;
+
+            // Apply velocity
+            b.x += b.vx * dt;
+            b.y += b.vy * dt;
+
+            // Apply Friction
+            b.vx *= CONFIG.FRICTION;
+            b.vy *= CONFIG.FRICTION;
+
+            // Stop if very slow
+            if (Math.abs(b.vx) < 0.05) b.vx = 0;
+            if (Math.abs(b.vy) < 0.05) b.vy = 0;
+
+            // 2. Wall Collisions (Cushions)
+            // Left
+            if (b.x - CONFIG.R < 0) {
+                b.x = CONFIG.R;
+                b.vx = -b.vx * CONFIG.WALL_BOUNCE;
+            }
+            // Right
+            else if (b.x + CONFIG.R > CONFIG.W) {
+                b.x = CONFIG.W - CONFIG.R;
+                b.vx = -b.vx * CONFIG.WALL_BOUNCE;
+            }
+            // Top
+            if (b.y - CONFIG.R < 0) {
+                b.y = CONFIG.R;
+                b.vy = -b.vy * CONFIG.WALL_BOUNCE;
+            }
+            // Bottom
+            else if (b.y + CONFIG.R > CONFIG.H) {
+                b.y = CONFIG.H - CONFIG.R;
+                b.vy = -b.vy * CONFIG.WALL_BOUNCE;
+            }
+
+            // 3. Pocket Detection
+            for (let p of POCKETS) {
+                let dx = b.x - p.x;
+                let dy = b.y - p.y;
+                if (Math.sqrt(dx*dx + dy*dy) < CONFIG.POCKET_RADIUS) {
+                    b.potted = true;
+                    b.vx = 0;
+                    b.vy = 0;
+                }
+            }
+        }
+
+        // 4. Ball-to-Ball Collisions
+        // We iterate and resolve collisions. To prevent multiple resolution issues in one frame,
+        // we can do a simple O(N^2) check. Since N is small (15), this is fine.
+        
+        for (let i = 0; i < balls.length; i++) {
+            let b1 = balls[i];
+            if (b1.potted) continue;
+
+            for (let j = i + 1; j < balls.length; j++) {
+                let b2 = balls[j];
+                if (b2.potted) continue;
+
+                let dx = b2.x - b1.x;
+                let dy = b2.y - b1.y;
+                let distSq = dx*dx + dy*dy;
+                let minDist = CONFIG.R * 2;
+
+                if (distSq < minDist * minDist) {
+                    // Collision detected!
+                    
+                    // Resolve Overlap (Static resolution to prevent sticking)
+                    let dist = Math.sqrt(distSq);
+                    let overlap = minDist - dist;
+                    let nx = dx / dist; // Normal vector
+                    let ny = dy / dist;
+
+                    // Move balls apart proportional to inverse mass (masses are equal, so 50/50)
+                    b1.x -= nx * overlap * 0.5;
+                    b1.y -= ny * overlap * 0.5;
+                    b2.x += nx * overlap * 0.5;
+                    b2.y += ny * overlap * 0.5;
+
+                    // Dynamic Resolution (Elastic Collision)
+                    // Normal velocity components
+                    let v1n = b1.vx * nx + b1.vy * ny;
+                    let v2n = b2.vx * nx + b2.vy * ny;
+
+                    // Tangent velocity components (unchanged in elastic collision of equal mass)
+                    // We only swap normal velocities for equal mass balls
+                    
+                    // Relative velocity along normal
+                    let relVn = v1n - v2n;
+                    
+                    // Impulse scalar (for equal mass m=1, impulse = -(v1n - v2n))
+                    // Since we want to conserve momentum and energy:
+                    // v1_new_n = v2_old_n
+                    // v2_new_n = v1_old_n
+                    
+                    let tempVx = b1.vx;
+                    let tempVy = b1.vy;
+                    
+                    b1.vx = b2.vx + (v1n - v2n);
+                    b1.vy = b2.vy + (v1n - v2n);
+                    
+                    b2.vx = tempVx - (v1n - v2n);
+                    b2.vy = tempVy - (v1n - v2n);
+                }
+            }
+        }
+    }
+
+    // --- Rendering ---
+    function draw() {
+        // Clear Canvas
+        ctx.clearRect(0, 0, CONFIG.W, CONFIG.H);
+
+        // Draw Pockets
+        ctx.fillStyle = '#111';
+        for (let p of POCKETS) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, CONFIG.POCKET_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Draw Balls
+        for (let b of balls) {
+            if (b.potted) continue;
+
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, CONFIG.R, 0, Math.PI * 2);
+            
+            // Ball shading
+            let grad = ctx.createRadialGradient(
+                b.x - CONFIG.R/3, b.y - CONFIG.R/3, CONFIG.R/4, 
+                b.x, b.y, CONFIG.R
+            );
+            grad.addColorStop(0, 'white');
+            grad.addColorStop(0.2, b.color);
+            grad.addColorStop(1, '#000'); // Shadow edge
+            
+            ctx.fillStyle = grad;
+            ctx.fill();
+            
+            // White cue ball highlight
+            if (b.cue) {
+                ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+
+        // Draw Aim Line & Drag Feedback
+        if (isDragging && balls.length > 0) {
+            let cueBall = balls[balls.length - 1]; // Assuming cue ball is last in array
+            
+            // Calculate drag vector
+            let dx = dragCurrentX - dragStartX;
+            let dy = dragCurrentY - dragStartY;
+            
+            // Visual feedback: Draw line from ball to mouse
+            ctx.beginPath();
+            ctx.moveTo(cueBall.x, cueBall.y);
+            ctx.lineTo(dragCurrentX, dragCurrentY);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.setLineDash([5, 5]);
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Draw power indicator (circle around ball)
+            let powerScale = Math.min(1, Math.sqrt(dx*dx + dy*dy) / 100);
+            ctx.beginPath();
+            ctx.arc(cueBall.x, cueBall.y, CONFIG.R * (1 + powerScale), 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255, 255, 255, ${powerScale})`;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+    }
+
+    // --- Public API Methods (Contract) ---
+    
+    window.sim = {
+        W: CONFIG.W,
+        H: CONFIG.H,
+        R: CONFIG.R,
+        
+        reset: function(ballsArray) {
+            if (!ballsArray) ballsArray = [];
+            balls = ballsArray;
+            
+            // If empty array passed, use default rack logic for convenience in UI
+            if (balls.length === 0) {
+                resetBalls();
+            }
+            
+            lastTime = performance.now();
+            requestAnimationFrame(loop);
+        },
+
+        step: function(dt) {
+            step(dt);
+            draw();
+        },
+
+        state: function() {
+            return balls.map(b => ({
+                x: b.x,
+                y: b.y,
+                vx: b.vx,
+                vy: b.vy,
+                potted: b.potted,
+                cue: b.cue
+            }));
+        },
+
+        shoot: function(vx, vy) {
+            // Find cue ball and apply velocity
+            let cueBall = balls.find(b => b.cue && !b.potted);
+            if (cueBall) {
+                cueBall.vx = vx;
+                cueBall.vy = vy;
+            }
+        },
+
+        pause: function() {
+            // Logic handled by loop check, but explicit method requested
+            window.sim._paused = true;
+        },
+
+        resume: function() {
+            window.sim._paused = false;
+            lastTime = performance.now();
+            requestAnimationFrame(loop);
+        }
+    };
+
+    // --- Input Handling ---
+    
+    canvas.addEventListener('mousedown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        // Check if clicking on cue ball
+        let cueBall = balls.find(b => b.cue && !b.potted);
+        if (cueBall) {
+            let dx = mx - cueBall.x;
+            let dy = my - cueBall.y;
+            if (Math.sqrt(dx*dx + dy*dy) < CONFIG.R * 2) {
+                isDragging = true;
+                dragStartX = cueBall.x;
+                dragStartY = cueBall.y;
+                dragCurrentX = mx;
+                dragCurrentY = my;
+            }
+        }
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+        if (isDragging) {
+            const rect = canvas.getBoundingClientRect();
+            dragCurrentX = e.clientX - rect.left;
+            dragCurrentY = e.clientY - rect.top;
+        }
+    });
+
+    window.addEventListener('mouseup', () => {
+        if (isDragging) {
+            isDragging = false;
+            
+            // Calculate velocity based on drag distance
+            let dx = dragStartX - dragCurrentX; // Drag back means positive X velocity
+            let dy = dragStartY - dragCurrentY;
+            
+            // Cap power
+            let mag = Math.sqrt(dx*dx + dy*dy);
+            if (mag > 100) {
+                let scale = CONFIG.MAX_POWER / mag;
+                dx *= scale;
+                dy *= scale;
+            }
+
+            window.sim.shoot(dx, dy);
+        }
+    });
+
+    // --- Main Loop ---
+    function loop(timestamp) {
+        if (!window.sim._paused) {
+            let dt = (timestamp - lastTime) / 1000;
+            lastTime = timestamp;
+            
+            // Cap dt to prevent huge jumps if tab inactive
+            if (dt > 0.1) dt = 0.1;
+
+            window.sim.step(dt);
+        }
+        requestAnimationFrame(loop);
+    }
+
+    // Initial Reset
+    resetBalls();
+    lastTime = performance.now();
+    requestAnimationFrame(loop);
+
+}
+
+// Helper for random ball colors
+function getRandomColor() {
+    const colors = ['#e53935', '#d84315', '#fdd835', '#618103', '#43a047', '#26c6da', '#1e88e5', '#6200ea', '#7b1fa2'];
+    return colors[Math.floor(Math.random() * colors.length)];
+}
+
+</script>
+</body>
+</html>

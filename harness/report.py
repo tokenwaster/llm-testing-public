@@ -47,6 +47,7 @@ _NAV = [
     ("Review", "/review", True),
     ("Backend", "/backend", True), ("Manage data", "/manage", True),
     ("Organize", "/families-edit", True),
+    ("Special", "special.html", False),
     ("Info", "info.html", False),
 ]
 
@@ -59,6 +60,8 @@ def _nav(prefix: str = "") -> str:
         if control and _PUBLIC_NAV:
             continue
         target = href if control else prefix + href
+        if label == "Special" and not _PUBLIC_NAV:
+            target = "/special"
         out.append(f'<a href="{target}">{label}</a>')
     return "<!--navlinks-->" + "".join(out) + "<!--/navlinks-->"
 
@@ -174,6 +177,7 @@ def score_chip(s: dict) -> str:
 
 
 _FAIL_BADGES = {
+    "repetition_loop": ("↻ loop", "#b59"),
     "runaway": ("⟳ runaway", "#c90"),
     "timeout": ("⧖ timeout", "#c60"),
     "max_turns": ("⇥ max-turns", "#96c"),
@@ -193,13 +197,15 @@ def _failure_mode_of(e: dict) -> str | None:
     if not atts:
         return None
     last = atts[-1]
+    if last.get("error_kind") == "repetition_loop":
+        return "repetition_loop"
     if last.get("error_kind") == "runaway":
         return "runaway"
     sc = e.get("score") or {}
     failed = sc.get("status") != "scored" or (sc.get("score") or 0) == 0
     if last.get("stop_reason") == "length" and failed:
         return "runaway"
-    if last.get("error_kind") == "timeout":
+    if last.get("error_kind") in ("timeout", "rumination_spiral"):
         return "timeout"
     if last.get("error_kind"):
         return "error"
@@ -625,27 +631,35 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
   border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--ink); }
 .cmp-swap:hover { border-color:var(--accent); color:var(--accent); }
 .cmp-head { margin:0 0 28px; overflow-x:auto; }
-.cmp-tbl { border-collapse:collapse; width:100%; }
-.cmp-tbl th, .cmp-tbl td { padding:9px 14px; text-align:center; border-bottom:1px solid var(--hair); }
-.cmp-tbl thead th { font-size:15px; font-weight:700; border-bottom:1px solid var(--rule); }
-.cmp-tbl thead th a { font-weight:700; }
-.cmp-k { text-align:left !important; font-family:var(--mono); font-size:11px;
-  letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
-.cmp-c { font-variant-numeric:tabular-nums; font-size:15px; }
-.cmp-c.win { color:var(--good); font-weight:750; }
-.cmp-d { font-family:var(--mono); font-size:11.5px; color:var(--muted); min-width:64px; }
+/* the head metric block shares .cmp-row with the per-task grid, so a column
+   lines up under its model header instead of drifting */
+.cmp-hrow { border-bottom:1px solid var(--rule); align-items:end;
+  padding-bottom:8px; margin-bottom:2px; }
+.cmp-hc { text-align:center; font-size:15px; font-weight:700; }
+.cmp-hc a { font-weight:700; }
+.cmp-hc .small { font-weight:400; }
+.cmp-k { text-align:left; font-family:var(--mono); font-size:11px;
+  letter-spacing:.08em; text-transform:uppercase; color:var(--muted);
+  align-self:center; padding-right:10px; }
+.cmp-v { text-align:center; font-variant-numeric:tabular-nums; font-size:14px; }
+.cmp-v.win { color:var(--good); font-weight:750; }
 .cmp-cat { margin:0 0 18px; }
 .cmp-cath { font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
   color:var(--muted); padding:6px 0 4px; border-bottom:1px solid var(--rule); margin-bottom:4px; }
-.cmp-row { display:grid; grid-template-columns:1fr 90px 96px 90px; align-items:center;
-  gap:10px; padding:3px 4px; border-bottom:1px solid var(--hair); }
+.cmp-row { display:grid; grid-template-columns:minmax(150px,1fr) 1fr 84px 1fr;
+  align-items:center; gap:0; padding:3px 0; border-bottom:1px solid var(--hair); }
 .cmp-row:hover { background:var(--surface); }
-.cmp-t { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.cmp-row .scv { justify-content:flex-start; font-variant-numeric:tabular-nums; }
-.cmp-row .scv.ra { justify-content:flex-end; }
+.cmp-t { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  padding-right:10px; }
+/* A and B centre under their model columns; swatches mirror around the divider */
+.cmp-row .scv { justify-content:center; font-variant-numeric:tabular-nums; }
 .cmp-row .scv.ra .hsw { margin-right:0; margin-left:7px; }
-.cmp-dc { text-align:center; }
-.cmp-td { font-family:var(--mono); font-size:11px; white-space:nowrap; }
+/* the centre line dividing the two model sides — the delta sits on it */
+.cmp-dc { text-align:center; align-self:stretch; display:flex; align-items:center;
+  justify-content:center;
+  background:linear-gradient(var(--rule),var(--rule)) center/2px 100% no-repeat; }
+.cmp-td { font-family:var(--mono); font-size:11px; white-space:nowrap;
+  padding:0 5px; background:var(--plane); }
 .cmp-td.ga { color:var(--good); } .cmp-td.gb { color:var(--accent); }
 .cmp-td.tie { color:var(--muted); }
 
@@ -1080,6 +1094,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="seg" id="mxseg" title="narrow the grid to one end of the suite — rows re-rank by that subset's mean">
   <button type="button" data-mx="all" class="on">All ({{ matrix.n_all }})</button>
   <button type="button" data-mx="hard">◆ Hard ({{ matrix.n_hard }})</button>
+  <button type="button" data-mx="frontier" title="only the tasks where even the top cohort struggles — the sharpest discrimination">◆◆ Frontier ({{ matrix.n_frontier }})</button>
   <button type="button" data-mx="easy">Easy ({{ matrix.n_easy }})</button>
 </div>
 <div class="mx-scroll"><div class="mx">
@@ -1088,14 +1103,14 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     <div class="mx-cells">{% for c in matrix.cats %}<div class="mx-grp" style="grid-template-columns:repeat({{ c.n }},15px);gap:3px"><span class="mx-clabel" title="{{ c.key }}" style="grid-column:1/-1">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div>
   </div>
   {% for r in matrix.rows %}
-  <div class="mx-row{% if r.lead %} lead{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-easy="{{ r.m_easy }}">
+  <div class="mx-row{% if r.lead %} lead{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-frontier="{{ r.m_frontier }}" data-easy="{{ r.m_easy }}">
     <div class="mx-rail"><span class="rk">{{ r.rank }}</span><span class="nm">{{ r.model }}</span><span class="sc">{{ r.score }}{% if r.ci %}<span class="ci" title="95% confidence band across tasks (±1.96·SE)">{{ r.ci }}</span>{% endif %}</span><span class="gp">{% if r.tied %}<span class="tie" title="within the leader's 95% band — not statistically distinguishable on this task set">≈</span>{% endif %}{{ r.gap }}</span></div>
-    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
+    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
   {% endfor %}
   <div class="mx-row foot">
     <div class="mx-rail"><span class="fl">fleet avg / task →</span></div>
-    <div class="mx-cells">{% for g in matrix.foot %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
+    <div class="mx-cells">{% for g in matrix.foot %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
 </div></div>
 <script>
@@ -1108,7 +1123,8 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   function apply(sub){
     rows.concat(foot?[foot]:[]).forEach(function(r){
       [].slice.call(r.querySelectorAll('.mx-cell')).forEach(function(c){
-        c.style.display=(sub==='all'||c.dataset.sub===sub)?'':'none';
+        var show=(sub==='all')||(sub==='frontier'?c.dataset.fr==='1':c.dataset.sub===sub);
+        c.style.display=show?'':'none';
       });
       [].slice.call(r.querySelectorAll('.mx-grp')).forEach(function(g){
         g.style.display=vis(g)?'':'none';
@@ -1185,6 +1201,7 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
   <button data-f="speed">Speed</button>
   <button data-f="eff">Efficiency</button>
   <button data-f="hard">Hard tasks</button>
+  <button data-f="frontier">Frontier tasks</button>
   <button data-f="easy">Easy tasks</button>
   <button data-f="firsttry">First-try</button>
 </div>
@@ -1217,7 +1234,7 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
 <tr data-kind="{{ r.kind }}" data-w="{{ r.w_v }}" data-kvtok="{{ r.kvtok }}"
     data-kvfixed="{{ r.kvfixed }}" data-native="{{ r.native }}"
     data-pure="{{ r.pure_v }}" data-value="{{ r.value_v }}" data-speed="{{ r.speed_v }}"
-    data-eff="{{ r.eff_v }}" data-hard="{{ r.hard_v }}" data-easy="{{ r.easy_v }}" data-firsttry="{{ r.firsttry_v }}">
+    data-eff="{{ r.eff_v }}" data-hard="{{ r.hard_v }}" data-frontier="{{ r.frontier_v }}" data-easy="{{ r.easy_v }}" data-firsttry="{{ r.firsttry_v }}">
 <td class="num">{{ r.rank }}</td>
 <td class="nowrap">{{ r.model }}</td>
 <td class="num lensval" data-sort="{{ r.score_v }}">{{ r.score }}</td>
@@ -1380,7 +1397,7 @@ classification updates on the next report regeneration.</div>
 <th data-type="text">Scoring</th><th class="num" data-type="num">Models tested</th>
 <th class="num" data-type="num" title="models that scored a perfect 1.0, out of tested — high = saturated (retire or harden it), low = discriminating">Aced</th>
 <th class="num" data-type="num" title="max − min score across models — 0.00 = everyone landed the same, high = the task separates the field">Spread</th>
-<th data-type="text" title="◆ = in the curated hardened suite (config.HARDENED_TASKS), the set chosen for 3× repeat runs. Distinct from the live frontier/discriminator flags on the Discriminate page.">3×</th></tr>
+<th data-type="text" title="◆ = in the hardened suite = Hard ∪ Frontier (the overview's discriminating tiers), the set chosen for 3× repeat runs — derived live, not hand-curated.">3×</th></tr>
 {% for t in task_rows %}
 <tr><td class="nowrap"><a href="tasks/{{ t.id }}.html">{{ t.id }}</a></td>
 <td class="small">{{ t.title }}</td><td class="small">{{ t.category }}</td>
@@ -1514,6 +1531,7 @@ const RANK_WHAT = {
   speed: 'Ranked by score per minute — quality per unit of wall-clock time to reach it (not raw tok/s).',
   eff: 'Ranked Pareto-efficient first: a model not beaten on score AND cost AND speed leads; dominated ones sink below the line.',
   hard: 'Ranked by score on the discriminating hard-task subset — cuts through the top-end saturation where everyone scores ~0.99.',
+  frontier: 'Ranked by score on the FRONTIER subset — only the tasks where even the top cohort struggles. The sharpest cut, but a small set: expect wide confidence bands and near-ties until more frontier tasks are added.',
   easy: 'Ranked by score on the easy subset — the tasks almost every model gets right. The order here is SUPPOSED to be flat: if a model drops on this lens it is failing the everyday work, not the frontier.',
   firsttry: 'Ranked by first-try-clean rate: the share of tasks nailed at 1.0 with zero retries.'
 };
@@ -1526,6 +1544,7 @@ const LENS_META = {
   speed:   {label:'Score / min', fmt:v=>v.toFixed(2)},
   eff:     {label:'Efficiency',  fmt:v=>v>=10?'frontier':'dominated'},
   hard:    {label:'Hard score',  fmt:v=>v.toFixed(3)},
+  frontier:{label:'Frontier score', fmt:v=>v.toFixed(3)},
   easy:    {label:'Easy score',  fmt:v=>v.toFixed(3)},
   firsttry:{label:'First-try',   fmt:v=>(v*100).toFixed(0)+'%'}
 };
@@ -2024,9 +2043,14 @@ def _aggregate(entries: list[dict]) -> dict:
             if e["score"].get("status") == "scored"
             and e["score"].get("score") is not None]
     if vals:
-        agg["score"] = {**next(e["score"] for e in reversed(entries)
-                               if e["score"].get("status") == "scored"),
-                        "score": statistics.fmean(vals)}
+        _scored = [e for e in entries
+                   if e["score"].get("status") == "scored"
+                   and e["score"].get("score") is not None]
+        src = _scored[-1]
+        if min(vals) < max(vals):
+            src = next(e for e in reversed(_scored)
+                       if e["score"]["score"] == min(vals))
+        agg["score"] = {**src["score"], "score": statistics.fmean(vals)}
         agg["score_sigma"] = statistics.pstdev(vals) if len(vals) > 1 else 0.0
     for k in _MEAN_FIELDS:
         nums = [e[k] for e in entries if e.get(k) is not None]
@@ -2979,7 +3003,7 @@ def _mx_cell(entry, tdef, acfg, suspect, href):
         return {"cls": "trap", "a": "0", "tip": f"{tid} · fell-for-trap", "href": href}
     if cat == "retrieval-miss":
         return {"cls": "miss", "a": "0", "tip": f"{tid} · retrieval-miss", "href": href}
-    if cat in ("rumination-spiral", "incomplete-output",
+    if cat in ("rumination-spiral", "runaway", "incomplete-output",
                "agentic-max-turns", "infinite-loop"):
         return {"cls": "dnf", "a": "0", "tip": f"{tid} · {cat}", "href": href}
     if sc.get("status") == "scored" and val is not None:
@@ -3437,12 +3461,15 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                            if s.get("first_try_val") is not None else ""),
             "eff_v": f"{(s['avg_score_val'] or 0) + (0 if m in dominated else 10):.4f}",
             "hard_v": (f"{hard_mean[m]:.4f}" if m in hard_mean else ""),
+            "frontier_v": (f"{frontier_mean[m]:.4f}" if m in frontier_mean else ""),
             "easy_v": (f"{easy_mean[m]:.4f}" if m in easy_mean else ""),
         }
 
     _dstats = discrimination_stats(runs, tdefs)
+    _hardened_set = set(_dstats["hard_subset"]) | set(_dstats["frontier_subset"])
     hard_mean = {h["model"]: h["mean"] for h in _dstats["hard_rank"]}
     easy_mean = {h["model"]: h["mean"] for h in _dstats["easy_rank"]}
+    frontier_mean = {h["model"]: h["mean"] for h in _dstats["frontier_rank"]}
     _eff = [{"m": m, "s": summaries[m]["avg_score_val"] or 0,
              "c": summaries[m]["cost_val"] or 0, "t": summaries[m]["tps_val"] or 0}
             for m in complete]
@@ -3513,7 +3540,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             "aced_frac": f"{(aced / n) if n else 0:.4f}",
             "spread": f"{spread:.2f}" if n >= 2 else "—",
             "spread_v": f"{spread:.4f}",
-            "hardened": tid in config.HARDENED_TASKS,
+            "hardened": tid in _hardened_set,
         })
 
     runs_view = []
@@ -3546,11 +3573,13 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                     if summaries[m]["avg_score_val"] is not None), None)
     _lead_ci = summaries[_lead_m]["score_ci95"] if _lead_m else None
     _flag_of = {r["tid"]: r["flag"] for r in _dstats["rows"]}
-    _sub_of = {tid: ("hard" if _flag_of.get(tid) in ("frontier", "discriminator")
+    _sub_of = {tid: ("hard" if _flag_of.get(tid) == "discriminator"
                      else "easy" if _flag_of.get(tid) in ("ceiling", "dead")
                      else "mid") for tid in task_data}
     _hard_ids = [t for t, s in _sub_of.items() if s == "hard"]
     _easy_ids = [t for t, s in _sub_of.items() if s == "easy"]
+    _fr_of = {tid: (_flag_of.get(tid) == "frontier") for tid in task_data}
+    _frontier_ids = [t for t, v in _fr_of.items() if v]
 
     def _sub_mean(model, ids):
         xs = [e["score"]["score"] for tid in ids
@@ -3563,7 +3592,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
     for i, m in enumerate(_mrank):
         agg = summaries[m]["avg_score_val"]
         groups = [[{**_mcell(task_data[tid]["agg"].get(m), tdefs[tid], m),
-                    "sub": _sub_of[tid]}
+                    "sub": _sub_of[tid], "fr": "1" if _fr_of[tid] else ""}
                    for tid in _cat_tids[c]] for c in _live_cats]
         ci = summaries[m]["score_ci95"]
         if agg is None:
@@ -3578,6 +3607,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                     and _lead_ci is not None
                     and (agg + ci) >= (_lead_v - _lead_ci))
         _mh, _me = _sub_mean(m, _hard_ids), _sub_mean(m, _easy_ids)
+        _mf = _sub_mean(m, _frontier_ids)
         matrix_rows.append({
             "rank": i + 1, "model": _mlink(m), "score": score_s,
             "ci": ci_s, "tied": tied,
@@ -3585,6 +3615,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             "m_all": ("" if agg is None else f"{agg:.6f}"),
             "m_hard": ("" if _mh is None else f"{_mh:.6f}"),
             "m_easy": ("" if _me is None else f"{_me:.6f}"),
+            "m_frontier": ("" if _mf is None else f"{_mf:.6f}"),
             "groups": groups})
 
     matrix_foot = []
@@ -3597,11 +3628,13 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             if vals:
                 v = sum(vals) / len(vals)
                 grp.append({"cls": "pass", "sub": _sub_of[tid],
+                            "fr": "1" if _fr_of[tid] else "",
                             "a": f"{0.10 + 0.90 * max(0.0, min(1.0, v)):.3f}",
                             "tip": f"{tid} · fleet avg {v:.2f}",
                             "href": f"tasks/{tid}.html"})
             else:
                 grp.append({"cls": "na", "a": "0", "sub": _sub_of[tid],
+                            "fr": "1" if _fr_of[tid] else "",
                             "tip": f"{tid} · no data",
                             "href": f"tasks/{tid}.html"})
         matrix_foot.append(grp)
@@ -3609,7 +3642,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
     matrix = ({"cats": [{"key": c, "code": _cat_code(_cat_tids[c]), "n": len(_cat_tids[c])} for c in _live_cats],
                "rows": matrix_rows, "foot": matrix_foot,
                "n_hard": len(_hard_ids), "n_easy": len(_easy_ids),
-               "n_all": len(task_data)}
+               "n_frontier": len(_frontier_ids), "n_all": len(task_data)}
               if (matrix_rows and _live_cats) else None)
 
     mast_eyebrow = [
@@ -4325,6 +4358,11 @@ the measured <code>lms load</code> cold-start time.</p>
 <p><code>runs/</code> is append-only ground truth. Reports are a pure function of
 it, so you can delete <code>reports/</code> and regenerate at any time — and you
 can audit any number on this site down to the raw exchange that produced it.</p>
+<p><strong>Experimental probes are kept separate and count toward nothing.</strong>
+One-off experiments — like the spiral-window study on <a href="special.html">the
+Special page</a>, measuring how long each model takes to <em>start</em> answering —
+run outside the dataset entirely. They never touch the leaderboard, discrimination,
+or any model's score; they are a scratchpad, shown read-only for transparency.</p>
 <table><thead><tr><th>Path</th><th>What's in it</th></tr></thead><tbody>
 <tr><td><code>runs/&lt;run&gt;/run.json</code></td><td class="small">Run manifest:
 suite version, models, task hashes, hardware fingerprint, and any pause
@@ -4535,8 +4573,10 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
         t = tdefs[tid]
         if gap is not None and abs(gap) < 0.06 and mean > 0.9:
             flag = "dead"
-        elif top_mean is not None and top_mean < 0.85:
+        elif top_mean is not None and top_mean < 0.75:
             flag = "frontier"
+        elif top_mean is not None and top_mean < 0.85:
+            flag = "discriminator"
         elif pct1 >= 0.7:
             flag = "ceiling"
         elif gap is not None and gap > 0.3:
@@ -4560,7 +4600,8 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
             clusters.append((round(c, 3), a, b))
     clusters.sort(reverse=True)
 
-    hard = [r["tid"] for r in rows if r["flag"] in ("frontier", "discriminator")]
+    hard = [r["tid"] for r in rows if r["flag"] == "discriminator"]
+    frontier = [r["tid"] for r in rows if r["flag"] == "frontier"]
     easy = [r["tid"] for r in rows if r["flag"] in ("ceiling", "dead")]
     grank = {m: i for i, m in enumerate(ranked)}
 
@@ -4583,12 +4624,15 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
 
     hard_rank = _rank_on(hard)
     easy_rank = _rank_on(easy)
+    frontier_rank = _rank_on(frontier)
 
     return {
         "rows": rows,
         "clusters": clusters,
         "hard_subset": hard,
         "hard_rank": hard_rank,
+        "frontier_subset": frontier,
+        "frontier_rank": frontier_rank,
         "easy_subset": easy,
         "easy_rank": easy_rank,
         "top_spread": top_spread,
@@ -4603,6 +4647,35 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
                                if r["flag"] in ("discriminator", "frontier")),
         "mean_sd": (sum(r["sd"] for r in rows) / len(rows)) if rows else 0.0,
     }
+
+
+def task_tiers(runs: list[dict] | None = None,
+               tdefs: dict | None = None) -> dict[str, str]:
+    """{task_id: 'hard' | 'frontier' | 'easy'} — the overview's difficulty
+    lenses, derived from discrimination_stats. Middling tasks (no clean pattern)
+    and tasks with too little data to classify are absent. This is the single
+    source of truth the /run page and the discriminate page both read, so a
+    task's tier can never disagree between pages. Dynamic: a tier can shift as
+    scores accumulate."""
+    runs = load_all_runs() if runs is None else runs
+    tdefs = _task_defs() if tdefs is None else tdefs
+    ds = discrimination_stats(runs, tdefs)
+    out: dict[str, str] = {}
+    for t in ds.get("easy_subset", []):
+        out[t] = "easy"
+    for t in ds.get("hard_subset", []):
+        out[t] = "hard"
+    for t in ds.get("frontier_subset", []):
+        out[t] = "frontier"
+    return out
+
+
+def hardened_ids(tiers: dict[str, str] | None = None) -> list[str]:
+    """The hardened repeat-run set = Hard ∪ Frontier (the tasks worth the cost
+    of 3× repeat runs). Replaces the old hand-curated config.HARDENED_TASKS with
+    the live, auto-derived tiers."""
+    tiers = task_tiers() if tiers is None else tiers
+    return sorted(t for t, v in tiers.items() if v in ("hard", "frontier"))
 
 
 _DISCRIM_FLAG = {
@@ -5192,12 +5265,13 @@ function metricVal(m, key){
 }
 function renderHead(a, b){
   const A = D.data[a], B = D.data[b];
-  let h = '<table class="cmp-tbl"><thead><tr><th></th>'
-        + '<th class="cmp-c"><a href="models/'+A.slug+'.html">'+a+'</a>'
-        + '<div class="small muted">#'+A.rank+' \\u00b7 '+A.where+'</div></th>'
-        + '<th class="cmp-d">\\u0394</th>'
-        + '<th class="cmp-c"><a href="models/'+B.slug+'.html">'+b+'</a>'
-        + '<div class="small muted">#'+B.rank+' \\u00b7 '+B.where+'</div></th></tr></thead><tbody>';
+  let h = '<div class="cmp-row cmp-hrow">'
+        + '<span class="cmp-k"></span>'
+        + '<span class="cmp-hc"><a href="models/'+A.slug+'.html">'+a+'</a>'
+        + '<div class="small muted">#'+A.rank+' \\u00b7 '+A.where+'</div></span>'
+        + '<span class="cmp-dc"></span>'
+        + '<span class="cmp-hc"><a href="models/'+B.slug+'.html">'+b+'</a>'
+        + '<div class="small muted">#'+B.rank+' \\u00b7 '+B.where+'</div></span></div>';
   for (const [label, key, hi, fmt] of METRICS){
     const va = metricVal(A, key), vb = metricVal(B, key);
     let wa='', wb='', delta='';
@@ -5214,12 +5288,12 @@ function renderHead(a, b){
         delta = dv;
       }
     }
-    h += '<tr><td class="cmp-k">'+label+'</td>'
-       + '<td class="cmp-c '+wa+'">'+fmt(A)+'</td>'
-       + '<td class="cmp-d">'+delta+'</td>'
-       + '<td class="cmp-c '+wb+'">'+fmt(B)+'</td></tr>';
+    h += '<div class="cmp-row">'
+       + '<span class="cmp-k">'+label+'</span>'
+       + '<span class="cmp-v '+wa+'">'+fmt(A)+'</span>'
+       + '<span class="cmp-dc">'+(delta?'<span class="cmp-td">'+delta+'</span>':'')+'</span>'
+       + '<span class="cmp-v '+wb+'">'+fmt(B)+'</span></div>';
   }
-  h += '</tbody></table>';
   $('#cmp-head').innerHTML = h;
 }
 function renderGrid(a, b){
@@ -5325,6 +5399,297 @@ def build_feed(runs: list[dict], tdefs: dict) -> str:
         f'  <link href="{site}/reports/index.html"/>\n'
         f'  <link rel="self" href="{site}/reports/feed.xml"/>\n'
         + "\n".join(entries) + "\n</feed>\n")
+
+
+def special_summary() -> dict:
+    """Read the spiral-probe results in special/ (experimental, never counted)
+    into a per-cell and per-model rollup. Shared by the operator's interactive
+    /special and the public static page, so both read the same numbers. Pure
+    data — no run controls, no job state."""
+    import re
+    import statistics
+    from .tasks import load_tasks
+    base = config.SPECIAL_DIR
+    guard = config.CLAUDE_SPIRAL_S
+    official = {t.id: t.timeout_s for t in load_tasks()}
+    run_window: dict = {}
+    if base.is_dir():
+        for rj in base.glob("*/run.json"):
+            m = re.search(r"spiral@(\d+)s", read_json(rj, {}).get("tag") or "")
+            if m:
+                run_window[rj.parent.name] = int(m.group(1))
+    cells: dict = {}
+    if base.is_dir():
+        for mfile in base.glob("*/*/*/metrics.json"):
+            run = mfile.parents[2].name
+            if run not in run_window:
+                continue
+            model, task = mfile.parents[1].name, mfile.parent.name
+            d = read_json(mfile, {})
+            c = cells.setdefault((model, task), {
+                "model": model, "task": task, "trials": 0, "answered": 0,
+                "ttfa": [], "scores": [], "windows": set()})
+            if run in run_window:
+                c["windows"].add(run_window[run])
+            c["trials"] += 1
+            attempts = d.get("attempts") or [{}]
+            ftm = next((a.get("first_text_ms") for a in attempts
+                        if a.get("first_text_ms") is not None), None)
+            if d.get("status") == "ok":
+                c["answered"] += 1
+                if ftm is not None:
+                    c["ttfa"].append(ftm)
+            sc = read_json(mfile.parent / "score.json", {})
+            if sc.get("status") == "scored" and sc.get("score") is not None:
+                c["scores"].append(sc["score"])
+    def _win(ws):
+        ws = sorted(ws)
+        if not ws:
+            return "—"
+        return f"{ws[0]}s" if len(ws) == 1 else f"{ws[0]}–{ws[-1]}s"
+    rows, all_ttfa, models = [], [], {}
+    for c in cells.values():
+        all_ttfa += c["ttfa"]
+        rows.append({
+            "model": c["model"], "task": c["task"], "trials": c["trials"],
+            "answered": c["answered"], "window": _win(c["windows"]),
+            "official_s": official.get(c["task"]),
+            "ttfa_max_s": round(max(c["ttfa"]) / 1000, 1) if c["ttfa"] else None,
+            "ttfa_med_s": (round(statistics.median(c["ttfa"]) / 1000, 1)
+                           if c["ttfa"] else None),
+            "score_avg": (round(sum(c["scores"]) / len(c["scores"]), 3)
+                          if c["scores"] else None)})
+        mm = models.setdefault(c["model"], {"model": c["model"], "probed": 0,
+                                            "answered": 0, "ttfa": [], "scores": []})
+        mm["probed"] += 1
+        if c["answered"] > 0:
+            mm["answered"] += 1
+            mm["ttfa"] += c["ttfa"]
+            mm["scores"] += c["scores"]
+    rows.sort(key=lambda r: (r["model"], r["task"]))
+    model_rows = []
+    for mm in models.values():
+        answered, probed = mm["answered"], mm["probed"]
+        model_rows.append({
+            "model": mm["model"], "probed": probed, "answered": answered,
+            "needed_s": round(max(mm["ttfa"]) / 1000, 1) if mm["ttfa"] else None,
+            "score_avg": (round(sum(mm["scores"]) / len(mm["scores"]), 3)
+                          if mm["scores"] else None),
+            "verdict": ("window-limited" if answered == probed
+                        else "partial" if answered else "never answers")})
+    model_rows.sort(key=lambda r: (-(r["needed_s"] or 0), r["model"]))
+
+    tasks: dict = {}
+    for c in cells.values():
+        t = tasks.setdefault(c["task"], {"task": c["task"], "ttfa": [],
+                                         "models": set(),
+                                         "official_s": official.get(c["task"])})
+        t["ttfa"] += c["ttfa"]
+        t["models"].add(c["model"])
+    task_rows = []
+    for t in tasks.values():
+        widest = round(max(t["ttfa"]) / 1000, 1) if t["ttfa"] else None
+        task_rows.append({
+            "task": t["task"], "official_s": t["official_s"],
+            "models": len(t["models"]), "widest_s": widest,
+            "over": (widest is not None and t["official_s"] is not None
+                     and widest > t["official_s"])})
+    task_rows.sort(key=lambda r: -(r["widest_s"] or 0))
+
+    return {"rows": rows, "models": model_rows, "tasks": task_rows,
+            "guard_s": guard,
+            "window_needed_s": round(max(all_ttfa) / 1000, 1) if all_ttfa else None}
+
+
+def special_turns_summary() -> dict:
+    """Read the turn-budget probe results in special/ (tag turns@<N>, experimental,
+    never counted): for each agentic cell re-run at a raised turn cap, whether the
+    extra steps let it CONVERGE to a pass or it stayed stuck. The turn-count analog
+    of special_summary — separate because more time and more turns are different
+    remedies. A per-model verdict of 'genuinely stuck' means the cap was never the
+    real limit; 'turn-limited' means more steps were all it needed."""
+    import re
+    import statistics
+    from . import assess
+    base = config.SPECIAL_DIR
+    thr = assess.load_cfg().get("pass_threshold", 0.8)
+    run_cap: dict = {}
+    if base.is_dir():
+        for rj in base.glob("*/run.json"):
+            m = re.search(r"turns@(\d+)", read_json(rj, {}).get("tag") or "")
+            if m:
+                run_cap[rj.parent.name] = int(m.group(1))
+    cells: dict = {}
+    if base.is_dir():
+        for mfile in base.glob("*/*/*/metrics.json"):
+            run = mfile.parents[2].name
+            if run not in run_cap:
+                continue
+            model, task = mfile.parents[1].name, mfile.parent.name
+            c = cells.setdefault((model, task), {
+                "model": model, "task": task, "trials": 0, "turns": [],
+                "scores": [], "caps": set(), "finished": 0})
+            d = read_json(mfile, {})
+            c["caps"].add(run_cap[run])
+            c["trials"] += 1
+            if d.get("turns") is not None:
+                c["turns"].append(d["turns"])
+            if d.get("status") != "max_turns":
+                c["finished"] += 1
+            sc = read_json(mfile.parent / "score.json", {})
+            if sc.get("status") == "scored" and sc.get("score") is not None:
+                c["scores"].append(sc["score"])
+
+    def _cap(cs):
+        cs = sorted(cs)
+        return "—" if not cs else (str(cs[0]) if len(cs) == 1
+                                   else f"{cs[0]}–{cs[-1]}")
+
+    def _verdict(savg):
+        if savg is None:
+            return "no score"
+        if savg >= thr:
+            return "converged"
+        return "improved" if savg > 0 else "still stuck"
+
+    rows, models, tasks = [], {}, {}
+    for c in cells.values():
+        savg = (round(sum(c["scores"]) / len(c["scores"]), 3)
+                if c["scores"] else None)
+        rows.append({
+            "model": c["model"], "task": c["task"], "trials": c["trials"],
+            "cap": _cap(c["caps"]),
+            "turns_max": max(c["turns"]) if c["turns"] else None,
+            "turns_med": round(statistics.median(c["turns"])) if c["turns"] else None,
+            "finished": c["finished"], "score_avg": savg,
+            "verdict": _verdict(savg)})
+        mm = models.setdefault(c["model"], {"model": c["model"], "probed": 0,
+                                            "converged": 0, "scores": []})
+        mm["probed"] += 1
+        if savg is not None:
+            mm["scores"].append(savg)
+            if savg >= thr:
+                mm["converged"] += 1
+        tt = tasks.setdefault(c["task"], {"task": c["task"], "models": set(),
+                                          "converged": 0, "turns": []})
+        tt["models"].add(c["model"])
+        tt["turns"] += c["turns"]
+        if savg is not None and savg >= thr:
+            tt["converged"] += 1
+    rows.sort(key=lambda r: (r["model"], r["task"]))
+    model_rows = [{
+        "model": mm["model"], "probed": mm["probed"], "converged": mm["converged"],
+        "score_avg": (round(sum(mm["scores"]) / len(mm["scores"]), 3)
+                      if mm["scores"] else None),
+        "verdict": ("turn-limited" if mm["converged"] == mm["probed"]
+                    else "partly turn-limited" if mm["converged"]
+                    else "genuinely stuck")}
+        for mm in models.values()]
+    model_rows.sort(key=lambda r: (-r["converged"], r["model"]))
+    task_rows = [{
+        "task": tt["task"], "models": len(tt["models"]),
+        "converged": tt["converged"],
+        "turns_typ": (round(statistics.median(tt["turns"]))
+                      if tt["turns"] else None)}
+        for tt in tasks.values()]
+    task_rows.sort(key=lambda r: -r["converged"])
+    return {"rows": rows, "models": model_rows, "tasks": task_rows}
+
+
+SPECIAL_STATIC_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Special · LLM Testing</title><style>{{ css }}
+.exp { background:var(--surface); border-left:3px solid var(--trap); border-radius:6px;
+  padding:12px 16px; margin:14px 0 22px; font-size:12.5px; color:var(--ink-2); }
+.exp b { color:var(--trap); }
+.headline { font-size:15px; margin:0 0 20px; } .headline b { color:var(--good); font-size:20px; }
+.sp-tbl { border-collapse:collapse; width:100%; font-size:13px; margin-bottom:8px; }
+.sp-tbl th, .sp-tbl td { padding:6px 10px; border-bottom:1px solid var(--hair); text-align:left; }
+.sp-tbl th { color:var(--muted); font-weight:600; }
+.sp-tbl td.n, .sp-tbl th.n { text-align:right; font-variant-numeric:tabular-nums;
+  font-family:var(--mono); }
+tr.grp td { font-weight:700; color:var(--ink); background:var(--surface); padding-top:8px; }
+</style></head><body>
+<div class="topbar">
+  <div><h1>Special — experiments</h1>
+  <div class="sub">read-only findings · {{ dataset_label or "live dataset" }}</div></div>
+  <div class="nav">{{ nav }}</div>
+</div>
+<div class="exp"><b>EXPERIMENTAL — not part of any dataset.</b> These runs count
+toward <b>nothing</b> — not the leaderboard, not discrimination, not any model's
+score. A scratchpad for probes into how models behave at the edges.</div>
+
+{% if not rows %}
+<p class="muted">No experimental results yet.</p>
+{% else %}
+<h2>Spiral / rumination window probe</h2>
+<p class="small muted">How long each model takes to <em>start answering</em>
+(time-to-first-answer-token) on the tasks where it hit the suite's no-output
+guard. A model over the guard was being cut off — a slow starter, not
+necessarily incapable.</p>
+{% if tasks %}
+<h2>By task — window needed vs the official budget</h2>
+<p class="small muted">For each test we have probe data on: the widest window
+<em>any</em> model needed to start answering, against that test's official suite
+timeout. "over" means at least one model can't begin inside the real budget.</p>
+<table class="sp-tbl"><tr><th>Task</th><th class="n">models tested</th>
+<th class="n">widest window needed</th><th class="n">official budget</th>
+<th class="n">headroom</th></tr>
+{% for t in tasks %}
+<tr><td>{{ t.task }}</td><td class="n">{{ t.models }}</td>
+<td class="n">{% if t.widest_s is none %}—{% else %}{{ t.widest_s }}s{% endif %}</td>
+<td class="n">{% if t.official_s is none %}—{% else %}{{ t.official_s }}s{% endif %}</td>
+<td class="n">{% if t.widest_s is none or t.official_s is none %}—{% elif t.over %}<span style="color:var(--crit)">−{{ (t.widest_s - t.official_s)|round|int }}s over</span>{% else %}<span style="color:var(--good)">+{{ (t.official_s - t.widest_s)|round|int }}s</span>{% endif %}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<h2>Per model</h2>
+<table class="sp-tbl"><tr><th>Model</th><th class="n">answered</th>
+<th class="n">window needed</th><th class="n">vs {{ guard_s }}s</th>
+<th class="n">score</th><th>verdict</th></tr>
+{% for m in models %}
+<tr><td>{{ m.model }}</td><td class="n">{{ m.answered }}/{{ m.probed }}</td>
+<td class="n">{% if m.needed_s is none %}—{% else %}{{ m.needed_s }}s{% endif %}</td>
+<td class="n">{% if m.needed_s is none %}—{% elif m.needed_s > guard_s %}+{{ (m.needed_s - guard_s)|round|int }}s{% else %}fits{% endif %}</td>
+<td class="n">{% if m.score_avg is none %}—{% else %}{{ m.score_avg }}{% endif %}</td>
+<td style="font-weight:600;color:{{ 'var(--good)' if m.verdict=='window-limited' else 'var(--crit)' if m.verdict=='never answers' else 'var(--warn)' }}">{{ m.verdict }}</td></tr>
+{% endfor %}
+</table>
+
+<h2>Per model · per test</h2>
+<table class="sp-tbl"><tr><th>Model / task</th>
+<th class="n">official budget</th><th class="n">probe window</th>
+<th class="n">answered</th><th class="n">first answer</th><th class="n">vs official</th>
+<th class="n">typical</th><th class="n">score</th></tr>
+{% for r in rows %}{% if r.show_model %}<tr class="grp"><td colspan="8">{{ r.model }}</td></tr>{% endif %}
+<tr><td style="padding-left:18px">{{ r.task }}</td>
+<td class="n">{% if r.official_s is none %}—{% else %}{{ r.official_s }}s{% endif %}</td>
+<td class="n">{{ r.window }}</td>
+<td class="n">{{ r.answered }}/{{ r.trials }}</td>
+<td class="n">{% if r.ttfa_max_s is none %}—{% else %}{{ r.ttfa_max_s }}s{% endif %}</td>
+<td class="n">{% if r.ttfa_max_s is none or r.official_s is none %}—{% elif r.ttfa_max_s > r.official_s %}<span style="color:var(--crit)">+{{ (r.ttfa_max_s - r.official_s)|round|int }}s over</span>{% else %}fits{% endif %}</td>
+<td class="n">{% if r.ttfa_med_s is none %}—{% else %}{{ r.ttfa_med_s }}s{% endif %}</td>
+<td class="n">{% if r.score_avg is none %}—{% else %}{{ r.score_avg }}{% endif %}</td></tr>
+{% endfor %}
+</table>
+<p class="small muted"><b>official budget</b> = the real suite timeout for that
+test (what the model must fit in when it counts). <b>first answer</b> = slowest
+time-to-first-answer in the probe. <b>vs official</b>: "over" means it can't
+start answering inside the test's real budget; "fits" means it can.</p>
+{% endif %}
+<div class="css-tie" style="color:var(--accent)"></div>
+</body></html>"""
+
+
+def build_special_page(dataset_label: str = "") -> str:
+    d = special_summary()
+    prev = None
+    for r in d["rows"]:
+        r["show_model"] = (r["model"] != prev)
+        prev = r["model"]
+    return _env.from_string(SPECIAL_STATIC_TEMPLATE).render(
+        nav=_nav(""), css=BASE_CSS, dataset_label=dataset_label, **d)
 
 
 def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
@@ -5455,6 +5820,7 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
            build_compare_page(runs, tdefs, dataset_label, dataset_key))
         if dataset_key == "live":
             _w(out_dir / "feed.xml", build_feed(runs, tdefs))
+            _w(out_dir / "special.html", build_special_page(dataset_label))
         index = out_dir / "index.html"
         _w(index, build_index(runs, tasks_dir=tasks_dir,
                               dataset_label=dataset_label, dataset_key=dataset_key,

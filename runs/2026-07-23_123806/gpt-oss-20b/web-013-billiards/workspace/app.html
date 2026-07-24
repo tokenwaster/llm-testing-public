@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Billiards Demo</title>
+<style>
+  body{margin:0;background:#222;color:white;font-family:sans-serif;}
+  #controls{position:absolute;top:10px;left:10px;background:rgba(0,0,0,.5);padding:10px;border-radius:4px;}
+  button{margin-right:5px;}
+  canvas{display:block;margin:auto;background:#004400;}
+</style>
+</head>
+<body>
+<div id="controls">
+  <button id="resetBtn">Reset / Rack</button>
+  <span id="instr">Click cue ball, drag back to aim &amp; power.</span>
+</div>
+<canvas id="table"></canvas>
+
+<script>
+(() => {
+  const canvas = document.getElementById('table');
+  const ctx = canvas.getContext('2d');
+
+  // Table dimensions
+  const W = 800;
+  const H = 400;
+  const R = 10; // ball radius
+
+  canvas.width = W;
+  canvas.height = H;
+
+  // Pocket positions (center of pocket)
+  const pockets = [
+    {x:0, y:0},
+    {x:W/2, y:0},
+    {x:W, y:0},
+    {x:0, y:H},
+    {x:W/2, y:H},
+    {x:W, y:H}
+  ];
+  const pocketRadius = R * 1.5;
+
+  // Physics constants
+  const friction = 0.98; // per second
+  const dtStep = 0.016; // 60fps
+
+  let balls = [];
+  let animId;
+  let paused = false;
+
+  // Mouse interaction
+  let dragging = false;
+  let dragStart = null;
+  let cueBallIndex = -1;
+
+  function drawTable() {
+    ctx.fillStyle='#004400';
+    ctx.fillRect(0,0,W,H);
+    // rails
+    ctx.strokeStyle='#222';
+    ctx.lineWidth=20;
+    ctx.strokeRect(10,10,W-20,H-20);
+    // pockets
+    ctx.fillStyle='black';
+    pockets.forEach(p=>ctx.beginPath());
+    pockets.forEach(p=>{
+      ctx.arc(p.x,p.y,pocketRadius,0,Math.PI*2);
+      ctx.fill();
+    });
+  }
+
+  function drawBalls() {
+    balls.forEach((b,i)=>{
+      if(b.potted) return;
+      ctx.beginPath();
+      ctx.arc(b.x,b.y,R,0,Math.PI*2);
+      ctx.fillStyle=b.cue?'white':'yellow';
+      ctx.fill();
+      ctx.strokeStyle='black';
+      ctx.lineWidth=1;
+      ctx.stroke();
+    });
+  }
+
+  function drawAimLine() {
+    if(!dragging) return;
+    const dx = dragStart.x - mousePos.x;
+    const dy = dragStart.y - mousePos.y;
+    const len = Math.hypot(dx,dy);
+    const scale = 0.2; // visual scaling
+    ctx.strokeStyle='rgba(255,255,255,.7)';
+    ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.moveTo(dragStart.x,dragStart.y);
+    ctx.lineTo(dragStart.x - dx*scale, dragStart.y - dy*scale);
+    ctx.stroke();
+  }
+
+  function render() {
+    drawTable();
+    drawBalls();
+    drawAimLine();
+  }
+
+  // Physics
+  function step(dt) {
+    // Move balls
+    balls.forEach(b=>{
+      if(b.potted) return;
+      b.x += b.vx*dt;
+      b.y += b.vy*dt;
+      // friction
+      const speed = Math.hypot(b.vx,b.vy);
+      if(speed>0){
+        const newSpeed = speed * Math.pow(friction, dt);
+        if(newSpeed<0.01){b.vx=b.vy=0;}
+        else{const factor=newSpeed/speed; b.vx*=factor;b.vy*=factor;}
+      }
+    });
+
+    // Wall collisions
+    balls.forEach(b=>{
+      if(b.potted) return;
+      if(b.x-R < 10){
+        b.x = 10+R;
+        b.vx = -b.vx*0.98;
+      }else if(b.x+R > W-10){
+        b.x = W-10-R;
+        b.vx = -b.vx*0.98;
+      }
+      if(b.y-R < 10){
+        b.y = 10+R;
+        b.vy = -b.vy*0.98;
+      }else if(b.y+R > H-10){
+        b.y = H-10-R;
+        b.vy = -b.vy*0.98;
+      }
+    });
+
+    // Ball-ball collisions
+    for(let i=0;i<balls.length;i++){
+      const a=balls[i];
+      if(a.potted) continue;
+      for(let j=i+1;j<balls.length;j++){
+        const b=balls[j];
+        if(b.potted) continue;
+        const dx=b.x-a.x, dy=b.y-a.y;
+        const dist=Math.hypot(dx,dy);
+        if(dist<2*R && dist>0){
+          // Resolve overlap
+          const overlap = 2*R - dist;
+          const nx=dx/dist, ny=dy/dist;
+          a.x -= nx*overlap/2;
+          a.y -= ny*overlap/2;
+          b.x += nx*overlap/2;
+          b.y += ny*overlap/2;
+
+          // Elastic collision
+          const dvx = a.vx - b.vx;
+          const dvy = a.vy - b.vy;
+          const dot = dvx*nx + dvy*ny;
+          if(dot>0){
+            const impulse = 2*dot/(1+1);
+            a.vx -= impulse*nx;
+            a.vy -= impulse*ny;
+            b.vx += impulse*nx;
+            b.vy += impulse*ny;
+          }
+        }
+      }
+    }
+
+    // Pockets
+    balls.forEach(b=>{
+      if(b.potted) return;
+      pockets.forEach(p=>{
+        const dx=b.x-p.x, dy=b.y-p.y;
+        if(Math.hypot(dx,dy)<=pocketRadius){
+          b.potted=true;
+          b.vx=b.vy=0;
+        }
+      });
+    });
+
+    render();
+  }
+
+  // Global sim object
+  window.sim = {
+    W,W,H,R,
+    reset: (arr)=>{
+      balls = arr.map(b=>({
+        x:b.x, y:b.y,
+        vx:b.vx||0, vy:b.vy||0,
+        cue:!!b.cue,
+        potted:false
+      }));
+      render();
+    },
+    step:(dt)=>step(dt),
+    state:()=>balls.map(b=>({...b})),
+    shoot:(vx,vy)=>{
+      const cue = balls.find(b=>b.cue);
+      if(cue){cue.vx=vx;cue.vy=vy;}
+    },
+    pause:()=>{paused=true; cancelAnimationFrame(animId);},
+    resume:()=>{if(!paused)return; paused=false; loop();}
+  };
+
+  // Animation loop
+  function loop(){
+    if(paused) return;
+    step(dtStep);
+    animId = requestAnimationFrame(loop);
+  }
+  loop();
+
+  // Mouse handling
+  let mousePos={x:0,y:0};
+  canvas.addEventListener('mousedown',e=>{
+    const rect=canvas.getBoundingClientRect();
+    mousePos.x=e.clientX-rect.left;
+    mousePos.y=e.clientY-rect.top;
+    const cue = balls.find(b=>b.cue && !b.potted);
+    if(cue){
+      const dx=cue.x-mousePos.x, dy=cue.y-mousePos.y;
+      if(Math.hypot(dx,dy)<R*1.5){
+        dragging=true;
+        dragStart={x:mousePos.x,y:mousePos.y};
+        cueBallIndex=balls.indexOf(cue);
+      }
+    }
+  });
+  canvas.addEventListener('mousemove',e=>{
+    const rect=canvas.getBoundingClientRect();
+    mousePos.x=e.clientX-rect.left;
+    mousePos.y=e.clientY-rect.top;
+  });
+  canvas.addEventListener('mouseup',e=>{
+    if(dragging){
+      const dx = dragStart.x - mousePos.x;
+      const dy = dragStart.y - mousePos.y;
+      const powerScale=0.5; // adjust
+      window.sim.shoot(dx*powerScale,dy*powerScale);
+    }
+    dragging=false;
+  });
+
+  // Reset button
+  document.getElementById('resetBtn').addEventListener('click',()=>{
+    const start = [
+      {x:W/4,y:H/2,vx:0,vy:0,cue:true},
+      {x:3*W/4-20,y:H/2-30,vx:0,vy:0},
+      {x:3*W/4-20,y:H/2+30,vx:0,vy:0}
+    ];
+    window.sim.reset(start);
+  });
+
+  // Initial rack
+  document.getElementById('resetBtn').click();
+})();
+</script>
+</body>
+</html>

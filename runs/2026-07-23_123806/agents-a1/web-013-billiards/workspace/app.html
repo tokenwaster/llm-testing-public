@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Billiards Physics</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #1a1a1a; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        canvas { box-shadow: 0 0 30px rgba(0,0,0,0.8); border-radius: 8px; background: #2e7d32; cursor: crosshair; display: block; }
+        #ui { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); text-align: center; pointer-events: none; z-index: 10; }
+        .instructions { font-size: 20px; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); margin-bottom: 10px; }
+        button { pointer-events: auto; padding: 12px 24px; font-size: 16px; cursor: pointer; background: #ff9800; color: white; border: none; border-radius: 4px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: background 0.2s; }
+        button:hover { background: #f57c00; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="instructions" id="instrText">Drag back on the white cue ball to aim and shoot.</div>
+        <button onclick="resetGame()">Reset / Rack Balls</button>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+    (function() {
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Configuration
+        const W = 800;
+        const H = 400;
+        const R = 12;
+        const POCKET_RADIUS = 25;
+        const FRICTION_RATE = 0.1; // per second (approx)
+        const FIXED_DT = 1/60;
+        
+        // State
+        let balls = [];
+        let isDragging = false;
+        let dragStart = { x: 0, y: 0 };
+        let dragCurrent = { x: 0, y: 0 };
+        let cueBallIndex = -1;
+        let paused = true; // Start paused so harness can set up
+        
+        // Pocket positions (relative to table)
+        const pockets = [
+            { x: R, y: R },
+            { x: W - R, y: R },
+            { x: R, y: H - R },
+            { x: W - R, y: H - R },
+            { x: W / 2, y: R },
+            { x: W / 2, y: H - R }
+        ];
+
+        // Physics Accumulator for Determinism/Stability
+        let accumulatedTime = 0;
+
+        // --- Physics Engine ---
+
+        function updatePhysics(dt) {
+            // Apply friction and move balls
+            for (let i = 0; i < balls.length; i++) {
+                let b = balls[i];
+                if (b.potted) continue;
+
+                // Friction: v *= (1 - rate * dt)
+                const frictionFactor = Math.max(0, 1 - FRICTION_RATE * dt);
+                b.vx *= frictionFactor;
+                b.vy *= frictionFactor;
+
+                // Stop if very slow
+                if (Math.abs(b.vx) < 0.01) b.vx = 0;
+                if (Math.abs(b.vy) < 0.01) b.vy = 0;
+
+                // Move
+                let nextX = b.x + b.vx * dt;
+                let nextY = b.y + b.vy * dt;
+
+                // Wall Collisions
+                let collided = false;
+                
+                // Left/Right
+                if (nextX < R) {
+                    nextX = R;
+                    b.vx = -b.vx;
+                    collided = true;
+                } else if (nextX > W - R) {
+                    nextX = W - R;
+                    b.vx = -b.vx;
+                    collided = true;
+                }
+
+                // Top/Bottom
+                if (nextY < R) {
+                    nextY = R;
+                    b.vy = -b.vy;
+                    collided = true;
+                } else if (nextY > H - R) {
+                    nextY = H - R;
+                    b.vy = -b.vy;
+                    collided = true;
+                }
+
+                // Update position
+                b.x = nextX;
+                b.y = nextY;
+
+                // Check Pockets
+                for (let p of pockets) {
+                    let dx = b.x - p.x;
+                    let dy = b.y - p.y;
+                    if (dx*dx + dy*dy < POCKET_RADIUS * POCKET_RADIUS) {
+                        b.potted = true;
+                        b.vx = 0;
+                        b.vy = 0;
+                    }
+                }
+            }
+
+            // Ball-to-Ball Collisions
+            for (let i = 0; i < balls.length; i++) {
+                let b1 = balls[i];
+                if (b1.potted) continue;
+
+                for (let j = i + 1; j < balls.length; j++) {
+                    let b2 = balls[j];
+                    if (b2.potted) continue;
+
+                    let dx = b2.x - b1.x;
+                    let dy = b2.y - b1.y;
+                    let distSq = dx*dx + dy*dy;
+                    let minDist = 2 * R;
+
+                    if (distSq < minDist * minDist) {
+                        let dist = Math.sqrt(distSq);
+                        
+                        // Position Correction (prevent overlap)
+                        let overlap = minDist - dist;
+                        let nx = dx / dist;
+                        let ny = dy / dist;
+                        
+                        // Move balls apart
+                        let moveX = nx * overlap * 0.5;
+                        let moveY = ny * overlap * 0.5;
+                        
+                        b1.x -= moveX;
+                        b1.y -= moveY;
+                        b2.x += moveX;
+                        b2.y += moveY;
+
+                        // Velocity Resolution (Elastic)
+                        let dvx = b2.vx - b1.vx;
+                        let dvy = b2.vy - b1.vy;
+                        
+                        // Relative velocity along normal
+                        let velAlongNormal = dvx * nx + dvy * ny;
+
+                        // Do not resolve if moving apart
+                        if (velAlongNormal > 0) continue;
+
+                        // Impulse scalar (masses equal, e=1)
+                        let jVal = -velAlongNormal; 
+                        
+                        // Apply impulse
+                        b1.vx -= jVal * nx;
+                        b1.vy -= jVal * ny;
+                        b2.vx += jVal * nx;
+                        b2.vy += jVal * ny;
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            // Clear
+            ctx.clearRect(0, 0, W, H);
+
+            // Draw Table Felt
+            ctx.fillStyle = '#2e7d32';
+            ctx.fillRect(0, 0, W, H);
+
+            // Draw Rails (Border)
+            ctx.strokeStyle = '#5d4037';
+            ctx.lineWidth = 15;
+            ctx.strokeRect(0, 0, W, H);
+
+            // Draw Pockets
+            ctx.fillStyle = '#111';
+            for (let p of pockets) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, POCKET_RADIUS, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw Balls
+            for (let b of balls) {
+                if (b.potted) continue; 
+                
+                ctx.beginPath();
+                ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+                
+                let grad = ctx.createRadialGradient(b.x - R/3, b.y - R/3, R/4, b.x, b.y, R);
+                if (b.cue) {
+                    grad.addColorStop(0, '#fff');
+                    grad.addColorStop(1, '#ccc');
+                } else {
+                    let idx = balls.indexOf(b);
+                    const colors = ['#fdd835', '#1e88e5', '#e53935', '#8e24aa', '#fb8c00', '#43a047', '#6d4c41'];
+                    grad.addColorStop(0, '#fff');
+                    grad.addColorStop(1, colors[idx % colors.length]);
+                }
+                
+                ctx.fillStyle = grad;
+                ctx.fill();
+            }
+
+            // Draw Aim Line (if dragging)
+            if (isDragging && cueBallIndex !== -1) {
+                let cue = balls[cueBallIndex];
+                
+                let dx = dragStart.x - dragCurrent.x; 
+                let dy = dragStart.y - dragCurrent.y;
+                
+                let aimX = dx; // Drag back means shoot in direction of drag vector (mouse moved away from ball)
+                let aimY = dy;
+                let len = Math.sqrt(aimX*aimX + aimY*aimY);
+                
+                if (len > 0) {
+                    aimX /= len;
+                    aimY /= len;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(cue.x, cue.y);
+                    let endX = cue.x + aimX * 200;
+                    let endY = cue.y + aimY * 200;
+                    ctx.lineTo(endX, endY);
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+                    ctx.lineWidth = 3;
+                    ctx.setLineDash([10, 10]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+
+                    let power = Math.min(len / 200, 1); 
+                    ctx.beginPath();
+                    ctx.arc(cue.x, cue.y, R + 5 + power * 10, 0, Math.PI*2);
+                    ctx.strokeStyle = `rgba(255, ${255 - power*255}, 0, 1)`;
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                }
+            }
+        }
+
+        // --- API Implementation ---
+
+        function reset(ballsArray) {
+            balls = [];
+            cueBallIndex = -1;
+            
+            for (let i = 0; i < ballsArray.length; i++) {
+                let b = ballsArray[i];
+                balls.push({
+                    x: b.x,
+                    y: b.y,
+                    vx: b.vx || 0,
+                    vy: b.vy || 0,
+                    cue: !!b.cue,
+                    potted: false
+                });
+                if (b.cue) cueBallIndex = i;
+            }
+            
+            // Reset accumulator for determinism on new game
+            accumulatedTime = 0;
+        }
+
+        function step(dt) {
+            // Accumulate time to run fixed substeps
+            accumulatedTime += dt;
+            
+            let safety = 0;
+            while (accumulatedTime >= FIXED_DT && safety < 10) {
+                updatePhysics(FIXED_DT);
+                accumulatedTime -= FIXED_DT;
+                safety++;
+            }
+            
+            // Draw current state
+            draw();
+        }
+
+        function state() {
+            return balls.map(b => ({
+                x: b.x,
+                y: b.y,
+                vx: b.vx,
+                vy: b.vy,
+                potted: b.potted,
+                cue: b.cue
+            }));
+        }
+
+        function shoot(vx, vy) {
+            if (cueBallIndex === -1) return;
+            let b = balls[cueBallIndex];
+            isDragging = false;
+            b.vx = vx;
+            b.vy = vy;
+        }
+
+        function pause() {
+            paused = true;
+        }
+
+        function resume() {
+            paused = false;
+            lastTime = 0; // Reset time to avoid huge dt jump
+            requestAnimationFrame(loop);
+        }
+
+        let lastTime = 0;
+        
+        function loop(timestamp) {
+            if (paused) return;
+            
+            if (!lastTime) lastTime = timestamp;
+            let dt = (timestamp - lastTime) / 1000;
+            lastTime = timestamp;
+
+            // Cap dt to prevent huge jumps on tab switch
+            if (dt > 0.1) dt = 0.1;
+
+            step(dt);
+            requestAnimationFrame(loop);
+        }
+
+        function startGameLoop() {
+            paused = false;
+            lastTime = 0;
+            requestAnimationFrame(loop);
+        }
+
+        // Input Handling
+        canvas.addEventListener('mousedown', e => {
+            let rect = canvas.getBoundingClientRect();
+            let mx = e.clientX - rect.left;
+            let my = e.clientY - rect.top;
+
+            for (let i = 0; i < balls.length; i++) {
+                let b = balls[i];
+                if (!b.potted && Math.hypot(mx - b.x, my - b.y) < R * 2) {
+                    isDragging = true;
+                    dragStart = { x: mx, y: my };
+                    dragCurrent = { x: mx, y: my };
+                    cueBallIndex = i;
+                    break;
+                }
+            }
+        });
+
+        canvas.addEventListener('mousemove', e => {
+            if (!isDragging) return;
+            let rect = canvas.getBoundingClientRect();
+            dragCurrent.x = e.clientX - rect.left;
+            dragCurrent.y = e.clientY - rect.top;
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (isDragging) {
+                let dx = dragStart.x - dragCurrent.x; 
+                let dy = dragStart.y - dragCurrent.y;
+                
+                let power = Math.min(Math.hypot(dx, dy) / 200, 1); 
+                
+                if (power > 0.05) { 
+                    let vx = dx * power * 15; 
+                    let vy = dy * power * 15;
+                    
+                    shoot(vx, vy);
+                } else {
+                    isDragging = false;
+                }
+            }
+        });
+
+        function resetGame() {
+            const ballsArray = [];
+            
+            // Cue Ball (Bottom Leftish)
+            ballsArray.push({ x: W/2, y: H - 100, vx: 0, vy: 0, cue: true });
+
+            // Rack of 15 balls in triangle
+            let startX = W/2;
+            let startY = H/2 + 50;
+            let rows = 5;
+            
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c <= r; c++) {
+                    let offsetX = (r * R) - (rows * R); 
+                    let ballX = startX + offsetX + (c * 2 * R) + R;
+                    let ballY = startY + (r * 1.8 * R);
+                    
+                    ballsArray.push({ x: ballX, y: ballY, vx: 0, vy: 0 });
+                }
+            }
+
+            reset(ballsArray);
+        }
+
+        // Initialize API
+        window.sim = {
+            W: W,
+            H: H,
+            R: R,
+            reset: reset,
+            step: step,
+            state: state,
+            shoot: shoot,
+            pause: pause,
+            resume: resume
+        };
+
+        // Start with a rack for playability
+        resetGame();
+        startGameLoop();
+
+    })();
+    </script>
+</body>
+</html>
