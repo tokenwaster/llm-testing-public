@@ -80,6 +80,21 @@ def _rescore(selector, progress=print, force: bool = False) -> int:
                 metrics = read_json(tdir / "metrics.json")
                 if not metrics:
                     continue
+                if any(a.get("over_cap_tokens") for a in
+                       (metrics.get("attempts") or [])):
+                    over = next(a["over_cap_tokens"] for a in metrics["attempts"]
+                                if a.get("over_cap_tokens"))
+                    rec = {"status": "scored", "score": 0.0,
+                           "scored_by": "harness",
+                           "summary": (f"over the fleet token budget "
+                                       f"({over:,} output tokens)")}
+                    if old.get("scored_by") == "human":
+                        rec["voided_human_score"] = old.get("score")
+                    write_json(tdir / "score.json", rec)
+                    progress(f"{run_dir.name} {model_dir.name} {tdir.name}: "
+                             f"{old.get('score')} -> 0.0  <-- over budget")
+                    n += 1
+                    continue
                 if old.get("scored_by") == "human":
                     skipped_human.append(f"{model_dir.name}/{tdir.name}")
                     continue

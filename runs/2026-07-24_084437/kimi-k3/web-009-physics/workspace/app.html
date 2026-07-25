@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bounce Lab — Physics Playground</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 24px;
+    background: radial-gradient(1200px 800px at 50% 28%, #141b29 0%, #0b0e14 60%, #06080c 100%);
+    color: #e8eef7;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 650;
+    letter-spacing: .05em;
+    text-transform: lowercase;
+    opacity: .92;
+  }
+  h1 .dot { color: #6ee7ff; text-shadow: 0 0 12px #6ee7ff; }
+  #stage {
+    padding: 10px;
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.02));
+    box-shadow: 0 30px 80px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.09);
+  }
+  #sim {
+    display: block;
+    width: 640px;
+    height: 480px;
+    border-radius: 12px;
+    background: #0d1117;
+    cursor: crosshair;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.07), inset 0 0 60px rgba(0,0,0,.5);
+    touch-action: none;
+  }
+  #bar { display: flex; gap: 10px; }
+  button {
+    appearance: none;
+    border: 1px solid rgba(255,255,255,.12);
+    background: linear-gradient(180deg, #1d2534, #141a26);
+    color: #e8eef7;
+    font: inherit;
+    font-weight: 600;
+    font-size: 14px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: transform .06s ease, box-shadow .15s ease;
+    box-shadow: 0 6px 18px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.08);
+  }
+  button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 24px rgba(0,0,0,.45), 0 0 0 1px rgba(110,231,255,.25),
+                inset 0 1px 0 rgba(255,255,255,.1);
+  }
+  button:active { transform: translateY(1px) scale(.97); }
+  #play { min-width: 100px; }
+  .hint { margin: 0; font-size: 12.5px; letter-spacing: .03em; opacity: .5; }
+</style>
+</head>
+<body>
+  <h1>bounce lab <span class="dot">●</span> physics playground</h1>
+  <div id="stage"><canvas id="sim"></canvas></div>
+  <div id="bar">
+    <button id="drop" title="Drop a new ball">＋ Drop ball</button>
+    <button id="play" title="Toggle animation">⏸ Pause</button>
+    <button id="clear" title="Remove all balls">✕ Clear</button>
+  </div>
+  <p class="hint">click anywhere on the canvas to spawn a ball</p>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- constants ----------
+  const W = 640, H = 480;          // logical canvas size (CSS pixels)
+  const GRAV = 0.45;               // gravity per step
+  const REST = 0.86;               // wall restitution (< 1 => energy loss)
+  const BALL_REST = 0.95;          // ball-ball restitution
+  const AIR = 0.999;               // air drag
+  const MAXV = 55;                 // speed cap for stability
+
+  const canvas = document.getElementById('sim');
+  const ctx = canvas.getContext('2d');
+  const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  canvas.width  = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const balls  = [];
+  const sparks = [];
+  const rings  = [];
+  let hue = Math.random() * 360;
+  const nextHue = () => (hue = (hue + 47 + Math.random() * 20) % 360);
+  const fin = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
+
+  // ---------- API core ----------
+  function addBall(x, y, vx = 0, vy = 0, r) {
+    r  = Math.max(4, Math.min(80, fin(r, 10 + Math.random() * 16)));
+    x  = Math.max(r, Math.min(W - r, fin(x, W / 2)));
+    y  = Math.max(r, Math.min(H - r, fin(y, H / 2)));
+    vx = Math.max(-MAXV, Math.min(MAXV, fin(vx, 0)));
+    vy = Math.max(-MAXV, Math.min(MAXV, fin(vy, 0)));
+    const b = { x, y, vx, vy, r, hue: nextHue() };
+    balls.push(b);
+    rings.push({ x, y, r: r * 0.5, a: 0.6, hue: b.hue });
+    return b;
+  }
+
+  function clear() {
+    balls.length = 0;
+    sparks.length = 0;
+  }
+
+  function burst(x, y, h, n) {
+    for (let i = 0; i < n; i++) {
+      if (sparks.length > 300) sparks.shift();
+      const a = Math.random() * Math.PI * 2, s = 1 + Math.random() * 3;
+      sparks.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 1, life: 1, hue: h });
+    }
+  }
+
+  // ---------- physics ----------
+  function physics(dt) {
+    const drag = Math.pow(AIR, dt);
+
+    for (const b of balls) {
+      b.vy += GRAV * dt;                       // gravity accelerates downward
+      b.vx *= drag;
+      b.vy *= drag;
+
+      const sp = Math.hypot(b.vx, b.vy);
+      if (sp > MAXV) { b.vx = b.vx / sp * MAXV; b.vy = b.vy / sp * MAXV; }
+
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      // edges: clamp inside + reverse perpendicular velocity (with loss)
+      if (b.x < b.r) {
+        b.x = b.r;
+        if (b.vx < 0) { b.vx = -b.vx * REST; burst(b.x, b.y, b.hue, 4); }
+      } else if (b.x > W - b.r) {
+        b.x = W - b.r;
+        if (b.vx > 0) { b.vx = -b.vx * REST; burst(b.x, b.y, b.hue, 4); }
+      }
+      if (b.y < b.r) {
+        b.y = b.r;
+        if (b.vy < 0) { b.vy = -b.vy * REST; burst(b.x, b.y, b.hue, 4); }
+      } else if (b.y > H - b.r) {
+        b.y = H - b.r;
+        if (b.vy > 0) {
+          if (b.vy > 1) burst(b.x, b.y + b.r, b.hue, 6);
+          b.vy = -b.vy * REST;
+          b.vx *= 0.985;                            // floor friction
+          if (Math.abs(b.vy) < GRAV * 1.2) b.vy = 0; // settle without jitter
+        }
+      }
+    }
+
+    // ball-ball collisions (equal mass, positional correction)
+    for (let i = 0; i < balls.length; i++) {
+      for (let j = i + 1; j < balls.length; j++) {
+        const a = balls[i], c = balls[j];
+        let dx = c.x - a.x, dy = c.y - a.y;
+        let d = Math.hypot(dx, dy);
+        const min = a.r + c.r;
+        if (d === 0) { dx = 0.01; dy = 0; d = 0.01; }
+        if (d < min) {
+          const nx = dx / d, ny = dy / d;
+          const push = (min - d) / 2 + 0.01;
+          a.x -= nx * push; a.y -= ny * push;
+          c.x += nx * push; c.y += ny * push;
+          const vn = (c.vx - a.vx) * nx + (c.vy - a.vy) * ny;
+          if (vn < 0) {
+            const imp = -(1 + BALL_REST) * vn / 2;
+            a.vx -= imp * nx; a.vy -= imp * ny;
+            c.vx += imp * nx; c.vy += imp * ny;
+          }
+        }
+      }
+    }
+
+    // absolute safety net: nothing ever leaves the canvas
+    for (const b of balls) {
+      if (b.x < b.r) b.x = b.r; else if (b.x > W - b.r) b.x = W - b.r;
+      if (b.y < b.r) b.y = b.r; else if (b.y > H - b.r) b.y = H - b.r;
+    }
+
+    // fx
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vy += 0.12 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.life -= 0.045 * dt;
+      if (p.life <= 0) sparks.splice(i, 1);
+    }
+    for (let i = rings.length - 1; i >= 0; i--) {
+      const g = rings[i];
+      g.r += 2.4 * dt;
+      g.a -= 0.05 * dt;
+      if (g.a <= 0) rings.splice(i, 1);
+    }
+  }
+
+  // ---------- rendering ----------
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#111724');
+    bg.addColorStop(1, '#0a0e15');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    for (let gx = 20; gx < W; gx += 40)
+      for (let gy = 20; gy < H; gy += 40)
+        ctx.fillRect(gx, gy, 2, 2);
+
+    for (const g of rings) {
+      ctx.strokeStyle = `hsla(${g.hue},90%,70%,${Math.max(0, g.a)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(g.x, g.y, g.r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    for (const p of sparks) {
+      ctx.fillStyle = `hsla(${p.hue},95%,70%,${Math.max(0, p.life)})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2.2 * p.life + 0.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    for (const b of balls) {
+      ctx.save();
+      ctx.shadowColor = `hsla(${b.hue},95%,62%,0.85)`;
+      ctx.shadowBlur = 18;
+      const grad = ctx.createRadialGradient(
+        b.x - b.r * 0.35, b.y - b.r * 0.4, b.r * 0.1,
+        b.x, b.y, b.r
+      );
+      grad.addColorStop(0,   `hsl(${b.hue},95%,78%)`);
+      grad.addColorStop(0.55,`hsl(${b.hue},85%,58%)`);
+      grad.addColorStop(1,   `hsl(${b.hue},80%,38%)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath();
+      ctx.arc(b.x - b.r * 0.34, b.y - b.r * 0.42, b.r * 0.18, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ---------- simulation step (sub-stepped for stability) ----------
+  function step(dt = 1) {
+    dt = fin(dt, 1);
+    if (dt <= 0) { draw(); return; }
+    const n = Math.min(8, Math.max(1, Math.ceil(dt)));
+    const s = dt / n;
+    for (let k = 0; k < n; k++) physics(s);
+    draw();
+  }
+
+  // ---------- animation loop ----------
+  let running = true;
+  let last = performance.now();
+  const playBtn = document.getElementById('play');
+
+  function setRunning(v) {
+    running = v;
+    playBtn.textContent = running ? '⏸ Pause' : '▶ Play';
+  }
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    let dt = (now - last) / 16.6667;
+    last = now;
+    if (dt > 4) dt = 4;                    // tab-switch guard
+    if (running) step(dt);
+    else draw();
+  }
+
+  // ---------- controls ----------
+  document.getElementById('drop').addEventListener('click', () => {
+    addBall(60 + Math.random() * (W - 120), 40 + Math.random() * 60,
+            (Math.random() - 0.5) * 9, 0);
+  });
+  playBtn.addEventListener('click', () => setRunning(!running));
+  document.getElementById('clear').addEventListener('click', () => clear());
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (W / rect.width);
+    const y = (e.clientY - rect.top)  * (H / rect.height);
+    addBall(x, y, (Math.random() - 0.5) * 7, -2 - Math.random() * 3);
+  });
+
+  // ---------- programmatic API (for grading) ----------
+  window.sim = {
+    w: W,
+    h: H,
+    balls: () => balls.map(b => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: b.r })),
+    addBall,
+    clear,
+    step,
+  };
+
+  // seed a few balls and start
+  for (let i = 0; i < 5; i++)
+    addBall(80 + Math.random() * (W - 160), 40 + Math.random() * 140,
+            (Math.random() - 0.5) * 8, 0);
+  setRunning(true);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

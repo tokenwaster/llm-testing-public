@@ -99,6 +99,44 @@ def window_reasons() -> dict[str, dict[str, str]]:
     return _window_limited()
 
 
+_WINDOW_NEED: dict | None = None
+
+
+def measured_window_need(model: str, task: str) -> float | None:
+    """Seconds this model·task needed to emit its FIRST answer token, as
+    MEASURED by the special/ window probe. None if it was never probed.
+
+    Reporting only — it must NOT gate a retry. That was tried and the very next
+    run disproved it: the probe measured sonnet-4-6 at 1160s on ctx-013 (over
+    the 900s budget), but a live attempt produced its first token at 805s and
+    scored 1.0. Think-time is variable, so one measurement establishes a
+    DATA POINT, never a ceiling, and skipping the retry would have converted
+    that 1.0 into a 0."""
+    global _WINDOW_NEED
+    if _WINDOW_NEED is None:
+        import re
+        from .util import read_json
+        need: dict = {}
+        base = getattr(config, "SPECIAL_DIR", None)
+        if base and base.is_dir():
+            probe_runs = {rj.parent.name for rj in base.glob("*/run.json")
+                          if re.search(r"spiral@\d+s",
+                                       read_json(rj, {}).get("tag") or "")}
+            for mfile in base.glob("*/*/*/metrics.json"):
+                if mfile.parents[2].name not in probe_runs:
+                    continue
+                d = read_json(mfile, {})
+                ftm = next((a.get("first_text_ms")
+                            for a in (d.get("attempts") or [])
+                            if a.get("first_text_ms") is not None), None)
+                if ftm is None:
+                    continue
+                key = (mfile.parents[1].name, mfile.parent.name)
+                need[key] = max(need.get(key, 0.0), ftm / 1000)
+        _WINDOW_NEED = need
+    return _WINDOW_NEED.get((model, task))
+
+
 def turns_matrix() -> dict[str, list[str]]:
     """{model: [agentic task ids]} where the model FAILED by exhausting the turn
     budget — status=="max_turns" AND it did not reach a passing score. Feeds the
@@ -135,6 +173,21 @@ class UsageLimitReached(Exception):
         super().__init__("claude subscription usage limit reached")
         self.reset_at = reset_at
         self.reset_hint = reset_hint
+
+
+class RequestRejected(Exception):
+    """The provider refused the request, so the model never saw the prompt.
+
+    A bad parameter (Moonshot rejects any temperature but 1 for kimi-k3), an
+    unknown model id, or a bad key. Scoring that 0.0 blames the model for our
+    config — kimi-k3 took 55 zeros that way. Unlike a rate limit this is
+    DETERMINISTIC: every remaining task would be refused identically, so the
+    runner drops this task unscored and skips the model rather than burning the
+    whole suite on the same 4xx."""
+
+    def __init__(self, message: str, kind: str = "request_rejected") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class RateLimited(Exception):
@@ -268,6 +321,7 @@ class TaskRunner:
             "cache_write_tokens": res.cache_write_tokens,
             "reasoning_tokens": res.reasoning_tokens,
             "stop_reason": res.stop_reason,
+            "over_cap_tokens": res.over_cap_tokens,
             "cost_usd": res.cost_usd, "served_by": res.served_by,
         })
         self._log(task_dir, "response", {
@@ -326,6 +380,9 @@ class TaskRunner:
         if last.get("error_kind") == "rate_limit":
             raise RateLimited(str(last.get("error") or "")[:200],
                               last.get("retry_after"))
+        if last.get("error_kind") in ("request_rejected", "auth"):
+            raise RequestRejected(str(last.get("error") or "")[:300],
+                                  last.get("error_kind"))
         return None
 
 
@@ -739,6 +796,27 @@ def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
             try:
                 m = runner.run_task(task)
                 rl_streak = 0
+            except RequestRejected as rr:
+                task_dir = run_dir / model.name / task.id
+                if task_dir.exists():
+                    shutil.rmtree(task_dir, ignore_errors=True)
+                _record_dropped(run_dir, model.name, task.id, rr.kind)
+                done = sum(1 for t in tasks
+                           if (run_dir / model.name / t.id / "score.json").exists())
+                progress(
+                    f"[{model.name}] {task.id}: provider REFUSED the request "
+                    f"({rr.kind}) - dropped UNSCORED, not zeroed. Every "
+                    f"remaining task would be refused the same way, so this "
+                    f"model is skipped. {done} completed task(s) saved. Fix the "
+                    f"model's config and re-run {model.name}. -- {rr}")
+                mani_path = run_dir / "run.json"
+                mani = read_json(mani_path, {})
+                mani["stopped_reason"] = rr.kind
+                mani.setdefault("stopped_models", [])
+                if model.name not in mani["stopped_models"]:
+                    mani["stopped_models"].append(model.name)
+                write_json(mani_path, mani)
+                return
             except RateLimited as rl:
                 task_dir = run_dir / model.name / task.id
                 if task_dir.exists():

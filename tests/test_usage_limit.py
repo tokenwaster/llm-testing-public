@@ -121,7 +121,7 @@ def test_chat_with_retries_raises_usage_limit_without_retrying(tmp_path):
 def test_chat_with_retries_still_retries_transient(tmp_path):
     adapter = _FlakyAdapter()
     r = _runner(tmp_path, adapter)
-    task = SimpleNamespace(max_retries=2, timeout_s=10)
+    task = SimpleNamespace(id="t-transient", max_retries=2, timeout_s=10)
     orig = adapters
     import harness.runner as runner_mod
     runner_mod.time.sleep = lambda *_: None
@@ -238,9 +238,9 @@ def test_spiral_aborts_when_no_text_is_ever_emitted(monkeypatch):
 
     with pytest.raises(AdapterError) as ei:
         A._stream_claude_cli(["claude", "-p", "--output-format", "json"],
-                             "hi", ".", timeout_s=9999, spiral_s=1)
-    assert ei.value.kind == "rumination_spiral"
-    assert ei.value.retryable is False
+                             "hi", ".", timeout_s=1)
+    assert ei.value.kind == "timeout", \
+        f"silence must be a timeout (widen the window), not a spiral: {ei.value.kind}"
 
 
 def test_stream_cmd_switches_to_stream_json():
@@ -266,7 +266,7 @@ def test_stream_cmd_switches_to_stream_json():
     _sp.Popen = _P
     try:
         out = A._stream_claude_cli(["claude", "-p", "--output-format", "json"],
-                                   "hi", ".", timeout_s=60, spiral_s=60)
+                                   "hi", ".", timeout_s=60)
     finally:
         _sp.Popen = _orig
     assert "stream-json" in captured["cmd"]

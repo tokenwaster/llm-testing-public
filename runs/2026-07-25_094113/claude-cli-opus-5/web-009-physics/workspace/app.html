@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bouncing Ball Playground</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --line: #2a323d;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 24px 16px 32px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .hint { margin: 0; font-size: 13px; color: var(--muted); }
+  #sim {
+    display: block;
+    width: 640px;
+    height: 480px;
+    max-width: 92vw;
+    background: #0b0e13;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  button {
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-size: 14px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+  }
+  button:hover { background: #1f2630; border-color: #3d4854; }
+  button:active { transform: translateY(1px); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #stats { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <h1>Bouncing Ball Playground</h1>
+  <canvas id="sim" width="640" height="480"></canvas>
+  <div class="controls">
+    <button id="drop" type="button">Drop ball</button>
+    <button id="play" type="button">Pause</button>
+    <button id="clear" type="button">Clear</button>
+  </div>
+  <p class="hint">Click the canvas to add a ball at the cursor.</p>
+  <div id="stats">0 balls</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("sim");
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width;
+  var H = canvas.height;
+
+  var GRAVITY = 0.45;      // px per step^2
+  var RESTITUTION = 0.82;  // energy kept per bounce
+  var FRICTION = 0.995;    // mild horizontal drag
+  var MAX_SPEED = 60;      // safety clamp so nothing can tunnel
+
+  var balls = [];
+  var running = true;
+  var rafId = null;
+
+  var HUES = [200, 340, 45, 160, 275, 15, 95];
+  var hueIndex = 0;
+
+  function nextColor() {
+    var h = HUES[hueIndex % HUES.length];
+    hueIndex++;
+    return "hsl(" + h + ", 85%, 62%)";
+  }
+
+  function clampSpeed(b) {
+    if (b.vx > MAX_SPEED) b.vx = MAX_SPEED;
+    else if (b.vx < -MAX_SPEED) b.vx = -MAX_SPEED;
+    if (b.vy > MAX_SPEED) b.vy = MAX_SPEED;
+    else if (b.vy < -MAX_SPEED) b.vy = -MAX_SPEED;
+  }
+
+  function addBall(x, y, vx, vy, r) {
+    var radius = (typeof r === "number" && isFinite(r) && r > 0) ? r : 8 + Math.random() * 12;
+    // keep the radius sane relative to the canvas
+    var maxR = Math.max(1, Math.min(W, H) / 2 - 1);
+    if (radius > maxR) radius = maxR;
+
+    var b = {
+      x: typeof x === "number" && isFinite(x) ? x : W / 2,
+      y: typeof y === "number" && isFinite(y) ? y : radius,
+      vx: typeof vx === "number" && isFinite(vx) ? vx : 0,
+      vy: typeof vy === "number" && isFinite(vy) ? vy : 0,
+      r: radius,
+      color: nextColor()
+    };
+    // spawn inside the walls
+    if (b.x < b.r) b.x = b.r;
+    if (b.x > W - b.r) b.x = W - b.r;
+    if (b.y < b.r) b.y = b.r;
+    if (b.y > H - b.r) b.y = H - b.r;
+
+    balls.push(b);
+    updateStats();
+    return b;
+  }
+
+  function clear() {
+    balls.length = 0;
+    updateStats();
+    draw();
+  }
+
+  // Advance every ball by `dt` steps, resolving edge collisions.
+  function integrate(dt) {
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+
+      b.vy += GRAVITY * dt;
+      b.vx *= Math.pow(FRICTION, dt);
+      clampSpeed(b);
+
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      var minX = b.r, maxX = W - b.r;
+      var minY = b.r, maxY = H - b.r;
+
+      // Left / right walls: clamp inside, reverse vx.
+      if (b.x < minX) {
+        b.x = minX;
+        if (b.vx < 0) b.vx = -b.vx * RESTITUTION;
+      } else if (b.x > maxX) {
+        b.x = maxX;
+        if (b.vx > 0) b.vx = -b.vx * RESTITUTION;
+      }
+
+      // Ceiling / floor: clamp inside, reverse vy.
+      if (b.y < minY) {
+        b.y = minY;
+        if (b.vy < 0) b.vy = -b.vy * RESTITUTION;
+      } else if (b.y > maxY) {
+        b.y = maxY;
+        if (b.vy > 0) b.vy = -b.vy * RESTITUTION;
+      }
+
+      // Degenerate radius (bigger than the box) — pin to center of that axis.
+      if (minX > maxX) { b.x = W / 2; b.vx = 0; }
+      if (minY > maxY) { b.y = H / 2; b.vy = 0; }
+    }
+  }
+
+  function step(dt) {
+    var d = (typeof dt === "number" && isFinite(dt)) ? dt : 1;
+    if (d <= 0) { draw(); return; }
+    // Sub-step large dt so fast balls can never pass through a wall.
+    var subs = Math.max(1, Math.ceil(d / 0.5));
+    var h = d / subs;
+    for (var s = 0; s < subs; s++) integrate(h);
+    draw();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    ctx.fillStyle = "#0b0e13";
+    ctx.fillRect(0, 0, W, H);
+
+    // subtle floor line
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, H - 0.5);
+    ctx.lineTo(W, H - 0.5);
+    ctx.stroke();
+
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fillStyle = b.color || "#58a6ff";
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(255,255,255,0.28)";
+      ctx.stroke();
+    }
+  }
+
+  function updateStats() {
+    var el = document.getElementById("stats");
+    if (el) el.textContent = balls.length + (balls.length === 1 ? " ball" : " balls");
+  }
+
+  function loop() {
+    if (!running) { rafId = null; return; }
+    step(1);
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function start() {
+    running = true;
+    document.getElementById("play").textContent = "Pause";
+    if (rafId === null) rafId = requestAnimationFrame(loop);
+  }
+
+  function stop() {
+    running = false;
+    document.getElementById("play").textContent = "Play";
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+  }
+
+  document.getElementById("drop").addEventListener("click", function () {
+    var r = 8 + Math.random() * 12;
+    addBall(r + Math.random() * (W - 2 * r), r + Math.random() * 40, (Math.random() - 0.5) * 6, 0, r);
+    draw();
+  });
+
+  document.getElementById("play").addEventListener("click", function () {
+    if (running) stop(); else start();
+  });
+
+  document.getElementById("clear").addEventListener("click", clear);
+
+  canvas.addEventListener("pointerdown", function (e) {
+    var rect = canvas.getBoundingClientRect();
+    var x = (e.clientX - rect.left) * (W / rect.width);
+    var y = (e.clientY - rect.top) * (H / rect.height);
+    addBall(x, y, (Math.random() - 0.5) * 4, 0);
+    draw();
+  });
+
+  window.sim = {
+    w: W,
+    h: H,
+    canvas: canvas,
+    balls: function () { return balls; },
+    addBall: addBall,
+    clear: clear,
+    step: step,
+    play: start,
+    pause: stop,
+    get gravity() { return GRAVITY; },
+    get restitution() { return RESTITUTION; }
+  };
+
+  addBall(W * 0.35, 60, 2.5, 0, 14);
+  addBall(W * 0.65, 30, -1.5, 0, 10);
+  draw();
+  start();
+})();
+</script>
+</body>
+</html>

@@ -170,9 +170,16 @@ def endpoint_quants(model_id: str) -> dict[str, str]:
 
 def add_api_model(iface: dict, model_id: str,
                   in_price: float = 0.0, out_price: float = 0.0,
-                  progress=print, enabled: bool = True):
+                  progress=print, enabled: bool = True,
+                  name: str | None = None):
     """Write a model yaml for a cloud model served by this interface.
     Never overwrites an existing registration.
+
+    `name` overrides the id-derived suite name. It is needed whenever the SAME
+    model is reachable through two interfaces — Moonshot serves "kimi-k3" under
+    the same id OpenRouter does — because the suite name is the aggregation key,
+    so registering both under one name would silently pool two different routes
+    (and quants) into a single identity.
 
     If the caller supplies no price (adding a model by typing its id rather than
     picking it out of the fetched catalog), look the price up from the
@@ -180,7 +187,7 @@ def add_api_model(iface: dict, model_id: str,
     wins every "cheapest" recommendation and quietly poisons cost reporting.
     A genuinely free model reports 0 there too, so the result stays correct."""
     from .discover import _slug
-    name = _slug(model_id)
+    name = _slug(name or model_id)
     path = config.MODELS_DIR / f"{name}.yaml"
     if path.exists():
         progress(f"  = {name}  (already registered, untouched)")

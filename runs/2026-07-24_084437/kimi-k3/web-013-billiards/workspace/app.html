@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canvas Billiards</title>
+<style>
+  html, body { margin:0; padding:0; background:#141a17; color:#e8e4da;
+               font-family: Arial, Helvetica, sans-serif; }
+  #wrap { max-width: 1020px; margin: 18px auto; padding: 0 12px; text-align:center; }
+  h1 { font-size: 22px; letter-spacing: 4px; margin: 6px 0 10px; color:#d9c88f;
+       text-transform: uppercase; }
+  #toolbar { display:flex; justify-content:center; align-items:center; gap:18px;
+             margin-bottom:10px; flex-wrap:wrap; }
+  #resetBtn { background:#8a5a24; color:#fff7e6; border:2px solid #caa46a;
+              border-radius:8px; padding:8px 18px; font-size:15px; cursor:pointer;
+              font-weight:bold; }
+  #resetBtn:hover { background:#a06a2c; }
+  #status { font-size:15px; color:#bfe3c6; min-height: 1.2em; }
+  canvas { display:block; margin:0 auto; max-width:100%; height:auto;
+           border-radius:14px; box-shadow:0 10px 40px rgba(0,0,0,.6);
+           touch-action:none; }
+  #instructions { margin:12px auto 0; max-width:860px; background:#1d2620;
+                  border:1px solid #37503f; border-radius:10px; padding:10px 16px;
+                  font-size:15px; line-height:1.5; color:#cfe0d2; }
+  #instructions em { color:#ffd97a; font-style:normal; font-weight:bold; }
+  #instructions strong { color:#ffd97a; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>&#x1F3B1; Billiards</h1>
+  <div id="toolbar">
+    <button id="resetBtn">&#10227; Reset / Rack</button>
+    <span id="status"></span>
+  </div>
+  <canvas id="table" aria-label="Billiards table"></canvas>
+  <div id="instructions">
+    <strong>How to shoot:</strong> press the mouse button <em>on the white cue ball</em>,
+    drag <em>backwards</em> (away from your target) to set direction and power &mdash;
+    a longer drag means a harder shot &mdash; then <em>release</em> to strike.
+    Pot all the coloured balls. If the cue ball is potted it is re-spotted automatically.
+    Press <strong>Reset / Rack</strong> at any time to re-rack the balls.
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ============================ CONSTANTS ============================ */
+const W = 900, H = 500;          // playfield size (px)  -> window.sim.W / .H
+const R = 11;                    // ball radius (px)     -> window.sim.R
+const M = 46;                    // wooden rail width around the playfield
+const CSSW = W + 2*M, CSSH = H + 2*M;
+
+const POCKET_R  = 19;            // capture radius of a pocket
+const POCKET_VIS= 21;            // drawn radius of a pocket
+const FRIC      = 300;           // rolling friction deceleration (px/s^2)
+const STOP      = 8;             // below this speed a ball is stopped dead
+const E_BALL    = 0.97;          // ball-ball restitution
+const E_CUSH    = 0.86;          // cushion restitution
+const MAX_H     = 1/240;         // max physics sub-step (deterministic)
+const MAX_DRAG  = 300;           // drag length that maps to full power (px)
+const MAX_POWER = 1500;          // max shot speed (px/s)
+
+const POCKETS = [ {x:0,y:0}, {x:W,y:0}, {x:0,y:H}, {x:W,y:H},
+                  {x:W/2,y:0}, {x:W/2,y:H} ];
+
+const COLORS = {1:'#f6c90e',2:'#1e50c8',3:'#d92b20',4:'#5b2d90',
+                5:'#f27b13',6:'#177a3d',7:'#8f1d22',8:'#151515'};
+
+/* ============================ STATE ============================ */
+let balls = [];          // {x,y,vx,vy,cue,num,potted}
+let drag  = null;        // {mx,my} while aiming
+let flashMsg = '', flashT = 0;
+
+const canvas = document.getElementById('table');
+const ctx    = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const dpr = window.devicePixelRatio || 1;
+canvas.width  = CSSW * dpr;
+canvas.height = CSSH * dpr;
+canvas.style.width  = CSSW + 'px';
+canvas.style.height = CSSH + 'px';
+ctx.setTransform(dpr,0,0,dpr,0,0);
+
+/* ============================ PHYSICS ============================ */
+function cueBall(){ return balls.find(b => b.cue); }
+function allStopped(){ return balls.every(b => b.potted || (b.vx === 0 && b.vy === 0)); }
+
+function physicsStep(h){
+  // integrate + rolling friction
+  for (const b of balls){
+    if (b.potted) continue;
+    const sp = Math.hypot(b.vx, b.vy);
+    if (sp > 0){
+      let ns = sp - FRIC*h;
+      if (ns < STOP) ns = 0;
+      const s = ns / sp;
+      b.vx *= s; b.vy *= s;          // friction can only reduce speed
+    }
+    b.x += b.vx * h;
+    b.y += b.vy * h;
+  }
+  // pockets
+  for (const b of balls){
+    if (b.potted) continue;
+    for (const p of POCKETS){
+      const dx = b.x - p.x, dy = b.y - p.y;
+      if (dx*dx + dy*dy < POCKET_R*POCKET_R){
+        b.potted = true; b.vx = 0; b.vy = 0;
+        break;
+      }
+    }
+  }
+  // cushions
+  for (const b of balls){
+    if (b.potted) continue;
+    if (b.x < R)     { b.x = R;     b.vx = -b.vx * E_CUSH; }
+    if (b.x > W - R) { b.x = W - R; b.vx = -b.vx * E_CUSH; }
+    if (b.y < R)     { b.y = R;     b.vy = -b.vy * E_CUSH; }
+    if (b.y > H - R) { b.y = H - R; b.vy = -b.vy * E_CUSH; }
+  }
+  // ball-ball collisions (equal mass, resolved along line of centres)
+  const min = 2 * R;
+  for (let i = 0; i < balls.length; i++){
+    const a = balls[i];
+    if (a.potted) continue;
+    for (let j = i + 1; j < balls.length; j++){
+      const b = balls[j];
+      if (b.potted) continue;
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let d2 = dx*dx + dy*dy;
+      if (d2 >= min*min) continue;
+      let d, nx, ny;
+      if (d2 < 1e-12){ d = 0; nx = 1; ny = 0; }
+      else { d = Math.sqrt(d2); nx = dx/d; ny = dy/d; }
+      // positional separation
+      const push = (min - d) / 2;
+      a.x -= nx*push; a.y -= ny*push;
+      b.x += nx*push; b.y += ny*push;
+      // impulse along the normal (momentum conserving, energy non-increasing)
+      const rel = (a.vx - b.vx)*nx + (a.vy - b.vy)*ny;   // approach speed
+      if (rel > 0){
+        const jimp = (1 + E_BALL) / 2 * rel;
+        a.vx -= jimp*nx; a.vy -= jimp*ny;
+        b.vx += jimp*nx; b.vy += jimp*ny;
+      }
+    }
+  }
+  // keep everything inside the cushions
+  for (const b of balls){
+    if (b.potted) continue;
+    if (b.x < R) b.x = R; else if (b.x > W - R) b.x = W - R;
+    if (b.y < R) b.y = R; else if (b.y > H - R) b.y = H - R;
+  }
+}
+
+function freeSpot(){
+  const offs = [0, -3*R, 3*R, -6*R, 6*R, -9*R, 9*R];
+  for (let x = W*0.25; x <= W - R; x += 2*R){
+    for (const o of offs){
+      const y = H/2 + o;
+      if (y < R || y > H - R) continue;
+      if (balls.every(b => b.potted || b.cue ||
+                          Math.hypot(b.x - x, b.y - y) > 2*R + 1))
+        return {x, y};
+    }
+  }
+  return {x: W*0.25, y: H/2};
+}
+
+function update(dt){
+  if (dt > 0){
+    const n = Math.max(1, Math.ceil(dt / MAX_H));
+    const h = dt / n;
+    for (let i = 0; i < n; i++) physicsStep(h);
+  }
+  const cue = cueBall();
+  if (cue && cue.potted && allStopped()){
+    const s = freeSpot();
+    cue.potted = false; cue.x = s.x; cue.y = s.y; cue.vx = 0; cue.vy = 0;
+    flashMsg = 'Cue ball potted \u2014 re-spotted on the head string.';
+    flashT = 3;
+  }
+  if (flashT > 0) flashT -= dt;
+}
+
+/* ============================ RENDERING ============================ */
+function rr(x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawTable(){
+  // wooden rail
+  const g = ctx.createLinearGradient(0, -M, 0, H + M);
+  g.addColorStop(0, '#7d4c22'); g.addColorStop(0.5, '#5c3515'); g.addColorStop(1, '#3c220d');
+  ctx.fillStyle = g;
+  rr(-M, -M, CSSW, CSSH, 22); ctx.fill();
+  ctx.fillStyle = '#2a1808';
+  rr(-M + 7, -M + 7, CSSW - 14, CSSH - 14, 12); ctx.fill();
+  // felt
+  const f = ctx.createRadialGradient(W/2, H/2, 60, W/2, H/2, W*0.75);
+  f.addColorStop(0, '#23804a'); f.addColorStop(1, '#145c30');
+  ctx.fillStyle = f;
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(0,0,0,.4)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(0, 0, W, H);
+  // rail diamonds
+  ctx.fillStyle = '#e8d9b0';
+  for (let i = 1; i < 8; i++){
+    if (i === 4) continue;
+    ctx.beginPath(); ctx.arc(W*i/8, -M/2, 4, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(W*i/8, H + M/2, 4, 0, 7); ctx.fill();
+  }
+  for (let i = 1; i < 4; i++){
+    ctx.beginPath(); ctx.arc(-M/2, H*i/4, 4, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(W + M/2, H*i/4, 4, 0, 7); ctx.fill();
+  }
+  // pockets
+  for (const p of POCKETS){
+    const pg = ctx.createRadialGradient(p.x - 3, p.y - 3, 2, p.x, p.y, POCKET_VIS);
+    pg.addColorStop(0, '#2a2a2a'); pg.addColorStop(1, '#000');
+    ctx.beginPath(); ctx.arc(p.x, p.y, POCKET_VIS, 0, 7);
+    ctx.fillStyle = pg; ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = '#8b6b3a'; ctx.stroke();
+  }
+  // felt vignette
+  const v = ctx.createRadialGradient(W/2, H/2, H*0.45, W/2, H/2, W*0.72);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,.16)');
+  ctx.fillStyle = v;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function ballColor(n){ return COLORS[((n - 1) % 8) + 1]; }
+
+function drawBall(b){
+  if (b.potted) return;
+  const x = b.x, y = b.y;
+  // shadow
+  ctx.beginPath();
+  ctx.ellipse(x + 2.5, y + 3.5, R, R*0.9, 0, 0, 7);
+  ctx.fillStyle = 'rgba(0,0,0,.30)'; ctx.fill();
+  // body
+  ctx.save();
+  ctx.beginPath(); ctx.arc(x, y, R, 0, 7); ctx.clip();
+  if (b.cue){
+    ctx.fillStyle = '#f7f4ea'; ctx.fillRect(x - R, y - R, 2*R, 2*R);
+  } else if (b.num > 8){          // stripes
+    ctx.fillStyle = '#f5f2e8'; ctx.fillRect(x - R, y - R, 2*R, 2*R);
+    ctx.fillStyle = ballColor(b.num);
+    ctx.fillRect(x - R, y - R*0.62, 2*R, R*1.24);
+  } else {
+    ctx.fillStyle = ballColor(b.num); ctx.fillRect(x - R, y - R, 2*R, 2*R);
+  }
+  const sg = ctx.createRadialGradient(x - R*0.4, y - R*0.45, R*0.15, x, y, R*1.15);
+  sg.addColorStop(0, 'rgba(255,255,255,.55)');
+  sg.addColorStop(0.35, 'rgba(255,255,255,0)');
+  sg.addColorStop(1, 'rgba(0,0,0,.38)');
+  ctx.fillStyle = sg; ctx.fillRect(x - R, y - R, 2*R, 2*R);
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(x, y, R, 0, 7);
+  ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 1; ctx.stroke();
+  // number
+  if (!b.cue){
+    ctx.beginPath(); ctx.arc(x, y, R*0.55, 0, 7);
+    ctx.fillStyle = '#f5f2e8'; ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.font = 'bold ' + Math.round(R*0.78) + 'px Arial, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(b.num), x, y + 0.5);
+  }
+}
+
+function drawAim(){
+  const cue = cueBall();
+  if (!drag || !cue || cue.potted) return;
+  const dx = cue.x - drag.mx, dy = cue.y - drag.my;
+  const len = Math.hypot(dx, dy);
+  if (len < 3) return;
+  const ux = dx/len, uy = dy/len;
+  const frac = Math.min(len, MAX_DRAG) / MAX_DRAG;
+  ctx.save();
+  // aim line
+  const alen = 60 + frac*220;
+  ctx.setLineDash([9, 8]);
+  ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cue.x + ux*(R + 2), cue.y + uy*(R + 2));
+  ctx.lineTo(cue.x + ux*(R + alen), cue.y + uy*(R + alen));
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // ghost ball
+  ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(cue.x + ux*(R + alen), cue.y + uy*(R + alen), R, 0, 7); ctx.stroke();
+  // cue stick pulled back behind the ball
+  const back = R + 12 + Math.min(len, MAX_DRAG)*0.55;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#8a5a24'; ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.moveTo(cue.x - ux*(back + 180), cue.y - uy*(back + 180));
+  ctx.lineTo(cue.x - ux*back, cue.y - uy*back);
+  ctx.stroke();
+  ctx.strokeStyle = '#d8c49a'; ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.moveTo(cue.x - ux*(back + 14), cue.y - uy*(back + 14));
+  ctx.lineTo(cue.x - ux*back, cue.y - uy*back);
+  ctx.stroke();
+  // power bar on the bottom rail
+  const bw = 260, bh = 13, bx = W/2 - bw/2, by = H + M/2 - bh/2;
+  ctx.fillStyle = 'rgba(0,0,0,.45)'; rr(bx - 2, by - 2, bw + 4, bh + 4, 6); ctx.fill();
+  const pg = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+  pg.addColorStop(0, '#7ee081'); pg.addColorStop(0.6, '#ffd94d'); pg.addColorStop(1, '#ff4d3a');
+  ctx.fillStyle = pg;
+  if (frac > 0.01){ rr(bx, by, bw*frac, bh, 5); ctx.fill(); }
+  ctx.strokeStyle = '#e8d9b0'; ctx.lineWidth = 1; rr(bx, by, bw, bh, 5); ctx.stroke();
+  ctx.fillStyle = '#ffe9b0';
+  ctx.font = 'bold 12px Arial, sans-serif';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  ctx.fillText('POWER ' + Math.round(frac*100) + '%', bx - 10, by + bh/2);
+  ctx.restore();
+}
+
+function render(){
+  ctx.clearRect(0, 0, CSSW, CSSH);
+  ctx.save();
+  ctx.translate(M, M);
+  drawTable();
+  for (const b of balls) drawBall(b);
+  drawAim();
+  ctx.restore();
+
+  const remaining = balls.filter(b => !b.cue && !b.potted).length;
+  let msg;
+  if (flashT > 0)            msg = flashMsg;
+  else if (remaining === 0)  msg = 'Rack cleared! \u{1F3C6} Press Reset / Rack to play again.';
+  else if (allStopped())     msg = 'Balls remaining: ' + remaining + ' \u2014 drag back on the cue ball to shoot.';
+  else                       msg = 'Balls remaining: ' + remaining + ' \u2014 rolling\u2026';
+  if (statusEl.textContent !== msg) statusEl.textContent = msg;
+}
+
+/* ============================ ANIMATION LOOP ============================ */
+let running = false, rafId = null, lastT = 0;
+function frame(t){
+  if (!running) return;
+  if (!lastT) lastT = t;
+  let dt = (t - lastT) / 1000;
+  lastT = t;
+  if (dt > 0.05) dt = 0.05;
+  if (dt > 0) update(dt);
+  render();
+  rafId = requestAnimationFrame(frame);
+}
+function pause(){
+  running = false;
+  if (rafId !== null){ cancelAnimationFrame(rafId); rafId = null; }
+  lastT = 0;
+}
+function resume(){
+  if (!running){
+    running = true; lastT = 0;
+    rafId = requestAnimationFrame(frame);
+  }
+}
+
+/* ============================ SIM API ============================ */
+function reset(arr){
+  balls = arr.map((b, i) => ({
+    x: +b.x, y: +b.y,
+    vx: +(b.vx || 0), vy: +(b.vy || 0),
+    cue: !!b.cue,
+    num: (b.num !== undefined) ? b.num : (b.cue ? 0 : i + 1),
+    potted: false
+  }));
+  drag = null; flashT = 0;
+  render();
+}
+function step(dt){ update(Math.max(0, +dt || 0)); render(); }
+function state(){
+  return balls.map(b => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy,
+                           potted: b.potted, cue: b.cue }));
+}
+function shoot(vx, vy){
+  const cue = cueBall();
+  if (cue && !cue.potted){ cue.vx = +vx; cue.vy = +vy; }
+}
+
+window.sim = { W, H, R, reset, step, state, shoot, pause, resume };
+
+/* ============================ RACK ============================ */
+function rack(){
+  const order = [1, 9, 2, 10, 8, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15]; // 8 in the middle
+  const s = 2*R + 0.6, dxr = s * Math.cos(Math.PI/6);
+  const ax = W * 0.68, ay = H / 2;
+  const arr = [];
+  let k = 0;
+  for (let r = 0; r < 5; r++)
+    for (let i = 0; i <= r; i++)
+      arr.push({ x: ax + r*dxr, y: ay + (i - r/2)*s,
+                 vx: 0, vy: 0, num: order[k++], cue: false });
+  arr.push({ x: W * 0.25, y: H / 2, vx: 0, vy: 0, num: 0, cue: true });
+  reset(arr);
+  flashMsg = ''; flashT = 0; render();
+}
+document.getElementById('resetBtn').addEventListener('click', rack);
+
+/* ============================ MOUSE CONTROL ============================ */
+function toPhysics(e){
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (CSSW / rect.width)  - M,
+    y: (e.clientY - rect.top)  * (CSSH / rect.height) - M
+  };
+}
+canvas.addEventListener('mousedown', e => {
+  e.preventDefault();
+  const cue = cueBall();
+  if (!cue || cue.potted || !allStopped()) return;
+  const p = toPhysics(e);
+  if (Math.hypot(p.x - cue.x, p.y - cue.y) <= R + 8){
+    drag = { mx: p.x, my: p.y };
+    render();
+  }
+});
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const p = toPhysics(e);
+  drag.mx = p.x; drag.my = p.y;
+  render();
+});
+window.addEventListener('mouseup', e => {
+  if (!drag) return;
+  const cue = cueBall();
+  const p = toPhysics(e);
+  drag = null;
+  if (cue && !cue.potted){
+    const dx = cue.x - p.x, dy = cue.y - p.y;
+    const len = Math.hypot(dx, dy);
+    if (len > 5){
+      const power = Math.min(len, MAX_DRAG) / MAX_DRAG * MAX_POWER;
+      shoot(dx / len * power, dy / len * power);
+    }
+  }
+  render();
+});
+
+/* ============================ GO ============================ */
+rack();
+resume();
+</script>
+</body>
+</html>

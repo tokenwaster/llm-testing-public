@@ -356,6 +356,10 @@ code { background:var(--surface-2); border-radius:4px; padding:1px 6px;
 .mx-rail .gp .tie { color:var(--accent); font-weight:700; margin-right:2px; cursor:help; }
 .mx-row.lead .mx-rail { box-shadow:inset 3px 0 0 var(--accent); }
 .mx-row.lead .rk, .mx-row.lead .sc, .mx-row.lead .gp { color:var(--accent); }
+
+.mx-row.partial .mx-rail { opacity:.62; }
+.mx-row.partial .pcov { font-size:9.5px; padding:0 4px; border-radius:6px;
+  border:1px solid var(--warn); color:var(--warn); vertical-align:middle; }
 .mx-row.head .rk, .mx-row.head .nm, .mx-row.head .sc, .mx-row.head .gp { color:var(--muted);
   font-family:var(--mono); font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; }
 .mx-cells { display:flex; gap:14px; align-items:center; padding:0 8px; height:29px;
@@ -442,7 +446,7 @@ code { background:var(--surface-2); border-radius:4px; padding:1px 6px;
 <p>A benchmark harness that runs the <strong>same 31 tasks</strong>
 against every model — local (LM Studio) and cloud (Claude subscription CLI,
 OpenRouter) — and records timing, tokens, cost and retries for each one.
-Currently <strong>suite v0.6.17</strong>, with
+Currently <strong>suite v0.6.18</strong>, with
 <strong>22 models</strong> across <strong>16 runs</strong>
 in the live dataset.</p>
 <p>Every task is a <strong>brand-new conversation</strong>: exactly one user
@@ -798,6 +802,14 @@ it", and it's what the <em>attributed score</em> corrects for.</p>
 <td class="small"><span class="pill">infra</span></td>
 <td class="small">provider rate-limited the request</td></tr>
 
+<tr><td><code>over-budget</code></td>
+<td class="small"><span class="pill">harness</span></td>
+<td class="small">scored using MORE output tokens than the fleet budget allows — the claude CLI takes no max_tokens flag, so these predate the adapter enforcing it post-hoc. The result is not comparable to a model that was capped; re-run to score it under the same budget</td></tr>
+
+<tr><td><code>request-rejected</code></td>
+<td class="small"><span class="pill">harness</span></td>
+<td class="small">the provider REFUSED the request — a bad parameter, an unknown model id, or a bad key. Our config, not the model: it never saw the prompt, so the task is dropped unscored rather than zeroed</td></tr>
+
 <tr><td><code>timeout</code></td>
 <td class="small"><span class="pill">infra</span></td>
 <td class="small">the request timed out</td></tr>
@@ -1113,7 +1125,22 @@ view an archived set, rendered with its own task-definition snapshot.</p>
 <p><strong>Versioning policy.</strong> <code>SUITE_VERSION</code> versions the *test dataset*, not the code:</p>
 <ul><li><strong>Minor/major bump</strong> (<code>0.4</code> → <code>0.5</code>) — the tests or the methodology changed. The old data is archived first (<code>harness archive --as 0.4</code>) so live reports always show exactly one coherent dataset.</li><li><strong>Patch bump</strong> (<code>0.5.6</code> → <code>0.5.7</code>) — scoring fixes and presentation changes *within* a dataset. Patches never archive: the archive key is <code>major.minor</code>, so every <code>0.5.x</code> run aggregates into the same &quot;0.5&quot; dataset.</li><li><strong>No bump</strong> — run-engine, server, and UI changes that don&#x27;t affect what is tested or how it is scored.</li></ul>
 <p>Scores are aggregated as the <strong>mean of every scored run per model·task</strong>, so re-running a model fleshes its number out rather than replacing it; unscored runs (crash / spiral / DNF) stay out of the mean.</p>
-<p><strong>Changelog layout.</strong> Only the top <code>## Unreleased</code> section holds pending work; its entries are <code>###</code> subsections. When a version is cut, those subsections move under the new <code>## x.y.z</code> header. So every <code>###</code> below a version number belongs to that version — there is never an <code>## Unreleased</code> stranded between two releases.</p>
+<p><strong>Changelog layout.</strong> Only the top `## 0.6.18 — the fairness budget applies to Claude too</p>
+<h3>The token budget was never enforced on the Claude CLI</h3>
+<p>Rule #3 grants every <strong>non-claude</strong> model <code>max_tokens: 32768</code>. Claude was exempt — not by choice but by transport: <code>claude -p</code> takes no max-tokens flag, so nothing bounded its output. That produced a real double standard on exactly the tasks that decide the board:</p>
+<p>| ctx-013 | tokens | score | |---|---|---| | hy3 | capped at 32,768, cut off mid-thought | <strong>0.0</strong> | | claude-cli-sonnet-4-6 | uncapped, <strong>64,465</strong> (2× the cap) | <strong>1.0</strong> |</p>
+<p>The claude yamls also declared <code>max_tokens: 16384</code> — half the fleet&#x27;s — which was fiction, since it was never applied. Now 32768, and enforced.</p>
+<ul><li><strong>Enforced post-hoc</strong> in <code>ClaudeCLIAdapter._parse_result</code>: output past the cap is dropped from the END of the visible text (a model thinks first and answers last), <code>stop_reason</code> becomes <code>length</code>, and the raw count is kept as <code>over_cap_tokens</code>. Proportional truncation was tried and is wrong whenever reasoning dominates — sonnet-4-6 spent 64,465 tokens on ctx-013 yet emitted 105 chars, because the CLI keeps reasoning out of <code>result</code>.</li><li><strong>Rescored all six over-budget cells</strong> by rebuilding each artifact from the capped reply and re-running the same checker. Every one loses its closing artifact to the budget (<code>&lt;/html&gt;</code>, or the ANSWER lines): sonnet-4-6 ctx-013 1.0→0, sonnet-5 ctx-013 0.6→0, sonnet-4-6 web-013 0.5→0, and the two human-graded web-012 cells (fable 1.0, opus-4-8 0.9467) →0 — craft cannot rescue a submission the budget forbade. Prior grades kept as <code>voided_human_score</code>.</li><li><code>over-budget</code> is a new assess category attributed to the <strong>harness</strong>, checked before the pass short-circuit precisely because these are usually passes.</li></ul>
+<h3>Silence is not a spiral</h3>
+<p>The claude no-output guard is retired. It killed anything silent for 300s, but the window probe measured those same models answering correctly after 800–1160s — they were thinking, not looping. A <strong>real</strong> spiral is a detected repetition loop (<code>_LoopGuard</code>, streaming models only); silence is a <code>timeout</code>, meaning the window is too tight. Removed the 28 claude silence-zeros so a re-run scores them honestly.</p>
+<h3>Refused requests stop being scored as failures</h3>
+<p>A provider 4xx means the model never saw the prompt. <code>request_rejected</code> /<code>auth</code> now drop the task <strong>unscored</strong> and skip the model (deterministic — the next task would be refused identically), instead of writing a wall of zeros: kimi-k3 took 55 of them because Moonshot rejects <code>temperature: 0.2</code>. Context-overflow 400s are explicitly excluded — that is a real limit and must keep scoring 0.</p>
+<h3>Scoring and ranking corrections</h3>
+<ul><li><code>web-001-desktop</code> was failing working file browsers: the nav tests double-clicked the label inside each entry, which a correct app may set <code>pointer-events: none</code> on. Now targets the entry. fable-5 and sonnet-4-6 were understated; rescored.</li><li>Trap attribution is numeric-aware, so <code>40 seconds</code> records as the trap it is.</li><li>Aggregate verdicts describe a run that actually <strong>lost</strong> points, instead of labelling a cell by its newest (possibly passing) run — which branded a correct <code>185/3</code> &quot;incorrect&quot;.</li><li><strong>Tied models share a rank</strong> (competition/1224 ranking) on the standings and the discriminate subsets. Ten models score exactly 1.0000 on Easy; they were numbered 1..10 with the later ones shown as having *dropped*.</li><li>Matrix rows follow the leaderboard rule: a model that has not attempted the whole suite ranks <strong>below</strong> every complete one (a 1-of-55 row was sitting at the top).</li></ul>
+<h3>Cost</h3>
+<ul><li>The openai-compatible adapters now capture <code>prompt_tokens_details.cached_tokens</code>, and cache multipliers are per-provider (<code>cache_read_mult</code> / <code>cache_write_mult</code>), defaulting to Anthropic&#x27;s 0.10×/1.25× only for Anthropic and <strong>1.0× elsewhere</strong> — no discount is ever invented. <code>cache_read_per_mtok</code> takes an absolute rate; kimi-k3 is set to Moonshot&#x27;s published $3.00 / $0.30 cached / $15.00.</li></ul>
+<h3>Operator</h3>
+<ul><li><code>/manage</code> sets model prices by hand (for providers that publish no catalog).</li><li><code>/backend</code> manages interface keys per row with a live <strong>Test</strong>, and flags a key <strong>shared</strong> between two interfaces — which is how a Moonshot key silently overwrote <code>OPENROUTER_API_KEY</code> and 401&#x27;d every OpenRouter model.</li><li><code>/run</code> gains Hard / Frontier / Easy / Hardened selectors with five distinct marker colours, all derived live from the discrimination tiers; the discriminate page gains the <strong>Frontier</strong> lens.</li><li>Runs persist their narration to <code>runs/&lt;id&gt;/run.log</code>, and tasks dropped without a score are recorded in the manifest&#x27;s <code>dropped_unscored</code>.</li></ul>
 <hr>
 <h2>Unreleased</h2>
 <ul><li><strong>Three frontier tasks built + reference-verified (not yet in a version).</strong> Targeting the top-8 tied cohort, each on a lane that already discriminates and each multi-checkpoint so partial credit spreads: <code>web-013-billiards</code> (webapp; a <code>window.sim</code> physics API graded on reflection/friction/elastic collisions/pockets/determinism, 13 checks), <code>ctx-013-ledger-supersede-64k</code> (123k-char settled-balance aggregation under void/amend noise, response lane, 5 answers), <code>rs-013-statemachine-trace</code> (40-op adversarial stack-machine trace, response lane, 5 answers). All 1.0-good / 0.0-empty; traps 0.15 / 0.20 / 0.00. <strong>Awaiting the top-8 calibration run and a version decision</strong> — admit only if σ(top-8) ≥ 0.15. Nothing here bumps SUITE_VERSION or archives yet. Generators and reference apps in <code>tasks-refs/</code>; see <code>docs/PUBLIC-FEEDBACK-ROADMAP.md</code>.</li></ul>

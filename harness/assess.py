@@ -63,6 +63,15 @@ CATEGORIES = {
     "transport-drop": ("infra", "the gateway/connection dropped — a flaky "
                        "pipe, not model capability"),
     "rate-limit": ("infra", "provider rate-limited the request"),
+    "over-budget": ("harness", "scored using MORE output tokens than the fleet "
+                    "budget allows — the claude CLI takes no max_tokens flag, so "
+                    "these predate the adapter enforcing it post-hoc. The result "
+                    "is not comparable to a model that was capped; re-run to "
+                    "score it under the same budget"),
+    "request-rejected": ("harness", "the provider REFUSED the request — a bad "
+                         "parameter, an unknown model id, or a bad key. Our "
+                         "config, not the model: it never saw the prompt, so "
+                         "the task is dropped unscored rather than zeroed"),
     "timeout": ("infra", "the request timed out"),
     "context-overflow": ("known-limit", "prompt exceeded the model's usable "
                          "context window — expected, config-visible"),
@@ -189,6 +198,11 @@ def classify(result: dict, tdef, cfg: dict, suspect: dict | None = None) -> dict
         return {"category": category, "attribution": attr,
                 "detail": base + (f" — {extra}" if extra else "")}
 
+    _over = next((a.get("over_cap_tokens") for a in attempts
+                  if a.get("over_cap_tokens")), None)
+    if _over:
+        return pack("over-budget", f"used {_over:,} output tokens")
+
     if sc.get("status") == "scored" and score is not None \
             and score >= cfg["pass_threshold"]:
         return pack("pass")
@@ -215,6 +229,8 @@ def classify(result: dict, tdef, cfg: dict, suspect: dict | None = None) -> dict
         return pack("transport-drop")
     if errored and ("429" in errs or ("rate" in errs and "limit" in errs)):
         return pack("rate-limit")
+    if "request_rejected" in kinds or "auth" in kinds:
+        return pack("request-rejected", str(last.get("error") or "")[:120])
     if errored and "timeout" in kinds:
         return pack("timeout")
 

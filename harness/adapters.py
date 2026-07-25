@@ -42,6 +42,7 @@ class ChatResult:
     tokens_out: int | None = None
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
+    over_cap_tokens: int | None = None
     reasoning_tokens: int | None = None
     stop_reason: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
@@ -130,7 +131,15 @@ def _classify_http(status: int, body: str, headers=None) -> AdapterError:
                             retry_after=_retry_after_s(headers, body))
     if status >= 500:
         return AdapterError(f"HTTP {status}: {body[:300]}", kind="api", retryable=True)
-    return AdapterError(f"HTTP {status}: {body[:300]}", kind="api", retryable=False)
+    low = (body or "").lower()
+    if any(p in low for p in (
+            "context window", "context length", "context size",
+            "maximum context", "available context", "exceeds the context",
+            "exceed_context_size", "too many tokens")):
+        return AdapterError(f"HTTP {status}: {body[:300]}", kind="api",
+                            retryable=False)
+    return AdapterError(f"HTTP {status}: {body[:300]}", kind="request_rejected",
+                        retryable=False)
 
 
 class BaseAdapter:
@@ -251,6 +260,8 @@ class OpenAICompatAdapter(BaseAdapter):
             tool_calls=tool_calls,
             cost_usd=usage.get("cost"),
             served_by=data.get("provider"),
+            cache_read_tokens=((usage.get("prompt_tokens_details") or {})
+                               .get("cached_tokens")) or None,
         )
         _reject_degenerate(result, self.model.local)
         return result
@@ -261,6 +272,7 @@ class OpenAICompatAdapter(BaseAdapter):
         ttft = None
         text_parts: list[str] = []
         tokens_in = tokens_out = reasoning_tokens = None
+        cache_read = None
         reasoning_chars = 0
         stop_reason = None
         cost_usd = served_by = None
@@ -302,6 +314,10 @@ class OpenAICompatAdapter(BaseAdapter):
                         rt = rt if rt is not None else usage.get("reasoning_tokens")
                         if rt is not None:
                             reasoning_tokens = rt
+                        ct = ((usage.get("prompt_tokens_details") or {})
+                              .get("cached_tokens"))
+                        if ct:
+                            cache_read = ct
                     for choice in data.get("choices") or []:
                         delta = choice.get("delta") or {}
                         piece = delta.get("content")
@@ -336,6 +352,7 @@ class OpenAICompatAdapter(BaseAdapter):
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             reasoning_tokens=reasoning_tokens,
+            cache_read_tokens=cache_read,
             stop_reason=stop_reason,
             cost_usd=cost_usd,
             served_by=served_by,
@@ -633,16 +650,26 @@ class ClaudeCLIAdapter(BaseAdapter):
         tokens_in = (usage.get("input_tokens") or 0) + cache_read + cache_write or None
         requested = getattr(getattr(self, "model", None), "model", "") or ""
         served = _resolve_served_model(data.get("modelUsage"), requested)
+        text = data.get("result") or ""
+        out_tok = usage.get("output_tokens")
+        stop = data.get("subtype")
+        over_cap = None
+        cap = getattr(getattr(self, "model", None), "max_tokens", None)
+        if cap and out_tok and out_tok > cap:
+            keep = max(0, len(text) - (out_tok - cap) * 4)
+            over_cap = out_tok
+            text, out_tok, stop = text[:keep], cap, "length"
         return ChatResult(
-            text=data.get("result") or "",
+            text=text,
             total_ms=total_ms,
             ttft_ms=None,
             first_text_ms=data.get("_first_text_ms"),
             tokens_in=tokens_in,
-            tokens_out=usage.get("output_tokens"),
+            tokens_out=out_tok,
+            over_cap_tokens=over_cap,
             cache_read_tokens=cache_read or None,
             cache_write_tokens=cache_write or None,
-            stop_reason=data.get("subtype"),
+            stop_reason=stop,
             turns=data.get("num_turns"),
             served_by=served,
         )

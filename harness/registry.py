@@ -57,8 +57,19 @@ class Model:
         in_rate = float(self.pricing.get("input_per_mtok", 0.0))
         out_rate = float(self.pricing.get("output_per_mtok", 0.0))
         cr, cw = cache_read or 0, cache_write or 0
+        anthropic = self.provider in ("claude-cli", "anthropic")
+        cr_mult = float(self.pricing.get("cache_read_mult",
+                                         0.10 if anthropic else 1.0))
+        cw_mult = float(self.pricing.get("cache_write_mult",
+                                         1.25 if anthropic else 1.0))
+        cr_rate = self.pricing.get("cache_read_per_mtok")
+        cw_rate = self.pricing.get("cache_write_per_mtok")
         base = max(0, tokens_in - cr - cw)
-        input_cost = (base + cw * 1.25 + cr * 0.10) / 1e6 * in_rate
+        read_cost = (cr / 1e6 * float(cr_rate)) if cr_rate is not None \
+            else (cr * cr_mult / 1e6 * in_rate)
+        write_cost = (cw / 1e6 * float(cw_rate)) if cw_rate is not None \
+            else (cw * cw_mult / 1e6 * in_rate)
+        input_cost = base / 1e6 * in_rate + read_cost + write_cost
         return input_cost + tokens_out / 1e6 * out_rate
 
 

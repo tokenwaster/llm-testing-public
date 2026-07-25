@@ -121,3 +121,76 @@ def test_429_without_a_hint_backs_off_properly(tmp_path, monkeypatch):
 
 def test_streak_threshold_exists():
     assert isinstance(runner.RATE_LIMIT_STREAK, int) and runner.RATE_LIMIT_STREAK >= 1
+
+
+
+def test_bad_parameter_is_refused_not_a_model_failure():
+    """kimi-k3 took 55 zeros because Moonshot rejects temperature 0.2. The model
+    never saw the prompt, so that is our config, not its capability."""
+    e = _classify_http(
+        400, '{"error":{"message":"invalid temperature: only 1 is allowed"}}')
+    assert e.kind == "request_rejected"
+    assert e.retryable is False
+
+
+def test_unknown_model_id_is_refused():
+    assert _classify_http(404, "model not found").kind == "request_rejected"
+
+
+def test_context_overflow_is_NOT_a_refused_request():
+    """A 400 saying the prompt exceeds the window is the model's real, known
+    limit — it must keep scoring 0 for THAT task and let the model continue.
+
+    Classifying it as request_rejected made the runner drop the task unscored
+    AND skip the model's remaining tasks, so one oversized prompt would abort a
+    local model's whole suite (qwen3-32b hits this on ctx-008-recall-128k).
+    """
+    body = ('{"error":{"code":400,"message":"request (182967 tokens) exceeds '
+            'the available context size (32768 tokens)",'
+            '"type":"exceed_context_size_error"}}')
+    e = _classify_http(400, body)
+    assert e.kind == "api", \
+        "a context overflow is a known limit, not a refused config"
+    assert e.retryable is False
+
+
+def test_refused_kinds_are_exactly_the_drop_unscored_set():
+    """The runner unwinds unscored on these two kinds only — a wider set would
+    start dropping real capability failures."""
+    assert _classify_http(400, "bad body").kind == "request_rejected"
+    assert _classify_http(401, "nope").kind == "auth"
+    assert _classify_http(429, "slow").kind == "rate_limit"
+    assert _classify_http(500, "boom").kind == "api"
+
+
+
+def test_timeout_always_retries(tmp_path, monkeypatch):
+    """A timeout must ALWAYS retry — never skipped on predicted slowness.
+
+    The dataset shows a retry rescuing 7 of 8 timed-out cells, four of which had
+    streamed NOTHING first. Gating the retry on measured first-token time was
+    tried and immediately disproved: the probe put sonnet-4-6 at 1160s on
+    ctx-013 (over its 900s budget), yet a live attempt answered at 805s and
+    scored 1.0 — the skip would have recorded a 0. Think-time varies run to run,
+    so no measurement licenses skipping the second attempt."""
+    from types import SimpleNamespace
+
+    from harness import runner as R
+    from harness.adapters import AdapterError
+
+    class _Timeouts:
+        def __init__(self): self.calls = 0
+        def chat(self, *a, **k):
+            self.calls += 1
+            raise AdapterError("exceeded the 10s budget", kind="timeout",
+                               retryable=True)
+
+    monkeypatch.setattr(R, "measured_window_need", lambda m, t: None)
+    R.time.sleep = lambda *_: None
+    r = R.TaskRunner.__new__(R.TaskRunner)
+    r.run_dir, r.cancel = tmp_path, None
+    r.model = SimpleNamespace(name="m")
+    r.adapter = _Timeouts()
+    task = SimpleNamespace(id="never-probed", max_retries=1, timeout_s=10)
+    assert r._chat_with_retries(tmp_path, task, [], "", None, []) is None
+    assert r.adapter.calls == 2, "an unprobed timeout must still get its retry"

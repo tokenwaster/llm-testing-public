@@ -58,3 +58,35 @@ def test_a_machine_score_is_still_rescored(tmp_path, monkeypatch):
     after = json.loads((tdir / "score.json").read_text(encoding="utf-8"))
     assert after["score"] == 0.123, "checker-scored results must still refresh"
     assert n == 1
+
+
+def test_over_budget_overrides_even_a_human_grade(tmp_path, monkeypatch):
+    """An over-budget result is void regardless of who graded it.
+
+    The human reviewed craft on an app the model was never allowed to produce:
+    under the cap its closing </html> is truncated, so there is no working app
+    to review. Craft cannot rescue a submission the budget forbade — so this
+    check runs BEFORE the human guard that otherwise protects a by-eye verdict.
+    """
+    from harness import config, rescore
+    from harness.util import read_json, write_json
+
+    run = tmp_path / "runs" / "r1"
+    cell = run / "claude-cli-x" / "web-012-coin"
+    (cell / "workspace").mkdir(parents=True)
+    write_json(run / "run.json", {"run_id": "r1", "finished": "now"})
+    write_json(cell / "metrics.json", {
+        "status": "ok", "attempts": [{"tokens_out": 32768,
+                                      "over_cap_tokens": 33774}]})
+    write_json(cell / "score.json", {"status": "scored", "score": 1.0,
+                                     "scored_by": "human"})
+    monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(rescore, "_active_run", lambda: None)
+    monkeypatch.setattr(rescore.report, "generate_all", lambda *a, **k: None)
+
+    rescore._rescore("*", progress=lambda *_: None)
+
+    out = read_json(cell / "score.json", {})
+    assert out["score"] == 0.0, "an over-budget cell must not keep a human pass"
+    assert out["scored_by"] == "harness"
+    assert out["voided_human_score"] == 1.0, "the voided grade stays on record"

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: Arial, Helvetica, sans-serif; background: #eef0f2; padding: 12px; }
+  #app { min-width: 600px; min-height: 400px; background: #fff; border: 1px solid #b9b9b9; border-radius: 4px; padding: 12px; display: inline-block; }
+  #toolbar { margin-bottom: 10px; display: flex; align-items: center; gap: 12px; }
+  #export { padding: 6px 16px; font-size: 14px; cursor: pointer; border: 1px solid #888; background: #f7f7f7; border-radius: 3px; }
+  #export:hover { background: #e8e8e8; }
+  .hint { color: #666; font-size: 12px; }
+  #grid { border-collapse: collapse; table-layout: fixed; }
+  #grid th, #grid td { border: 1px solid #c9c9c9; }
+  #grid th { background: #e4e6e8; color: #333; font-size: 12px; padding: 3px 8px; text-align: center; min-width: 34px; height: 24px; }
+  #grid td { padding: 0; width: 88px; height: 26px; background: #fff; }
+  #grid td input { width: 100%; height: 100%; border: 0; margin: 0; padding: 2px 6px; outline: none; background: transparent; font-family: "Courier New", Courier, monospace; font-size: 13px; color: #111; }
+  #grid td input:focus { background: #fff9db; box-shadow: inset 0 0 0 2px #2f6fd0; }
+  #csv { width: 100%; min-width: 600px; height: 140px; margin-top: 12px; font-family: "Courier New", Courier, monospace; font-size: 12px; padding: 6px; border: 1px solid #aaa; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <button id="export" type="button">Export CSV</button>
+    <span class="hint">Formulas start with = (e.g. =A1*2+B2). Click a cell to edit; Enter commits.</span>
+  </div>
+  <table id="grid"></table>
+  <textarea id="csv" spellcheck="false" placeholder="Click Export CSV to write the computed grid here."></textarea>
+</div>
+<script>
+(function () {
+  'use strict';
+
+  var COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  var NROWS = 10;
+  var allRefs = [];
+  var inputs = {};
+  var rawData = {};   // ref -> raw text
+  var cache = {};     // ref -> evaluation result for the current recalc pass
+
+  var ERR = { sheetError: true };
+  var CYC = { sheetCycle: true };
+
+  /* ---------------- Build the grid ---------------- */
+  var table = document.getElementById('grid');
+  var headRow = document.createElement('tr');
+  headRow.appendChild(document.createElement('th'));
+  COLS.forEach(function (c) {
+    var th = document.createElement('th');
+    th.textContent = c;
+    headRow.appendChild(th);
+  });
+  table.appendChild(headRow);
+
+  function makeRow(r) {
+    var tr = document.createElement('tr');
+    var th = document.createElement('th');
+    th.textContent = String(r);
+    tr.appendChild(th);
+    COLS.forEach(function (c) {
+      var ref = c + r;
+      allRefs.push(ref);
+      var td = document.createElement('td');
+      var inp = document.createElement('input');
+      inp.type = 'text';
+      inp.id = 'cell-' + ref;
+      inp.autocomplete = 'off';
+      inp.spellcheck = false;
+      inputs[ref] = inp;
+      inp.addEventListener('focus', function () {
+        inp.value = rawData[ref] || '';        // show raw text for editing
+      });
+      inp.addEventListener('blur', function () {
+        commit(ref, inp.value);                // clicking away commits
+      });
+      inp.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+        else if (e.key === 'Escape') { e.preventDefault(); inp.value = rawData[ref] || ''; inp.blur(); }
+      });
+      td.appendChild(inp);
+      tr.appendChild(td);
+    });
+    return tr;
+  }
+  for (var r = 1; r <= NROWS; r++) table.appendChild(makeRow(r));
+
+  /* ---------------- Formula tokenizer ---------------- */
+  function tokenize(src) {
+    var tokens = [];
+    var i = 0;
+    while (i < src.length) {
+      var ch = src.charAt(i);
+      if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') { i++; continue; }
+      if (ch === '+' || ch === '-' || ch === '*' || ch === '/') { tokens.push({ t: 'op', v: ch }); i++; continue; }
+      if (ch === '(') { tokens.push({ t: 'lp' }); i++; continue; }
+      if (ch === ')') { tokens.push({ t: 'rp' }); i++; continue; }
+      var rest = src.slice(i);
+      var m = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(rest);
+      if (m) {
+        var n = parseFloat(m[0]);
+        if (!isFinite(n)) throw ERR;
+        tokens.push({ t: 'num', v: n });
+        i += m[0].length;
+        continue;
+      }
+      m = /^([A-Za-z]+)(\d+)?/.exec(rest);
+      if (m) {
+        var col = m[1].toUpperCase();
+        if (col.length !== 1 || col < 'A' || col > 'J' || !m[2]) throw ERR; // reference to a non-cell
+        var rn = parseInt(m[2], 10);
+        if (rn < 1 || rn > 10) throw ERR;                                    // reference to a non-cell
+        tokens.push({ t: 'ref', v: col + rn });
+        i += m[0].length;
+        continue;
+      }
+      throw ERR;
+    }
+    return tokens;
+  }
+
+  /* ---------------- Recursive-descent parser (normal precedence) ---------------- */
+  function runFormula(src, visiting) {
+    var tokens = tokenize(src);
+    var pos = 0;
+
+    function parsePrimary() {
+      var tok = tokens[pos];
+      if (!tok) throw ERR;
+      if (tok.t === 'num') { pos++; return tok.v; }
+      if (tok.t === 'ref') { pos++; return cellNumber(tok.v, visiting); }
+      if (tok.t === 'lp') {
+        pos++;
+        var v = parseExpr();
+        if (!tokens[pos] || tokens[pos].t !== 'rp') throw ERR;
+        pos++;
+        return v;
+      }
+      if (tok.t === 'op' && tok.v === '-') { pos++; return -parsePrimary(); }
+      if (tok.t === 'op' && tok.v === '+') { pos++; return parsePrimary(); }
+      throw ERR;
+    }
+    function parseTerm() {
+      var v = parsePrimary();
+      while (tokens[pos] && tokens[pos].t === 'op' && (tokens[pos].v === '*' || tokens[pos].v === '/')) {
+        var op = tokens[pos].v; pos++;
+        var rhs = parsePrimary();
+        if (op === '*') v = v * rhs;
+        else { if (rhs === 0) throw ERR; v = v / rhs; }
+      }
+      return v;
+    }
+    function parseExpr() {
+      var v = parseTerm();
+      while (tokens[pos] && tokens[pos].t === 'op' && (tokens[pos].v === '+' || tokens[pos].v === '-')) {
+        var op = tokens[pos].v; pos++;
+        var rhs = parseTerm();
+        v = op === '+' ? v + rhs : v - rhs;
+      }
+      return v;
+    }
+
+    var result = parseExpr();
+    if (pos !== tokens.length) throw ERR;
+    if (typeof result !== 'number' || !isFinite(result)) throw ERR;
+    return result;
+  }
+
+  /* ---------------- Evaluation with memoization + cycle detection ---------------- */
+  function evaluateCell(ref, visiting) {
+    var cached = cache[ref];
+    if (cached) return cached;
+    if (visiting.has(ref)) return { kind: 'cycle' };
+    visiting.add(ref);
+    var result;
+    var raw = rawData[ref] || '';
+    try {
+      if (raw.charAt(0) === '=') {
+        result = { kind: 'num', value: runFormula(raw.slice(1), visiting) };
+      } else if (raw.trim() === '') {
+        result = { kind: 'empty' };
+      } else {
+        result = { kind: 'text', value: raw };
+      }
+    } catch (e) {
+      if (e === CYC) result = { kind: 'cycle' };
+      else result = { kind: 'err' };
+    }
+    visiting.delete(ref);
+    cache[ref] = result;
+    return result;
+  }
+
+  function cellNumber(ref, visiting) {
+    var c = evaluateCell(ref, visiting);
+    if (c.kind === 'cycle') throw CYC;
+    if (c.kind === 'err') throw ERR;
+    if (c.kind === 'empty') return 0;                 // empty cells count as 0
+    if (c.kind === 'num') return c.value;
+    var t = String(c.value).trim();
+    if (t !== '' && isFinite(Number(t))) return Number(t);  // numeric plain text
+    throw ERR;                                        // non-numeric text in a formula
+  }
+
+  /* ---------------- Display ---------------- */
+  function fmt(n) {
+    if (Number.isInteger(n)) return String(n);
+    return String(Number(n.toPrecision(12)));
+  }
+
+  function displayOf(ref) {
+    var c = evaluateCell(ref, new Set());
+    switch (c.kind) {
+      case 'num':   return fmt(c.value);
+      case 'text':  return c.value;
+      case 'empty': return '';
+      case 'err':   return '#ERR';
+      case 'cycle': return '#CYCLE';
+    }
+    return '';
+  }
+
+  function recalc() {
+    cache = {};
+    for (var i = 0; i < allRefs.length; i++) {
+      var ref = allRefs[i];
+      var inp = inputs[ref];
+      if (document.activeElement !== inp) inp.value = displayOf(ref);
+    }
+  }
+
+  function commit(ref, text) {
+    rawData[ref] = text;
+    recalc();   // full recalculation => automatic + transitive updates
+  }
+
+  /* ---------------- CSV export ---------------- */
+  function csvCell(s) {
+    if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  document.getElementById('export').addEventListener('click', function () {
+    recalc();
+    var lines = [];
+    for (var rr = 1; rr <= NROWS; rr++) {
+      var row = [];
+      for (var ci = 0; ci < COLS.length; ci++) {
+        row.push(csvCell(displayOf(COLS[ci] + rr)));
+      }
+      lines.push(row.join(','));
+    }
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  /* ---------------- Scripting API ---------------- */
+  function normRef(ref) {
+    if (typeof ref !== 'string') return null;
+    var m = /^([A-Ja-j])([1-9]|10)$/.exec(ref.trim());
+    if (!m) return null;
+    return m[1].toUpperCase() + m[2];
+  }
+
+  window.sheet = {
+    set: function (ref, text) {
+      var r = normRef(ref);
+      if (!r) throw new Error('Invalid cell reference: ' + ref);
+      commit(r, text == null ? '' : String(text));
+      inputs[r].value = displayOf(r);
+    },
+    get: function (ref) {
+      var r = normRef(ref);
+      if (!r) throw new Error('Invalid cell reference: ' + ref);
+      return inputs[r].value;
+    },
+    raw: function (ref) {
+      var r = normRef(ref);
+      if (!r) throw new Error('Invalid cell reference: ' + ref);
+      return rawData[r] || '';
+    }
+  };
+
+  recalc();
+})();
+</script>
+</body>
+</html>

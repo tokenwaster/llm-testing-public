@@ -849,6 +849,10 @@ _MATRIX_CSS = """
 .mx-rail .gp .tie { color:var(--accent); font-weight:700; margin-right:2px; cursor:help; }
 .mx-row.lead .mx-rail { box-shadow:inset 3px 0 0 var(--accent); }
 .mx-row.lead .rk, .mx-row.lead .sc, .mx-row.lead .gp { color:var(--accent); }
+/* partial rows sit below every complete one; dim them so the break is visible */
+.mx-row.partial .mx-rail { opacity:.62; }
+.mx-row.partial .pcov { font-size:9.5px; padding:0 4px; border-radius:6px;
+  border:1px solid var(--warn); color:var(--warn); vertical-align:middle; }
 .mx-row.head .rk, .mx-row.head .nm, .mx-row.head .sc, .mx-row.head .gp { color:var(--muted);
   font-family:var(--mono); font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; }
 .mx-cells { display:flex; gap:14px; align-items:center; padding:0 8px; height:29px;
@@ -1103,8 +1107,8 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     <div class="mx-cells">{% for c in matrix.cats %}<div class="mx-grp" style="grid-template-columns:repeat({{ c.n }},15px);gap:3px"><span class="mx-clabel" title="{{ c.key }}" style="grid-column:1/-1">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div>
   </div>
   {% for r in matrix.rows %}
-  <div class="mx-row{% if r.lead %} lead{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-frontier="{{ r.m_frontier }}" data-easy="{{ r.m_easy }}">
-    <div class="mx-rail"><span class="rk">{{ r.rank }}</span><span class="nm">{{ r.model }}</span><span class="sc">{{ r.score }}{% if r.ci %}<span class="ci" title="95% confidence band across tasks (±1.96·SE)">{{ r.ci }}</span>{% endif %}</span><span class="gp">{% if r.tied %}<span class="tie" title="within the leader's 95% band — not statistically distinguishable on this task set">≈</span>{% endif %}{{ r.gap }}</span></div>
+  <div class="mx-row{% if r.lead %} lead{% endif %}{% if r.partial %} partial{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-frontier="{{ r.m_frontier }}" data-easy="{{ r.m_easy }}"{% if r.partial %} title="only {{ r.cover }} tasks run — ranked below every fully-tested model, because the mean of a partial row is not comparable to a full one"{% endif %}>
+    <div class="mx-rail"><span class="rk">{{ r.rank }}</span><span class="nm">{{ r.model }}{% if r.partial %} <span class="pcov">{{ r.cover }}</span>{% endif %}</span><span class="sc">{{ r.score }}{% if r.ci %}<span class="ci" title="95% confidence band across tasks (±1.96·SE)">{{ r.ci }}</span>{% endif %}</span><span class="gp">{% if r.tied %}<span class="tie" title="within the leader's 95% band — not statistically distinguishable on this task set">≈</span>{% endif %}{{ r.gap }}</span></div>
     <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
   {% endfor %}
@@ -1572,8 +1576,26 @@ function applyRank(){
   rows.sort((a, b) => val(b) - val(a));           // descending; blanks last
   const parent = rows[0].parentNode;
   rows.forEach(tr => parent.appendChild(tr));      // restack the DOM
-  let n = 0;                                        // renumber the VISIBLE rows
-  rows.forEach(tr => { if (tr.style.display !== 'none') tr.querySelector('td').textContent = ++n; });
+  // Renumber the VISIBLE rows with COMPETITION ranking: equal values share a
+  // number and the next distinct value skips to its true position (five tied
+  // at 1.000 are all 1st, the next is 6th). Sequential numbering would order
+  // models the lens cannot actually separate. Ties are judged at the printed
+  // precision so anything displayed as equal ranks as equal.
+  let shown = 0, rank = 0, prev = null;
+  rows.forEach(tr => {
+    if (tr.style.display === 'none') return;
+    shown++;
+    const v = parseFloat(tr.dataset[lens]);
+    const key = isNaN(v) ? null : v.toFixed(4);
+    if (key === null || key !== prev) rank = shown;   // new value -> real position
+    prev = key;
+    const cell = tr.querySelector('td');
+    cell.textContent = rank;
+    cell.title = (key !== null && rows.filter(r => r.style.display !== 'none'
+      && parseFloat(r.dataset[lens]).toFixed(4) === key).length > 1)
+      ? 'tied on this lens — the models share this score, so any order between '
+        + 'them is arbitrary; separate them on speed or cost' : '';
+  });
 }
 document.querySelectorAll('.seg').forEach(seg => {
   seg.addEventListener('click', e => {
@@ -3564,7 +3586,11 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         href = f"tasks/{tdef.id}.html" + (f"#m-{_slug_name(model)}" if model else "")
         return _mx_cell(entry, tdef, _acfg, _suspect, href)
 
+    _n_suite = len(tdefs) or 1
+    _cover = {m: len(by_model.get(m, [])) for m in all_models}
     _mrank = sorted(all_models, key=lambda m: (
+        _cover[m] < _n_suite,
+        -_cover[m] if _cover[m] < _n_suite else 0,
         -(summaries[m]["avg_score_val"]
           if summaries[m]["avg_score_val"] is not None else -1.0), m))
     _lead_v = next((summaries[m]["avg_score_val"] for m in _mrank
@@ -3612,6 +3638,8 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             "rank": i + 1, "model": _mlink(m), "score": score_s,
             "ci": ci_s, "tied": tied,
             "gap": gap_s, "lead": (i == 0 and agg is not None),
+            "partial": _cover[m] < _n_suite,
+            "cover": f"{_cover[m]}/{_n_suite}",
             "m_all": ("" if agg is None else f"{agg:.6f}"),
             "m_hard": ("" if _mh is None else f"{_mh:.6f}"),
             "m_easy": ("" if _me is None else f"{_me:.6f}"),
@@ -4603,10 +4631,13 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
     hard = [r["tid"] for r in rows if r["flag"] == "discriminator"]
     frontier = [r["tid"] for r in rows if r["flag"] == "frontier"]
     easy = [r["tid"] for r in rows if r["flag"] in ("ceiling", "dead")]
-    grank = {m: i for i, m in enumerate(ranked)}
+    grank = {m: r for m, r in zip(ranked, _competition_ranks(
+        [means[m] for m in ranked]))}
 
     def _rank_on(subset: list[str]) -> list[dict]:
-        """Rank models on one task subset; delta = shift vs the global rank."""
+        """Rank models on one task subset; delta = shift vs the global rank.
+
+        Both sides use competition ranks, so a tie can never fabricate a move."""
         bucket: dict[str, list[float]] = {}
         for tid in subset:
             for m, e in td[tid]["agg"].items():
@@ -4617,9 +4648,16 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
             ({"model": m, "mean": sum(v) / len(v), "n": len(v),
               "global": means.get(m)} for m, v in bucket.items() if len(v) >= need),
             key=lambda x: -x["mean"])
-        for i, r in enumerate(out):
+        ranks = _competition_ranks([r["mean"] for r in out])
+        counts: dict[int, int] = {}
+        for rk in ranks:
+            counts[rk] = counts.get(rk, 0) + 1
+        for r, rk in zip(out, ranks):
             gi = grank.get(r["model"])
-            r["delta"] = (gi - i) if gi is not None else None
+            r["rank"] = rk
+            r["tied"] = counts[rk] > 1
+            r["tied_with"] = counts[rk]
+            r["delta"] = (gi - rk) if gi is not None else None
         return out
 
     hard_rank = _rank_on(hard)
@@ -4647,6 +4685,30 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
                                if r["flag"] in ("discriminator", "frontier")),
         "mean_sd": (sum(r["sd"] for r in rows) / len(rows)) if rows else 0.0,
     }
+
+
+def _competition_ranks(values: list[float], places: int = 4) -> list[int]:
+    """Standard competition ranking (1224) for an ALREADY-SORTED value list.
+
+    Equal values share a rank and the next distinct value skips to its true
+    position: [1.0, 1.0, 1.0, 0.9] -> [1, 1, 1, 4]. Using row position instead
+    would number tied models 1..n and then report the later ones as having
+    dropped, which asserts a difference their scores do not contain.
+
+    Ties are decided at `places` decimals — the precision the tables print — so
+    two numbers shown as equal always rank as equal, and float noise below the
+    displayed precision never splits a tie.
+    """
+    out: list[int] = []
+    prev = None
+    for i, v in enumerate(values):
+        key = round(v, places)
+        if prev is not None and key == prev:
+            out.append(out[-1])
+        else:
+            out.append(i + 1)
+        prev = key
+    return out
 
 
 def task_tiers(runs: list[dict] | None = None,
@@ -4732,7 +4794,8 @@ ones.<br><span class="note">top cohort: {{ top_models }}<br>bottom cohort:
 {% if s.cats %}<th class="tasks">On each {{ label|lower }} task →
   <div class="mx-cells">{% for c in s.cats %}<div class="mx-grp" style="grid-template-columns:repeat({{ c.n }},15px);gap:3px"><span class="mx-clabel" title="{{ c.key }}" style="grid-column:1/-1">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div></th>{% endif %}</tr>
 {% for h in s.rank %}
-<tr><td class="num">{{ h.rank }}</td><td class="nowrap">{{ h.model }}</td>
+<tr><td class="num">{{ h.rank }}{% if h.tied %}<span class="note" style="font-size:10px"
+  title="{{ h.tied_with }} models share this exact score — they are tied, not ordered. Any apparent order between them is arbitrary; separate them on speed or cost instead.">=</span>{% endif %}</td><td class="nowrap">{{ h.model }}</td>
 <td class="num" data-sort="{{ h.mean_v }}">{{ h.mean }}</td>
 <td class="num">{{ h.glob }}</td><td class="num">{{ h.move }}</td>
 {% if s.cats %}<td class="tasks"><div class="mx-cells">{% for g in h.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div></td>{% endif %}</tr>
@@ -4743,28 +4806,35 @@ ones.<br><span class="note">top cohort: {{ top_models }}<br>bottom cohort:
 <p class="note" style="margin-top:4px">{{ label }} subset ({{ s.n }}): {{ s.tasks }}</p>
 {% endmacro %}
 
-{% if hard.rank or easy.rank %}
+{% if hard.rank or easy.rank or frontier.rank %}
 <h2>Who's actually best — ranked on a task subset</h2>
 <p class="note">The global leaderboard is inflated by tasks everyone aces.
-<b>Hard</b> ranks models on only the tasks that separate the field (frontier +
-wide-spread discriminators), where the real gaps live. <b>Easy</b> is the other
-end — the tasks almost every model gets right; the ranking there is
-<em>supposed</em> to be flat, and seeing it collapse is the point. <b>Move</b> is
-the shift vs the global rank: <span style="color:#3a3">▲climbs</span> = stronger
-on that subset than its overall score suggests,
-<span style="color:#c55">▼drops</span> = was riding the other end.</p>
+These are three <b>disjoint</b> tiers, derived live from how models actually
+scored — no task appears in two. <b>Frontier</b> is the hardest: even the top
+cohort still struggles, so this is where the leaders get separated from each
+other. <b>Hard</b> is the middle: wide-spread discriminators that split the
+field, though the best mostly clear them. <b>Easy</b> is the other end — the
+tasks almost every model gets right; the ranking there is <em>supposed</em> to be
+flat, and seeing it collapse is the point. <b>Move</b> is the shift vs the global
+rank: <span style="color:#3a3">▲climbs</span> = stronger on that subset than its
+overall score suggests, <span style="color:#c55">▼drops</span> = was riding the
+other end.</p>
 <div class="seg" id="sbseg">
-  <button type="button" data-sb="hard" class="on">◆ Hard ({{ hard.n }})</button>
-  <button type="button" data-sb="easy">Easy ({{ easy.n }})</button>
+  <button type="button" data-sb="frontier" class="on">◆ Frontier ({{ frontier.n }})</button>
+  <button type="button" data-sb="hard">◆ Hard ({{ hard.n }})</button>
+  <button type="button" data-sb="easy">◆ Easy ({{ easy.n }})</button>
 </div>
-<div id="sb-hard">{{ standings(hard, 'Hard') }}</div>
+<div id="sb-frontier">{{ standings(frontier, 'Frontier') }}</div>
+<div id="sb-hard" style="display:none">{{ standings(hard, 'Hard') }}</div>
 <div id="sb-easy" style="display:none">{{ standings(easy, 'Easy') }}</div>
 <script>
 document.querySelectorAll('#sbseg button').forEach(b =>
   b.addEventListener('click', () => {
     document.querySelectorAll('#sbseg button').forEach(x => x.classList.toggle('on', x === b));
-    document.getElementById('sb-hard').style.display = b.dataset.sb === 'hard' ? '' : 'none';
-    document.getElementById('sb-easy').style.display = b.dataset.sb === 'easy' ? '' : 'none';
+    ['frontier', 'hard', 'easy'].forEach(k => {
+      const el = document.getElementById('sb-' + k);
+      if (el) el.style.display = b.dataset.sb === k ? '' : 'none';
+    });
   }));
 </script>
 {% endif %}
@@ -4889,7 +4959,10 @@ def build_discriminate_page(runs: list[dict], tdefs: dict,
                     grp.append({"cls": "na", "a": "0", "tip": f"{tid} · no data",
                                 "href": f"tasks/{tid}.html"})
             foot.append(grp)
-        rank = [{"rank": i + 1, "model": _mlink(h["model"]),
+        rank = [{"rank": h.get("rank", i + 1),
+                 "tied": h.get("tied", False),
+                 "tied_with": h.get("tied_with", 1),
+                 "model": _mlink(h["model"]),
                  "mean": f"{h['mean']:.3f}", "mean_v": f"{h['mean']:.4f}",
                  "glob": (f"{h['global']:.3f}" if h["global"] is not None else "—"),
                  "move": _move(h["delta"]),
@@ -4903,9 +4976,10 @@ def build_discriminate_page(runs: list[dict], tdefs: dict,
 
     hard = _standings(d["hard_subset"], d["hard_rank"])
     easy = _standings(d["easy_subset"], d["easy_rank"])
+    frontier = _standings(d["frontier_subset"], d["frontier_rank"])
 
     return _env.from_string(DISCRIMINATE_TEMPLATE).render(
-        hard=hard, easy=easy,
+        hard=hard, easy=easy, frontier=frontier,
         nav=_nav(""),
         sort_js=_SORT_JS, css=BASE_CSS, tiles=tiles, rows=trows,
         clusters=clusters, legend=legend,

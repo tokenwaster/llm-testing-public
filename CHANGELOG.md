@@ -17,7 +17,90 @@ Scores are aggregated as the **mean of every scored run per model·task**, so
 re-running a model fleshes its number out rather than replacing it; unscored
 runs (crash / spiral / DNF) stay out of the mean.
 
-**Changelog layout.** Only the top `## Unreleased` section holds pending work;
+**Changelog layout.** Only the top `## 0.6.18 — the fairness budget applies to Claude too
+
+### The token budget was never enforced on the Claude CLI
+Rule #3 grants every **non-claude** model `max_tokens: 32768`. Claude was exempt
+— not by choice but by transport: `claude -p` takes no max-tokens flag, so
+nothing bounded its output. That produced a real double standard on exactly the
+tasks that decide the board:
+
+| ctx-013 | tokens | score |
+|---|---|---|
+| hy3 | capped at 32,768, cut off mid-thought | **0.0** |
+| claude-cli-sonnet-4-6 | uncapped, **64,465** (2× the cap) | **1.0** |
+
+The claude yamls also declared `max_tokens: 16384` — half the fleet's — which
+was fiction, since it was never applied. Now 32768, and enforced.
+
+- **Enforced post-hoc** in `ClaudeCLIAdapter._parse_result`: output past the cap
+  is dropped from the END of the visible text (a model thinks first and answers
+  last), `stop_reason` becomes `length`, and the raw count is kept as
+  `over_cap_tokens`. Proportional truncation was tried and is wrong whenever
+  reasoning dominates — sonnet-4-6 spent 64,465 tokens on ctx-013 yet emitted
+  105 chars, because the CLI keeps reasoning out of `result`.
+- **Rescored all six over-budget cells** by rebuilding each artifact from the
+  capped reply and re-running the same checker. Every one loses its closing
+  artifact to the budget (`</html>`, or the ANSWER lines): sonnet-4-6 ctx-013
+  1.0→0, sonnet-5 ctx-013 0.6→0, sonnet-4-6 web-013 0.5→0, and the two
+  human-graded web-012 cells (fable 1.0, opus-4-8 0.9467) →0 — craft cannot
+  rescue a submission the budget forbade. Prior grades kept as
+  `voided_human_score`.
+- `over-budget` is a new assess category attributed to the **harness**, checked
+  before the pass short-circuit precisely because these are usually passes.
+
+### Silence is not a spiral
+The claude no-output guard is retired. It killed anything silent for 300s, but
+the window probe measured those same models answering correctly after 800–1160s
+— they were thinking, not looping. A **real** spiral is a detected repetition
+loop (`_LoopGuard`, streaming models only); silence is a `timeout`, meaning the
+window is too tight. Removed the 28 claude silence-zeros so a re-run scores them
+honestly.
+
+### Refused requests stop being scored as failures
+A provider 4xx means the model never saw the prompt. `request_rejected` /`auth`
+now drop the task **unscored** and skip the model (deterministic — the next task
+would be refused identically), instead of writing a wall of zeros: kimi-k3 took
+55 of them because Moonshot rejects `temperature: 0.2`. Context-overflow 400s are
+explicitly excluded — that is a real limit and must keep scoring 0.
+
+### Scoring and ranking corrections
+- `web-001-desktop` was failing working file browsers: the nav tests
+  double-clicked the label inside each entry, which a correct app may set
+  `pointer-events: none` on. Now targets the entry. fable-5 and sonnet-4-6 were
+  understated; rescored.
+- Trap attribution is numeric-aware, so `40 seconds` records as the trap it is.
+- Aggregate verdicts describe a run that actually **lost** points, instead of
+  labelling a cell by its newest (possibly passing) run — which branded a
+  correct `185/3` "incorrect".
+- **Tied models share a rank** (competition/1224 ranking) on the standings and
+  the discriminate subsets. Ten models score exactly 1.0000 on Easy; they were
+  numbered 1..10 with the later ones shown as having *dropped*.
+- Matrix rows follow the leaderboard rule: a model that has not attempted the
+  whole suite ranks **below** every complete one (a 1-of-55 row was sitting at
+  the top).
+
+### Cost
+- The openai-compatible adapters now capture `prompt_tokens_details.cached_tokens`,
+  and cache multipliers are per-provider (`cache_read_mult` / `cache_write_mult`),
+  defaulting to Anthropic's 0.10×/1.25× only for Anthropic and **1.0× elsewhere** —
+  no discount is ever invented. `cache_read_per_mtok` takes an absolute rate;
+  kimi-k3 is set to Moonshot's published $3.00 / $0.30 cached / $15.00.
+
+### Operator
+- `/manage` sets model prices by hand (for providers that publish no catalog).
+- `/backend` manages interface keys per row with a live **Test**, and flags a
+  key **shared** between two interfaces — which is how a Moonshot key silently
+  overwrote `OPENROUTER_API_KEY` and 401'd every OpenRouter model.
+- `/run` gains Hard / Frontier / Easy / Hardened selectors with five distinct
+  marker colours, all derived live from the discrimination tiers; the discriminate
+  page gains the **Frontier** lens.
+- Runs persist their narration to `runs/<id>/run.log`, and tasks dropped without
+  a score are recorded in the manifest's `dropped_unscored`.
+
+---
+
+## Unreleased` section holds pending work;
 its entries are `###` subsections. When a version is cut, those subsections move
 under the new `## x.y.z` header. So every `###` below a version number belongs to
 that version — there is never an `## Unreleased` stranded between two releases.

@@ -54,7 +54,14 @@ def test_cli_new_keyword_selects_exactly_the_constant():
     assert sorted(selected) == sorted(config.NEW_TASKS)
 
 
-def test_new_and_hardened_do_not_overlap():
-    """The two quick-selects are distinct sets — a task isn't both brand-new and
-    already a hardened discriminator."""
-    assert not (set(config.NEW_TASKS) & set(config.HARDENED_TASKS))
+def test_new_lane_ids_all_resolve_to_live_tasks():
+    """The ✦ New quick-select is a hand-listed set, so a typo or a rename would
+    silently select nothing.
+
+    It deliberately no longer asserts "new and hardened don't overlap": hardened
+    is now DERIVED from the discrimination tiers, so a new lane legitimately
+    becomes hardened the moment it proves it separates models (if-002 already
+    does). Overlap is a result, not a mistake."""
+    live = {t.id for t in load_tasks()}
+    missing = [t for t in config.NEW_TASKS if t not in live]
+    assert not missing, f"new-lane ids with no matching task: {missing}"

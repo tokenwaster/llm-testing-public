@@ -74,7 +74,27 @@ def test_a_trap_answer_is_never_a_suspect_key():
 
 
 
-def test_rumination_spiral_is_recognised():
+def test_a_detected_repetition_loop_is_the_spiral():
+    """A REAL spiral is a detected repetition loop — a short cycle repeated
+    until aborted. That is the only spiral we can actually detect, and it is
+    the model's fault."""
+    res = {"status": "error",
+           "attempts": [{"error_kind": "repetition_loop", "tokens_out": None,
+                         "error": "repetition loop — the model is repeating one "
+                                  "short cycle without terminating"}],
+           "score": {"status": "scored", "score": 0.0,
+                     "summary": "run failed (all attempts errored)"}}
+    tdef = SimpleNamespace(id="web-012-coin", category="one-shot-apps",
+                           scoring_type="webapp")
+    cls = assess.classify(res, tdef, _cfg())
+    assert cls["category"] == "rumination-spiral", cls
+    assert cls["attribution"] == "model"
+
+
+def test_silence_is_a_timeout_not_a_spiral():
+    """Silence means the model was THINKING, not looping: the claude CLI emits
+    nothing until it answers. The old no-output guard is retired, so legacy
+    rumination_spiral records read as window-limited, never as a spiral."""
     res = {"status": "error",
            "attempts": [{"error_kind": "rumination_spiral", "tokens_out": None,
                          "error": "rumination spiral: 300s of thinking with no "
@@ -84,9 +104,24 @@ def test_rumination_spiral_is_recognised():
     tdef = SimpleNamespace(id="web-012-coin", category="one-shot-apps",
                            scoring_type="webapp")
     cls = assess.classify(res, tdef, _cfg())
-    assert cls["category"] == "rumination-spiral", \
-        f"an empty workspace is not 'code ran but failed the tests': {cls}"
-    assert cls["attribution"] == "model"
+    assert cls["category"] == "timeout", \
+        f"silence is a too-tight window, not a spiral: {cls}"
+
+
+def test_a_refused_request_is_ours_not_the_models():
+    """A provider 4xx means the model never saw the prompt — config, not
+    capability. It must never read as a model failure."""
+    res = {"status": "error",
+           "attempts": [{"error_kind": "request_rejected", "tokens_out": None,
+                         "error": "HTTP 400: invalid temperature: only 1 is "
+                                  "allowed for this model"}],
+           "score": {"status": "scored", "score": 0.0,
+                     "summary": "run failed (all attempts errored)"}}
+    tdef = SimpleNamespace(id="rs-010-ants-rod", category="reasoning",
+                           scoring_type="answer")
+    cls = assess.classify(res, tdef, _cfg())
+    assert cls["category"] == "request-rejected", cls
+    assert cls["attribution"] == "harness"
 
 
 def test_runaway_still_recognised():
