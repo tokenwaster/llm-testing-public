@@ -7,7 +7,15 @@ non-voided, amended balance per account drives five derived answers.
 
 Deterministic: a fixed seed, so the prompt and answers are reproducible. Run:
     python tasks-refs/ctx-013-ledger-supersede-64k/generate.py
-writes prompt.md next to the task and prints the answers to embed in checker.py.
+writes BOTH prompt.md and checker.py next to the task.
+
+The checker is generated rather than hand-maintained because its EXPECT dict is
+the answer key: at a different seed a hand-written key silently belongs to the
+old prompt, and every submission scores 0 against a ledger it never saw. That is
+exactly what the private held-out mirror does (it re-seeds this generator), and
+an unregenerated key there would read as contamination instead of as a bug. At
+the shipped SEED the emitted checker is byte-identical to the one in tasks/, so
+regenerating never changes the public task's content hash.
 """
 import random
 from pathlib import Path
@@ -129,13 +137,83 @@ If two accounts tie, choose the one whose id sorts first (ACCT-01 before ACCT-02
 """
 
 
+CHECKER_TMPL = '''"""ctx-013 grader: five independent checkpoints over the settled-balance
+aggregation, so retrieving most of the ledger correctly but slipping one derived
+value earns partial credit. Reference values are computed by the generator in
+tasks-refs/ctx-013-ledger-supersede-64k/generate.py (fixed seed). Only the last
+occurrence of each label is read, so mid-reasoning mentions don't fool it.
+"""
+import pathlib
+import re
+
+_TXT = pathlib.Path("response.txt")
+TEXT = _TXT.read_text(encoding="utf-8") if _TXT.exists() else ""
+
+EXPECT = {
+__EXPECT__}
+
+
+def _last(label):
+    m = re.findall(rf"(?im)^\\s*{label}\\s*[:=]\\s*(.+?)\\s*$", TEXT)
+    return m[-1].strip() if m else None
+
+
+def _acct(label):
+    v = _last(label)
+    if not v:
+        return None
+    m = re.search(r"ACCT-\\d{2}", v.upper())
+    return m.group(0) if m else None
+
+
+def _int(label):
+    v = _last(label)
+    if v is None:
+        return None
+    xs = re.findall(r"-?\\d+", v.replace(",", ""))
+    return int(xs[0]) if xs else None
+
+
+def test_highest_account():
+    assert _acct("HIGHEST_ACCOUNT") == EXPECT["HIGHEST_ACCOUNT"]
+
+
+def test_highest_balance():
+    assert _int("HIGHEST_BALANCE") == EXPECT["HIGHEST_BALANCE"]
+
+
+def test_lowest_account():
+    assert _acct("LOWEST_ACCOUNT") == EXPECT["LOWEST_ACCOUNT"]
+
+
+def test_net_total():
+    assert _int("NET_TOTAL") == EXPECT["NET_TOTAL"]
+
+
+def test_num_negative():
+    assert _int("NUM_NEGATIVE") == EXPECT["NUM_NEGATIVE"]
+'''
+
+
+def render_checker(answers: dict) -> str:
+    """checker.py source with this seed's answer key baked in."""
+    rows = "".join(
+        f'    "{k}": ' + (f'"{v}"' if isinstance(v, str) else str(v)) + ",\n"
+        for k, v in answers.items())
+    return CHECKER_TMPL.replace("__EXPECT__", rows)
+
+
 def main():
     body, answers = build()
     prompt = PROMPT_HEAD + body + "\n"
-    out = Path(__file__).resolve().parents[2] / \
-        "tasks/long-context/ctx-013-ledger-supersede-64k/prompt.md"
+    task_dir = Path(__file__).resolve().parents[2] / \
+        "tasks/long-context/ctx-013-ledger-supersede-64k"
+    out = task_dir / "prompt.md"
     out.write_text(prompt, encoding="utf-8")
     print(f"wrote {out} ({len(prompt):,} chars)")
+    chk = task_dir / "checker.py"
+    chk.write_text(render_checker(answers), encoding="utf-8", newline="\n")
+    print(f"wrote {chk} (answer key)")
     for k, v in answers.items():
         print(f"  {k}: {v}")
 

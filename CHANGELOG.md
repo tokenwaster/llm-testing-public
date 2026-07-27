@@ -17,7 +17,285 @@ Scores are aggregated as the **mean of every scored run per model·task**, so
 re-running a model fleshes its number out rather than replacing it; unscored
 runs (crash / spiral / DNF) stay out of the mean.
 
-**Changelog layout.** Only the top `## 0.6.18 — the fairness budget applies to Claude too
+**Changelog layout.** Only the top `## Unreleased` section holds pending work;
+its entries are `###` subsections. When a version is cut, those subsections move
+under the new `## x.y.z` header. So every `###` below a version number belongs to
+that version — there is never an `## Unreleased` stranded between two releases.
+
+---
+
+## Unreleased
+
+### The private held-out mirror is reachable, and refuses a variant it cannot grade
+The mirror measures contamination instead of asserting immunity: the public set
+stays fully open (a correct reply in `runs/` *is* the answer key, so hiding tasks
+would only cost auditability) and a private variant of the same task, regenerated
+at a different seed, is held back. A model that scores markedly higher on the
+published instance memorised *that instance*.
+
+It had a working core and no way to reach it. Now `/mirror` builds the variants at
+a seed offset, runs them into `private/runs/`, and shows the public-vs-private
+delta; `/private-data/…` browses the private transcripts, because reading one is
+the only way to act on a delta. The **measurement** is public even though the
+controls are not — info page `#mirror` carries the coverage fraction and the
+per-model table, and each model page gains a *Held-out mirror* row with its
+per-task pairs.
+
+**Building it found the core shipping a variant that could not be scored.**
+ctx-013's generator wrote `prompt.md` and *printed* its five answers for a human
+to paste into `checker.py`. Re-seeded, the mirrored copy therefore carried the
+**public** key against a ledger it had never seen: every model would have scored
+0, and a 0 on the private instance beside a pass on the public one is exactly the
+shape of a contamination finding. The frontier long-context task would have
+accused the whole fleet.
+
+- The generator now **emits `checker.py`** from the values it computed —
+  byte-identical to the shipped file at the shipped seed, since the task is
+  content-hashed over raw bytes and 26 recorded results carry that hash.
+- `build_mirror` **refuses** any variant whose answer key the generator did not
+  rewrite, or rewrote to identical bytes, and grades every admitted one against
+  itself (correct → 1.0, empty → 0.0) before letting it count — rule #5 applied to
+  generated content no human read. A refused variant is *removed*, not flagged, so
+  a run cannot pick it up. Reasons land in `private/mirror.json` and on the page.
+- Coverage is stated against the whole suite: **6 of 55** tasks are re-seedable, so
+  every surface says what the check is silent about rather than reading as full
+  coverage. With no private runs yet, all of them say **no claim is made in either
+  direction**.
+- `active_run()` watches `private/runs/` — a mirror run uses the same GPU and CLI,
+  so it holds the one-run-at-a-time lock. The delta is frozen while a run executes
+  rather than recomputed on every poll.
+
+**A full sweep is one action: `/run` with "then mirror" ticked.** The public suite
+runs, then a **second leg** of the re-seeded variants into `private/runs/`. It is
+deliberately a second leg and not extra tasks in the public run, because a variant
+carries the **same task id** as its public counterpart — a private result in
+`runs/` would be indistinguishable from a public one and would merge into that
+cell's mean, quietly averaging a held-out score into the published number. Two
+trees is the invariant, not a convenience, which is also why the private variants
+are absent from `/run`'s task list.
+
+- Scoped to the selected tasks that have a built variant, and the hint beside the
+  checkbox says how many that is: a hardened-only or `✦ New` run has no public
+  score for the others, so running them would buy a private number with nothing
+  beside it.
+- The mirror leg runs **after** the public one, so every cell the delta pairs has
+  a public score; a stopped run does not start it.
+- Private run ids are suffixed `-mirror`. Ids are second-resolution, so a fast
+  sweep started both legs in the same second and named them identically in two
+  trees — a log line naming one did not say which.
+- The progress header names the running leg, since the run report shows the public
+  leg's results and not the private ones.
+
+### Decided: a model that reasons past its budget keeps its 0
+A cell where the model spent its whole output allowance in the think channel and
+emitted nothing readable **scores 0, the same as a wrong answer**. Settled
+deliberately rather than left as an inherited default, and now stated as a caveat
+on the info page instead of being discoverable only by reading `metrics.json`.
+
+The reasoning, in the open: the budget is uniform, so a model that cannot fit its
+reasoning inside it did not complete the task under the conditions everyone else
+faced. The cost is stated alongside — that 0 does not distinguish *could not do it*
+from *was not given room to say so*, and the same model may answer correctly at a
+larger budget. The token-budget probe below exists so that question is answerable
+rather than assumed, and its results stay in `special/`, counted toward nothing.
+
+### Token-budget probe: was our ceiling doing the measuring?
+Some zeros are not capability. A thinking model can spend its whole output budget
+in the **think channel** and emit almost nothing a checker can read — measured on
+agents-a1 across a 3×6 sweep: **32,766–32,768 of 32,768 tokens reasoning, 0–2
+tokens of answer, eleven of eighteen attempts**. Those cells are marked
+`status: "scored", score: 0.0`, so they are in the mean, and the number records
+"cannot do the task" when what was observed is "was not given room to say so".
+
+`/special` gains a third probe beside the window and turn-budget ones: re-run the
+affected cells with `max_tokens` raised, into `special/`, which counts toward
+nothing. The verdict separates outcomes the single 0.0 was merging — **converted**
+(our ceiling was the measurement), **spoke, still wrong** (the zero was right for
+the wrong reason), **still mute** (no budget makes it converge). Time is raised in
+proportion to the budget, since a doubled allowance on the original deadline would
+be cut off by the clock instead and answer a different question.
+
+Qualification is strict, and every rule came from a false positive on live data:
+
+- **Missing token accounting is not evidence.** Coercing a null `tokens_out` to
+  zero visible tokens admitted 20 cells across 9 models on nothing at all.
+- **`stop_reason == "length"` is not enough.** qwen3-32b stopped at "length" after
+  1,799 of 32,768 tokens because prompt + output filled its loaded *context
+  window*; a bigger budget cannot fix that. A cell must reach ≥90% of its own
+  configured budget, so the threshold is relative to the model.
+- **A runaway that answered does not qualify** — that is a loop or a clipped
+  reply, and more budget feeds the loop.
+
+33 candidate cells become **7 across 2 models** once all three rules apply.
+
+**A run-launching bug found by testing this.** `want = selection or matrix` treated
+an explicitly empty selection as "unspecified" and fell back to *every* qualifying
+cell — so posting `{"selection": {}}` started a real GPU run across the whole
+board, which it did, here, before being stopped and cleaned up. Absent now means
+all; present-but-empty means nothing. The window and turn probes carried the same
+conflation and are fixed with it, as is the handler that collapsed `{}` to `None`
+before the job ever saw it.
+
+### Subset standings now require the whole subset, like every other page
+The discriminate page ranked a model on Hard / Easy / Frontier if it had scored
+**half** the subset. The leaderboard and the overview matrix have always done the
+opposite — a model that has not attempted the whole set sinks below every complete
+one, because the mean of a partial row is not comparable to a full one — so the
+same model was ranked by one rule on one page and another rule on the next.
+
+It was not hypothetical. On the live data, **`glm-5.2` sat at #1 on the Hard
+subset with a perfect 1.000 from 2 of its 5 tasks**, displacing
+`claude-cli-fable-5`, which had scored all five at 0.988. Skipping the three tasks
+you might lose is not a way to win a subset.
+
+Now only models that scored every task in a subset are ranked. Partial models are
+still listed — below every ranked row, most coverage first, with a badge saying
+what they actually completed — because "not measured here" is information, and
+dropping them would hide it. An unranked row reports no rank *move* either: a shift
+measured against a rank it never held is a number about nothing.
+
+The sort was the other half of the hole. Every standings table is sortable, so one
+click on "score" floated a partial row back to the top — including on the
+leaderboard, where a model with 1 of 55 tasks could lead. The shared sort now keeps
+partial rows last on every column and in both directions.
+
+### The mirror's method ships; its key does not
+Three things had to change before the public export could carry the contamination
+measurement, all found by simulating the public build rather than reading the
+allowlist.
+
+- **`harness/mirror.py` shipped nowhere.** It was in neither `PUBLIC_HARNESS` nor
+  `PRIVATE_HARNESS`, and `report.py` imports it inside a `try/except` — so in a
+  public clone the import failed and the whole Contamination → held-out-mirror
+  section *silently vanished*, along with the per-model row. Verified by rendering
+  the public build with the module hidden. It is now on the allowlist.
+- **The seed offset was a constant in the code.** `tasks-refs/` is published and
+  the generators are deterministic in `SEED`, so a published offset is a complete
+  recipe for regenerating the held-out variants. `config.mirror_seed_offset()` now
+  reads it from `MIRROR_SEED_OFFSET` or gitignored `settings.local.json`, minting
+  one per operator if absent. **Publish the method, keep the key.**
+- **The offset and the private seeds are no longer rendered in any page.** These
+  screens get recorded for the video series, and either value reconstructs the
+  held-out set. They stay in `private/mirror.json` and `MIRROR.txt` on disk. A test
+  asserts they do not come back out through the page payload.
+- **Two new test files would have broken a fresh public clone**: `test_mirror_leg`
+  imports `harness.jobs` (explicitly private), and `test_mirror` exercises
+  `private/` and reads `tools/export_public.py`, none of which ship. Both held back.
+
+**A build is now refused while any run is executing.** A build `rmtree`s and
+rewrites `private/tasks/<task>` — the exact path a run reads its prompt from — so a
+rebuild mid-run swaps the paper out from under the exam and the recorded result
+belongs to neither variant. The guard was only in the web handler; the test suite
+calls `build_mirror` directly and **did rebuild the live variants 16 seconds into a
+real mirror run**. No harm done that time (same pinned offset, deterministic
+generators — verified all 13 variant files byte-identical to a fresh build), which
+is luck, not a safety property. The guard now lives in `build_mirror` itself, the
+endpoint turns it into a 409, and the mirror tests build into a sandboxed private
+tree so they can never touch the operator's variants.
+
+`active_run()` watching the private tree also exposed a test-isolation gap:
+`test_studio` redirected only `RUNS_DIR` while asserting "nothing is running", so a
+live mirror run failed it. It now isolates every tree that shares the GPU/CLI.
+
+### The contamination verdict is sized by task count, not a fixed cutoff
+The delta was coloured red at `≥ 0.15`. With 6 paired tasks one task flipping
+1.0→0.0 moves the mean by `1/6 = 0.167`, so a **single** differing task tripped
+"investigate" — at one trial per cell, well inside noise. `mirror.delta_band` now
+returns `flat` / `watch` / `suspect` in units of *tasks' worth of difference* (one,
+two, beyond), and the operator page, the info table and the model row all read it
+so they cannot disagree. Re-seeding is not difficulty-neutral, so `flat` is the
+expected result and is stated as such.
+
+First real measurement, from two frontier models across all six variants:
+`claude-cli-fable-5` scored **1.000 public / 1.000 private** (delta `+0.000`) and
+`claude-cli-opus-5` **1.000 / 0.967** (`+0.033`, one checkpoint of ctx-013) — both
+flat. Solving unpublished instances as well as published ones is the *learned the
+skill* outcome, measured rather than argued.
+
+### Sampling is now CONFIRMED RECEIVED, not just declared
+`sampling_used` on a cell records what the harness *intended* to send. That is a
+different claim from "the provider got it", and **every configuration bug this
+suite has shipped lived in that gap** — a value written in a yaml that never
+reached the model, found by accident after it had already affected results.
+
+LM Studio logs each request's full body, so for local models the gap is closable
+from the server's own account. `lmstudio.received_requests()` parses the log
+(`~/.lmstudio/server-logs/`), and `confirm_sampling()` joins each attempt's
+`t_start` to the request the server logged for that model, comparing every value
+including `max_tokens`. Local model pages gain a **Sampling confirmed received**
+row beside the sampling it verifies.
+
+It catches four distinct shapes, each covered by a test that proves the detector
+*fires* (a check that can only say "fine" is the same free credit these tests exist
+to prevent in task checkers): a value that changed in flight, a value that never
+arrived, a value **we never sent** that arrived anyway (an app-side preset
+injecting one would move results invisibly), and a `max_tokens` that did not apply
+— which is exactly how the Claude models ran uncapped for a whole dataset. JSON
+renders `1.0` as `1`, so comparison is numeric, not by type. A cell with no logged
+request is `unlogged`, not failed: the logs rotate and predate the check, so
+absence of a record is not a finding. Cloud models are not checked at all rather
+than claim a confirmation nobody earned.
+
+First result: `agents-a1`, **20 of 20 requests confirmed identical** — all six of
+the creator's published values plus the 32,768 budget arrived exactly as sent. What
+the log cannot prove is that the sampler *honoured* `repetition_penalty` under that
+name; receipt is confirmed, application is not. (Also settled while looking: LM
+Studio exposes no *load-time* sampling state to poll, because on the OpenAI-compat
+endpoint sampling is per-request — `/api/v0/models` reports load state only. And
+`~/.lmstudio/config-presets/` is empty, so an unset knob really does fall through
+to llama.cpp's own default rather than a hidden app preset.)
+
+### Sampling: a creator's published preset can be entered as a whole
+Creators publish sampling **per use case, as a set of knobs chosen together** —
+Qwen's thinking preset is temperature + top_p + top_k + min_p at once. The
+`/manage` editor exposed one temperature column per profile, so a real preset
+could not be entered at all and the yamls were being hand-edited. Replaced by a
+per-model summary plus an expandable grid: every profile × every sampling key,
+with the task categories each profile governs shown beside it. The backend already
+accepted full profiles; this was only ever a UI limit.
+
+Two adjacent defects, both found by round-tripping a real preset through the
+endpoint rather than reading the code:
+
+- A POST carrying **only** profiles answered `{"ok": true}` and wrote **nothing** —
+  the profile block sat inside a guard that never tested for it, so its validation
+  never ran either and a bad profile name passed silently.
+- `set_yaml_key` replaced the whole line, **destroying that line's own trailing
+  comment**. Every save rewrites `max_tokens`, so any save silently deleted
+  *"uniform thinking budget across all local models (fairness)"* — the value kept,
+  the reason gone. It now carries across, and a `#` with no preceding whitespace (a
+  URL fragment in `sampling_source`) is correctly not treated as a comment.
+  `set_yaml_key` had no tests despite writing the operator's config; it has six.
+
+`load_tasks()` resolves its default per call — binding `config.TASKS_DIR` at def
+time froze the real `tasks/` into every no-arg caller, so nothing could redirect
+them.
+
+### CHANGELOG repair
+Cutting 0.6.18 renamed the *first* `## Unreleased` in the file — which was the one
+quoted inside the layout note above — so the note lost its second half, the
+version heading ended up mid-paragraph, and a duplicate `## Unreleased` was left
+stranded 150 lines down. `_changelog_for_version` could not find `## 0.6.18` at a
+line start, so the info page's "this dataset's changelog" was serving the whole
+file, preamble included. Note restored, heading back on its own line, stranded
+section folded in — the same repair fb6cf1b6 made once before, so when cutting a
+version match the heading at a line start.
+
+### Three frontier tasks built + reference-verified (not yet in a version)
+Targeting the top-8 tied cohort, each on a lane that already discriminates and
+each multi-checkpoint so partial credit spreads: `web-013-billiards` (webapp; a
+`window.sim` physics API graded on reflection/friction/elastic
+collisions/pockets/determinism, 13 checks), `ctx-013-ledger-supersede-64k`
+(123k-char settled-balance aggregation under void/amend noise, response lane,
+5 answers), `rs-013-statemachine-trace` (40-op adversarial stack-machine trace,
+response lane, 5 answers). All 1.0-good / 0.0-empty; traps 0.15 / 0.20 / 0.00.
+**Awaiting the top-8 calibration run and a version decision** — admit only if
+σ(top-8) ≥ 0.15. Nothing here bumps SUITE_VERSION or archives yet. Generators and
+reference apps in `tasks-refs/`; see `docs/PUBLIC-FEEDBACK-ROADMAP.md`.
+
+---
+
+## 0.6.18 — the fairness budget applies to Claude too
 
 ### The token budget was never enforced on the Claude CLI
 Rule #3 grants every **non-claude** model `max_tokens: 32768`. Claude was exempt
@@ -99,27 +377,6 @@ explicitly excluded — that is a real limit and must keep scoring 0.
   a score are recorded in the manifest's `dropped_unscored`.
 
 ---
-
-## Unreleased` section holds pending work;
-its entries are `###` subsections. When a version is cut, those subsections move
-under the new `## x.y.z` header. So every `###` below a version number belongs to
-that version — there is never an `## Unreleased` stranded between two releases.
-
----
-
-## Unreleased
-
-- **Three frontier tasks built + reference-verified (not yet in a version).**
-  Targeting the top-8 tied cohort, each on a lane that already discriminates and
-  each multi-checkpoint so partial credit spreads: `web-013-billiards` (webapp;
-  a `window.sim` physics API graded on reflection/friction/elastic
-  collisions/pockets/determinism, 13 checks), `ctx-013-ledger-supersede-64k`
-  (123k-char settled-balance aggregation under void/amend noise, response lane,
-  5 answers), `rs-013-statemachine-trace` (40-op adversarial stack-machine trace,
-  response lane, 5 answers). All 1.0-good / 0.0-empty; traps 0.15 / 0.20 / 0.00.
-  **Awaiting the top-8 calibration run and a version decision** — admit only if
-  σ(top-8) ≥ 0.15. Nothing here bumps SUITE_VERSION or archives yet. Generators
-  and reference apps in `tasks-refs/`; see `docs/PUBLIC-FEEDBACK-ROADMAP.md`.
 
 ## 0.6.16 — compare page, contamination & sample-size honesty, freshness
 

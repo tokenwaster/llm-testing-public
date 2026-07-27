@@ -200,7 +200,7 @@ def classify(result: dict, tdef, cfg: dict, suspect: dict | None = None) -> dict
 
     _over = next((a.get("over_cap_tokens") for a in attempts
                   if a.get("over_cap_tokens")), None)
-    if _over:
+    if _over and sc.get("status") == "scored" and (score or 0) > 0:
         return pack("over-budget", f"used {_over:,} output tokens")
 
     if sc.get("status") == "scored" and score is not None \

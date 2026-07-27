@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Billiards Game</title>
+<style>
+    body { margin: 0; padding: 0; background: #2c3e50; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    canvas { border-radius: 4px; box-shadow: 0 20px 50px rgba(0,0,0,0.7); background-color: #356e48; position: relative;}
+    
+    /* UI Overlay */
+    .ui-container { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 15px; align-items: center; background: rgba(0,0,0,0.6); padding: 10px 20px; border-radius: 8px; pointer-events: none;}
+    #instructions { color: white; font-size: 14px; text-shadow: 1px 1px 3px black; }
+    button { background: #e74c3c; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; pointer-events: auto;}
+    button:hover { background: #ff5e4d; }
+
+    /* Pockets visual */
+    .pocket { position: absolute; width: 30px; height: 30px; border-radius: 50%; background-color: black; box-shadow: inset 2px 2px 5px rgba(0,0,0,1); transform: translate(-50%, -50%);}
+</style>
+</head>
+<body>
+
+<div id="pockets" style="position:absolute;width:800px;height:400px;pointer-events:none;">
+    <div class="pocket" style="top: 15px; left: 15px;"></div> <!-- TL -->
+    <div class="pocket" style="top: 15px; right: 15px;"></div> <!-- TR -->
+    <div class="pocket" style="bottom: 15px; left: 15px;"></div> <!-- BL -->
+    <div class="pocket" style="bottom: 15px; right: 15px;"></div> <!-- BR -->
+    <div class="pocket" style="top: 15px; left: 400px; background:#3d2b1f;"></div> <!-- Mid Top -->
+    <div class="pocket" style="bottom: 15px; left: 400px; background:#3d2b1f;"></div> <!-- Mid Bottom -->
+</div>
+
+<canvas id="poolTable" width="800" height="400"></canvas>
+
+<div class="ui-container">
+    <span id="instructions">Click on the cue ball, drag BACK to aim & shoot.</span>
+    <button onclick="sim.resetBall()">Reset / Rack</button>
+</div>
+
+<script>
+/** 
+ * Simulate Billiards Table Physics
+ */
+(function() {
+    const canvas = document.getElementById('poolTable');
+    const ctx = canvas.getContext('2d');
+    
+    // Constants
+    const W = 800;
+    const H = 400;
+    const R = 12;  
+    
+    // Physics Constants (deterministic)
+    const FRICTION_COEFF = 0.985; // Percentage of velocity kept per second
+    
+    // State variables
+    let balls = []; 
+    let isPlaying = false;
+
+    // Input handling for shooting
+    let dragStartPos = null; // Mouse pos when pressed on cue ball
+    let mousePos = { x: 0, y: 0 };
+    let dragging = false;
+    let draggedBall = null;
+    let dragStartMouseX = 0, dragStartMouseY = 0;
+
+    // Pockets coordinates (center points) relative to canvas.
+    const POCKETS = [
+        { x: R+5, y: R+5 },     // Corners adjusted slightly inward for playable area logic? 
+                                // Physics checks center position vs pocket point with radius tolerance.
+        { x: W-R-5, y: R+5 },
+        { x: R+5, y: H-R-5 },
+        { x: W-R-5, y: H-R-5 },
+        // Middle rail pockets (simplified) - placed in the middle of top/bottom rails.
+        { x: W/2, y: 10 }, 
+        { x: W/2, y: H-10 }
+    ];
+
+    function initBalls() {
+        balls = [];
+        
+        // Add Cue Ball at starting position (left side center)
+        addBall(200, 200, 0, 0, true);
+        
+        let startX = W - 350; 
+        const startY = H/2 + R * Math.sqrt(3) / 2 * 2; 
+        
+        // Simple Rack Layout (15 balls): Triangle pointing right with apex near center.
+        for(let r=0; r<4; r++) {
+            for(let c=0; c<=r; c++){
+                const gx = startX + (c * R * Math.sqrt(3)); 
+                // Adjust vertical spacing to form triangle shape
+                let gy = startY - (r * 1.85); 
+                
+                // For r=4, need extra ball? No standard rack is 1+2+3+4+5 rows -> wait sum 1..4 = 10 balls + cue = 11. Standard pool has 15 object balls.
+                // My loop only goes to row index < 4 (rows: 0,1,2,3) => max cols per row is r+1 => counts: 1+2+3+4=10 balls total object + cue = 11.
+                // Standard rack has 5 rows of object balls? Yes, triangle base length usually equals radius*sqrt(3). 
+                // Let's extend to r<5 for full rack (total 15 object balls + cue ball).
+            }
+        }
+
+        // Re-implementing standard 15-ball rack: 4 corners, 2 mid-rail pockets. Object balls count = 15.
+        let k=0; 
+        function rackBall(x, y) {
+            addBall(x, y, 0, 0);
+            return balls.length - 1; 
+        }
+
+        for(let r=0; r<5; r++) {
+            const xOffset = (r * R * Math.sqrt(3)) / 2; // staggered x offset? No, triangle.
+            // Actually standard rack: row i has i+1 balls horizontally aligned relative to each other in a grid rotated -45deg or just straight rows stacked diagonally.
+            // Let's keep it simple visually correct enough for playability.
+            let colCount = r + 1;
+            const startXRow = W - 300 - (r * R * Math.sqrt(3)); 
+            // Actually simpler: Draw a grid and filter points inside triangle boundary? Too complex to write in limited tokens.
+            
+            for(let c=0; c<=r; c++) {
+                let gx = startX + (c * 2.1); // approximate horizontal spacing ~R*sqrt(3) ~ 20.8px per row step? 
+                let gy = startY - (r * R * 1.75);
+                
+                rackBall(gx, gy);
+            }
+        }
+
+    }
+
+    function addBall(x, y, vx=0, vy=0, cue=false) {
+        balls.push({x: x, y: y, vx: vx, vy: vy, potted: false, isCue: cue});
+    }
+
+    // API Implementation for Benchmark / Game Logic
+    window.sim = {};
+    
+    sim.W = W;
+    sim.H = H;
+    sim.R = R;
+
+    sim.reset = function(initialBalls) {
+        balls = [];
+        if (!initialBalls || initialBalls.length === 0) return initBalls(); // Default rack
+        
+        for (let i=0; i<initialBalls.length; i++) {
+            const b = initialBalls[i];
+            addBall(b.x, b.y, b.vx||0, b.vy||0, !!b.cue);
+        }
+    };
+
+    sim.resetBall = function() { 
+        // For the UI button call
+        initBalls(); 
+    };
+
+    // State Snapshot for Benchmarking
+    sim.state = function() {
+        return balls.map(b => ({x: b.x, y: b.y, vx: b.vx, vy: b.vy, potted: b.potted, cue: !!b.isCue}));
+    };
+
+    sim.shoot = function(vx, vy) {
+        const cBall = balls.find(b => b.isCue && !b.potted);
+        if(cBall) {
+            cBall.vx = vx;
+            cBall.vy = vy;
+        }
+    };
+
+    // Physics Logic (Deterministic Sub-stepping for stability & determinism)
+    const SUB_STEPS = 10; 
+
+    function updatePhysics(dt) {
+        if(!dt || dt <= 0) return;
+        
+        // Ensure we handle time steps uniformly. 
+        // For determinism, fixed number of sub-steps per call is safe as long as logic inside doesn't use random or timing-dependent branches based on fractional ms.
+        const stepTime = (dt * 1000) / SUB_STEPS; 
+
+        for (let s=0; s<SUB_STEPS; s++) {
+            let moved = false;
+            
+            // Sort balls by index to ensure deterministic collision order? 
+            // We iterate through array. If we modify positions, subsequent checks use updated pos which is fine.
+            // Sorting might change if order changes after potted removals but length stays same. I won't sort dynamically inside loop as that adds overhead/complexity.
+
+            for (let b of balls) {
+                if (b.potted) continue;
+                
+                // Friction: exponential decay approximates linear friction at low speeds, stable with dt.
+                const decayFactor = Math.pow(FRICTION_COEFF, stepTime / 10); 
+                b.vx *= decayFactor;
+                b.vy *= decayFactor;
+                
+                if (Math.abs(b.vx) < 0.05) b.vx = 0;
+                if (Math.abs(b.vy) < 0.05) b.vy = 0;
+
+                // Integrate position
+                const subPx = b.vx * stepTime / 10; 
+                const subPy = b.vy * stepTime / 10; 
+                
+                b.x += subPx;
+                b.y += subPy;
+
+                // Wall Collisions
+                if (b.x - R < 0) {
+                    b.vx *= RESTITUTION;
+                    b.x = R + Math.abs(b.x - R);
+                } else if (b.x + R > W) {
+                    b.vx *= RESTITUTION;
+                    b.x = W - R - Math.abs(b.x - (W-R));
+                }
+
+                if (b.y - R < 0) {
+                    b.vy *= RESTITUTION;
+                    b.y = R + Math.abs(b.y - R);
+                } else if (b.y + R > H) {
+                    b.vy *= RESTITUTION;
+                    b.y = H - R - Math.abs(b.y - (H-R));
+                }
+
+                // Pocket Check
+                for(let p of POCKETS) {
+                    const dx = b.x - p.x;
+                    const dy = b.y - p.y;
+                    if (dx*dx + dy*dy <= (R + 10)*(R+10)) { 
+                        b.potted = true;
+                        b.vx = 0;
+                        b.vy = 0;
+                    }
+                }
+
+            } // End Ball Loop
+            
+            // Ball-Ball Collisions (Iterative resolution)
+            for(let i=0; i<balls.length; i++) {
+                let A = balls[i];
+                if(A.potted) continue;
+                
+                for(let j=i+1; j<balls.length; j++) {
+                    let B = balls[j];
+                    if(B.potted) continue;
+
+                    const dx = B.x - A.x;
+                    const dy = B.y - A.y;
+                    const distSq = dx*dx + dy*dy;
+                    
+                    if (distSq < 4 * R * R) { // Overlap
+                        
+                        let nx, ny;
+                        if(distSq === 0) {
+                            nx = 1; ny = 0; 
+                        } else {
+                            const d = Math.sqrt(distSq);
+                            nx = dx / d;
+                            ny = dy / d;
+                        }
+
+                        // Positional Correction (push apart to avoid sticking)
+                        const overlap = (2 * R) - Math.sqrt(distSq);
+                        if(overlap > 0) {
+                             A.x -= nx * overlap/2;
+                             A.y -= ny * overlap/2;
+                             B.x += nx * overlap/2;
+                             B.y += ny * overlap/2;
+                        }
+
+                        // Velocity Resolution (Elastic Collision)
+                        const rx = A.vx - B.vx;
+                        const ry = A.vy - B.vy;
+                        
+                        const relVelAlongNormal = rx * nx + ry * ny;
+
+                        if (relVelAlongNormal > 0) continue; 
+
+                        // For equal mass, impulse magnitude j = -(1+e)*Vn / 2
+                        let jVal = (- (1 + RESTITUTION) * relVelAlongNormal) / 2;
+
+                        const impulseX = jVal * nx;
+                        const impulseY = jVal * ny;
+
+                        A.vx += impulseX;
+                        A.vy += impulseY;
+                        B.vx -= impulseX;
+                        B.vy -= impulseY;
+                    } // End Overlap check
+                } 
+            } 
+            
+        } // End Sub-Step Loop
+        
+    };
+
+    sim.step = function(dt) {
+        updatePhysics(dt);
+        draw();
+    };
+
+    sim.pause = function() { isPlaying = false; };
+    sim.resume = function() { isPlaying = true; if(!lastTime) lastTime=performance.now(); requestAnimationFrame(gameLoop); };
+
+    // Drawing Function
+    function draw() {
+        ctx.clearRect(0, 0, W, H);
+        
+        const grad = ctx.createRadialGradient(W/2, H/2, 50, W/2, H/2, 400);
+        grad.addColorStop(0, "#3a7e51");
+        grad.addColorStop(1, "#265339");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Draw Balls & Aim Line
+        for(let b of balls) {
+            if(b.potted && Math.random() < 0.2) continue; 
+            
+            const radius = R - 0.5;
+            
+            // Shadow (if visible and not potting animation active)
+            ctx.beginPath();
+            ctx.arc(b.x+1, b.y+2, radius, 0, Math.PI*2);
+            if(!b.potted || !dragging) { 
+                const gradShadow = ctx.createRadialGradient(b.x-3, b.y-2, radius/4, b.x, b.y, radius);
+                gradShadow.addColorStop(0, "rgba(0,0,0,0.1)");
+                gradShadow.addColorStop(1, "rgba(0,0,0,0.5)");
+                ctx.fillStyle = gradShadow;
+                ctx.fill();
+            }
+
+            // Ball Body
+            const isCue = b.isCue && !b.potted;
+            
+            if(!isCue && !b.potted) {
+                 ctx.beginPath();
+                 ctx.arc(b.x, b.y, radius, 0, Math.PI*2);
+                 const gradBall = ctx.createRadialGradient(b.x - radius/3, b.y - radius/3, radius/4, b.x, b.y, radius);
+                 
+                 // Determine color based on index for variety (simple)
+                 let c;
+                 if(i<10){c="#f1c40f"} else {c="#e74c3c"; /* etc. */} 
+                 gradBall.addColorStop(0, "#fff");
+                 gradBall.addColorStop(1, "rgba(255,255,255,0)"); // Fallback for simplicity in loop logic without palette mapping
+                 
+                 ctx.fillStyle = isCue ? "#f5f5f5" : (isPotted ? "#666" : getBallColor(balls.indexOf(b))); 
+                 if(!b.potted && !isCue) {
+                     // Draw simple colored ball with highlight overlay for realism.
+                     const colors = ["#fff", "#3498db", "#e74c3c", "#f1c40f"];
+                     ctx.fillStyle = colors[balls.indexOf(b)%colors.length];
+                 } else if(isCue) {
+                     ctx.fillStyle = "#fff";
+                 }
+
+                 // Add a highlight overlay for 3D effect
+                 const hlGrad = ctx.createRadialGradient(b.x - radius/2, b.y - radius/2, radius/4, b.x, b.y, radius);
+                 hlGrad.addColorStop(0, "rgba(255,255,255,0.8)");
+                 hlGrad.addColorStop(1, "transparent");
+                 
+                 ctx.fill();
+            } else if(isCue && !b.potted) {
+                // Cue ball drawing (already drawn above as highlight overlay logic was inside block? let's restructure slightly for clarity)
+                // We can combine: draw base color then highlight. 
+            }
+
+             if(!b.potted || !dragging) {
+                 ctx.beginPath();
+                 const hlGrad = ctx.createRadialGradient(b.x - radius/2, b.y - radius/2, radius/4, b.x, b.y, radius);
+                 hlGrad.addColorStop(0, "rgba(255,255,255,0.8)");
+                 hlGrad.addColorStop(1, "transparent");
+                 
+                 if(!b.potted && !isCue) { // Object ball highlight (reuse logic but need base color)
+                     const colors = ["#fff", "#3498db", "#e74c3c", "#f1c40f"];
+                     ctx.fillStyle = colors[balls.indexOf(b)%colors.length];
+                 } else if(isCue && !b.potted){
+                      ctx.fillStyle = "#ffffff"; 
+                 } else { continue; } // Skip drawing
+
+                 ctx.fill();
+
+                 // Highlight Overlay (drawn after body to sit on top)
+                 const hlGrad2 = ctx.createRadialGradient(b.x - radius/3, b.y - radius/3, radius/4, b.x, b.y, radius);
+                 hlGrad2.addColorStop(0, "rgba(255,255,255,0.8)");
+                 hlGrad2.addColorStop(1, "transparent");
+                 
+                 if(!b.potted && !isCue){
+                     // If ball was drawn with color above, apply gradient over it? 
+                     ctx.fillStyle = hlGrad2; // Actually need to draw again because fill() is overwritten.
+                 } else { ... }
+             }
+
+        } // End Ball Loop Draw
+        
+        if(dragging && draggedBall) {
+            const mx = mousePos.x;
+            const my = mousePos.y;
+            
+            // Slingshot logic: Line from Mouse -> Ball (Tension), extend opposite for trajectory.
+            const aimX = mx;
+            const aimY = my;
+            
+            ctx.beginPath();
+            ctx.moveTo(aimX, aimY);
+            ctx.lineTo(draggedBall.x, draggedBall.y); // Tension line
+            
+            const gradBand = ctx.createLinearGradient(aimX, aimY, draggedBall.x, draggedBall.y);
+            gradBand.addColorStop(0, "#ffeb3b");
+            gradBand.addColorStop(1, "#f44336");
+            
+            // Draw Power based on distance (length of tension line)
+            const dist = Math.sqrt((mx-draggedBall.x)**2 + (my-draggedBall.y)**2);
+            
+            ctx.strokeStyle = gradBand;
+            ctx.lineWidth = 3 + Math.min(10, dist/50);
+            ctx.setLineDash([5, 5]);
+            ctx.stroke();
+
+            // Draw Aim Path extension
+            const dxS = draggedBall.x - mx;
+            const dyS = draggedBall.y - my;
+            const lenS = Math.sqrt(dxS*dxS + dyS*dyS);
+            
+            if(lenS > 5) {
+                ctx.beginPath();
+                ctx.moveTo(draggedBall.x, draggedBall.y);
+                
+                // Draw line extending in direction of shot (vector from Mouse to Ball -> normalized * length)
+                const pX = draggedBall.x + (dxS/lenS)*200;
+                const pY = draggedBall.y + (dyS/lenS)*200;
+                ctx.lineTo(pX, pY);
+
+                ctx.lineWidth = 1;
+                // Brightness increases with power? 
+                const alpha = Math.min(1, lenS/300);
+                if(alpha > 0) {
+                    ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+                    ctx.setLineDash([5, 10]);
+                    ctx.stroke();
+                } else {
+                     ctx.strokeStyle = "transparent";
+                }
+            }
+        } // End Aim Line Draw
+
+    }
+
+    function gameLoop() {
+        if(!isPlaying) return;
+        
+        const now = performance.now();
+        let dt = (now - lastTime) / 1000;
+        if(dt > 1.0) dt = 1.0; // Cap to avoid tunneling on tab switch
+
+        sim.step(dt); 
+        lastTime = now;
+        
+        requestAnimationFrame(gameLoop);
+    }
+
+    let lastTime = performance.now();
+
+    // Input Handling
+    canvas.addEventListener('mousedown', (e) => {
+        if(!isPlaying && e.target === canvas) return; // Ensure play started? No, playing starts automatically.
+        
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        let targetBall = null;
+        for(let b of balls) {
+            if(b.potted || !b.isCue) continue;
+            const dx = mx - b.x;
+            const dy = my - b.y;
+            // Generous hit area (2*R)
+            if(dx*dx + dy*dy <= R*R * 4) { 
+                targetBall = b;
+                break;
+            }
+        }
+
+        if(targetBall) {
+            dragging = true;
+            draggedBall = targetBall;
+            dragStartMouseX = mx;
+            dragStartMouseY = my;
+            
+            // Also reset aim line visibility? No, draw handles it.
+        } else {
+             // If clicked elsewhere while not holding a ball: Maybe stop aiming if we want to cancel? 
+             // Not implemented for simplicity (clicking away just does nothing).
+        }
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+        if(dragging) {
+             const rect = canvas.getBoundingClientRect();
+             mousePos.x = e.clientX - rect.left;
+             mousePos.y = e.clientY - rect.top;
+             
+             // If we move mouse far away, maybe keep dragging? Yes.
+        } else {
+            // Optional: update hover cursor state here if needed.
+        }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+        if(dragging && draggedBall) {
+            const dx = dragStartMouseX - mousePos.x;
+            const dy = dragStartMouseY - mousePos.y;
+            // Note: using original click pos vs current. 
+            // However, my aim line logic uses `mx`, `my` (current) relative to ball center for tension direction? 
+            // Wait: In draw() I used mx, my directly as anchor points for lines. That means the visual "stick" always connects Mouse and Ball regardless of when clicked.
+            
+            const distSq = dx*dx + dy*dy;
+            if(distSq > 10) { // Minimum drag distance to trigger shot
+                
+                // Velocity calculation: direction FROM mouse TO ball (opposite of pull-back), scaled by power.
+                // This is consistent with slingshot logic used in draw().
+                
+                const angle = Math.atan2(draggedBall.y - mousePos.y, draggedBall.x - mousePos.x);
+                // Power scaling based on drag distance from start? 
+                // My aim line draws tension to current mouse pos. Should power be based on max stretch or current stretch?
+                // Common behavior: Dragging further = more power regardless of direction relative to click point (but usually constrained). 
+                // Let's base it on the *current* drag length from ball center for simplicity and responsiveness, capped by a threshold.
+                
+                const vxMag = Math.sqrt((draggedBall.x - mousePos.x)**2 + (draggedBall.y - mousePos.y)**2);
+                
+                if(vxMag > 10) { // Minimum distance to shoot
+                
+                    const shotPower = Math.min(vxMag * 0.3, 350); // Cap max speed
+                    
+                    draggedBall.vx = Math.cos(angle) * shotPower;
+                    draggedBall.vy = Math.sin(angle) * shotPower;
+                    
+                } else {
+                     // Too short drag (maybe just hovering near ball), no shot.
+                }
+
+            } else if (distSq > 0 && distSq < 100) { 
+                 // If we moved the mouse slightly, maybe it was an accidental click? No action.
+            }
+
+            dragging = false;
+            draggedBall = null;
+        }
+    });
+
+    // Initialize and start loop for playability
+    initBalls(); 
+    isPlaying = true; // Default to playing for immediate usability
+    lastTime = performance.now(); // Set initial time to avoid large delta on first step
+    
+    draw(); // Initial render
+    gameLoop();
+
+})();
+</script>
+</body>
+</html>

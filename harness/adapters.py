@@ -145,6 +145,7 @@ def _classify_http(status: int, body: str, headers=None) -> AdapterError:
 class BaseAdapter:
     def __init__(self, model: Model):
         self.model = model
+        self.task_category = ""
 
     def chat(self, messages: list[dict], system: str | None = None,
              tools: list[dict] | None = None, timeout_s: int = 180) -> ChatResult:
@@ -191,7 +192,7 @@ class OpenAICompatAdapter(BaseAdapter):
             "model": self.model.model,
             "messages": self._to_openai_messages(messages, system),
             "max_tokens": self.model.max_tokens,
-            "temperature": self.model.temperature,
+            **self.model.sampling_payload(self.task_category),
             **self.model.extra,
         }
         if tools:
@@ -471,7 +472,7 @@ class AnthropicAdapter(BaseAdapter):
             "model": self.model.model,
             "messages": self._to_anthropic_messages(messages),
             "max_tokens": self.model.max_tokens,
-            "temperature": self.model.temperature,
+            **self.model.sampling_payload(self.task_category),
             **self.model.extra,
         }
         if system:

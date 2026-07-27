@@ -447,7 +447,7 @@ code { background:var(--surface-2); border-radius:4px; padding:1px 6px;
 against every model — local (LM Studio) and cloud (Claude subscription CLI,
 OpenRouter) — and records timing, tokens, cost and retries for each one.
 Currently <strong>suite v0.6.18</strong>, with
-<strong>38 models</strong> across <strong>67 runs</strong>
+<strong>38 models</strong> across <strong>75 runs</strong>
 in the live dataset.</p>
 <p>Every task is a <strong>brand-new conversation</strong>: exactly one user
 message goes to the model (plus tool round-trips inside a tier-2 task), never
@@ -1043,9 +1043,72 @@ is simply the mean of one. Runs that never produced a score (crash, spiral,
 DNF) stay out of the mean. A <em>rescore</em> still supersedes — it re-grades
 the same run in place rather than adding one — and a genuinely botched run is
 deleted on /manage rather than averaged in.</li>
-<li><strong>Equal budget.</strong> Every non-Claude model gets the same
-<code>max_tokens</code>. A model that died at a smaller budget is re-run before
-its zeros are allowed to count.</li>
+<li><strong>Output budget, and why it is not identical for everyone.</strong> The
+budget is a <em>runaway backstop</em>, not a fairness device — the model is never
+told the number, so it cannot plan around it, and truncating mid-sentence would
+measure verbosity rather than skill. It is sized well clear of real use (the 99th
+percentile of actual output is ~27k tokens). Cloud models get 65,536; local
+models get 32,768, because a local model's budget also sizes its loaded context
+window and a bigger one spills VRAM to shared memory — a hardware limit, not a
+policy choice. One model (<code>laguna-xs-2.1</code>) is held lower still because
+its provider caps completions there. The Claude CLI accepts no budget flag, so
+the cap is applied after the fact: output past it is discarded exactly as a
+provider would have refused to generate it.</li>
+<li><strong>Every knob we set, in one place.</strong> These are the suite-wide
+configuration choices, not per-model ones. Each is a decision that could have
+gone another way, so it is listed rather than left to be discovered:
+<ul>
+<li><b>Output budget</b> — cloud 65,536 tokens, local 32,768, and any model whose
+provider caps completions lower is held at its provider's limit. A
+<em>backstop</em>, not a fairness lever: the model is never told the number.</li>
+<li><b>Temperature</b> — 0.2 where we can set it, and there are three ways we
+cannot. Moonshot fixes kimi-k3 at 1.0 server-side (it <em>refuses</em> anything
+else). The Claude CLI exposes no flag at all. And the OpenAI reasoning models take
+no sampling parameters whatsoever — behind a gateway an unsupported one is
+<em>dropped rather than refused</em>, so it would silently never apply. Each of
+those is marked <b>not settable</b> on the model's own page, with the reason,
+instead of showing a number that never reached the model.</li>
+<li><b>Other sampling</b> (top_p, top_k, min_p, penalties, seed) — <em>not sent
+at all</em> unless a model's page lists it. An unsent knob runs at the provider's
+own default; we do not substitute a house value silently.</li>
+<li><b>Retries</b> — one retry per task. A retry is kept because across this
+dataset it rescued 7 of 8 timed-out cells, usually a cold model load or a slow
+first token. It does mean a model that fails transiently gets a second attempt
+while one that succeeds immediately does not — unequal trials, stated plainly.</li>
+<li><b>A refused request is not a score.</b> A provider 4xx (bad parameter,
+unknown model, bad key) means the model never saw the prompt, so the task is
+dropped unscored and that model stops for the run — the same refusal would repeat
+on every remaining task. A context-overflow 400 is deliberately excluded: that is
+a real limit and still scores zero.</li>
+<li><b>Cache pricing</b> — a cache discount is only applied where the provider
+publishes one. Anthropic's 0.10×/1.25× is applied to Anthropic; everyone else
+prices cached input at the full rate until a real number is configured, so we
+never flatter a model's cost with an invented discount.</li>
+<li><b>Timing and local cost are machine-specific.</b> The timing-scored task and
+every local $/run figure were measured on one particular GPU and CPU. They are
+not reproducible on different hardware and should not be read as portable.</li>
+</ul></li>
+<li><strong>Odd per-model configuration is on the model's own page.</strong>
+Anything unusual about how a single model was run — a provider-fixed temperature,
+a budget held below the fleet ceiling, a sampling value taken from a vendor
+recommendation, or the absence of one — appears in the <em>Sampling (as
+tested)</em> row of that model's page, with the reason. If a number looks
+surprising, that row is where the explanation lives.</li>
+<li><strong>Sampling is per model, and stated per model.</strong> There is no
+single temperature for the fleet, because some models and transports do not let us
+choose one: Moonshot fixes <code>temperature=1.0</code> server-side for kimi-k3,
+the Claude CLI exposes no temperature at all, and the OpenAI reasoning models
+accept no sampling parameters — so those run at their creator's setting whatever
+we write down. The last case is the quiet one: a gateway <em>drops</em> a
+parameter the model does not support instead of returning an error, so nothing
+fails and the only symptom would be a number on this site that never applied. Such
+models are marked <b>not settable</b> and transmit nothing at all. Rather than
+pretend otherwise, <strong>every
+model's page lists the exact sampling parameters it was run with</strong> — and
+the reference URL for the creator recommendation they came from, or an explicit
+note that none was recorded and the value is a house default. Only parameters
+listed there were transmitted; every other knob ran at the provider's default.
+Open any model page and read the <em>Sampling (as tested)</em> row.</li>
 <li><strong>Local models run fully on the GPU (fixed 2026-07-18).</strong> Local
 models are loaded with <code>--gpu max</code> and a context window sized to each
 group of tasks. Before this, LM Studio's default "auto" offload left layers on
@@ -1100,15 +1163,79 @@ never saw a task. We claim the tasks are built so that seeing them helps little,
 and that the twisted-classic scores are direct evidence a model is reasoning
 rather than reciting.</p>
 
+<h3 id="mirror">Measured, not assumed: the private held-out mirror</h3>
+<p>Everything above is a design argument. This is a measurement. Publishing the
+suite publishes the answers — a correct model reply recorded in
+<code>runs/</code> <em>is</em> the answer key, so withholding the tasks would only
+cost the auditability that makes the public data worth anything. So instead the
+public set stays fully open, and a <strong>private variant of the same task</strong>
+is held back: identical shape, identical checker, <strong>regenerated at a
+different seed</strong>, never published. A model that scores markedly higher on
+the published instance than on the unpublished one has memorised
+<em>that instance</em>.</p>
+<p><strong>Coverage, stated honestly:</strong> 6 of
+55 tasks can be re-seeded and 6 have a
+variant built. The rest are hand-written app specs, agent workspaces or fixed
+prompts with no generator behind them — they cannot be re-rolled, so
+<strong>this check says nothing about them</strong>. It covers the long-context
+and reasoning tasks, which is where a memorised payload would pay off most.</p>
+
+<div class="card" style="margin:12px 0">
+<table><thead><tr><th data-type="text">Model</th><th class="num">tasks</th>
+<th class="num">public</th><th class="num">private (held out)</th>
+<th class="num">delta</th><th class="num">verdict</th></tr></thead><tbody>
+
+<tr><td class="model">claude-cli-opus-4-8</td><td class="num">6</td>
+<td class="num">0.967</td>
+<td class="num">0.933</td>
+<td class="num"><b style="color:#0ca30c">+0.033</b></td>
+<td class="num" style="color:#0ca30c">flat</td></tr>
+
+<tr><td class="model">claude-cli-opus-5</td><td class="num">6</td>
+<td class="num">1.000</td>
+<td class="num">0.967</td>
+<td class="num"><b style="color:#0ca30c">+0.033</b></td>
+<td class="num" style="color:#0ca30c">flat</td></tr>
+
+<tr><td class="model">claude-cli-haiku-4-5</td><td class="num">6</td>
+<td class="num">0.695</td>
+<td class="num">0.667</td>
+<td class="num"><b style="color:#0ca30c">+0.028</b></td>
+<td class="num" style="color:#0ca30c">flat</td></tr>
+
+<tr><td class="model">claude-cli-fable-5</td><td class="num">6</td>
+<td class="num">1.000</td>
+<td class="num">1.000</td>
+<td class="num"><b style="color:#0ca30c">+0.000</b></td>
+<td class="num" style="color:#0ca30c">flat</td></tr>
+
+</tbody></table></div>
+<p class="small">Positive = better on the published instance. The verdict is sized
+against the number of paired tasks rather than a fixed cutoff, because one task
+differing moves the mean by <code>1/n</code> — on 6 tasks that
+is 0.167. So
+<b>flat</b> means "within one task's worth", which is the <em>expected</em> result:
+re-seeding changes the specific numbers and is not difficulty-neutral, so a small
+delta is instance noise rather than evidence. <b>watch</b> is within two tasks'
+worth; <b>suspect</b> is beyond that and means read the transcripts, not that a
+verdict has been reached. Both score columns use the same aggregation rule as the
+rest of the site (every scored run of that model·task, meaned), and each model's
+own page shows the per-task pairs.</p>
+
+<p class="small">What this catches and what it doesn't: it detects memorisation of
+the published <em>instance</em>. A model that genuinely learned the skill from the
+published task scores the same on both — and should. That is learning, not
+cheating, and the delta is designed to read it as such.</p>
+
 <h2 id="samplesize">Sample size &amp; how much to trust a number</h2>
 <p>Be a skeptic — here is exactly how much data is behind each figure, stated
 plainly rather than buried.</p>
 <ul>
-<li>This dataset holds <strong>67 runs</strong> across
+<li>This dataset holds <strong>75 runs</strong> across
 <strong>38 models</strong> and <strong>55
-tasks</strong>, for <strong>2036 scored model·task cells</strong>
-totalling <strong>2964 individual graded trials</strong>.</li>
-<li><strong>Trials per cell.</strong> 33% of cells are backed by
+tasks</strong>, for <strong>1947 scored model·task cells</strong>
+totalling <strong>2804 individual graded trials</strong>.</li>
+<li><strong>Trials per cell.</strong> 32% of cells are backed by
 more than one run; the rest are a single trial. A cell run more than once shows
 its spread (σ) and its mean is over every scored run — see the aggregation rule
 above.</li>
@@ -1138,6 +1265,9 @@ does. These are ours.</p>
 <div class="catcard"><div class="h"><b>Cost is an estimate, not an invoice.</b></div>
 <p class="small" style="margin:8px 0 0">Most cost figures are <strong>computed from a list price captured when the model was registered</strong> — a snapshot, not a live rate. Only results where the gateway reported an actual billed amount (marked <b>✓</b>) are authoritative. Published rates change, and a gateway routes the same model to different upstream hosts at different prices. See <a href="#pricing">Pricing</a> below for exactly how many of these numbers are snapshots.</p></div>
 
+<div class="catcard"><div class="h"><b>A model that reasons past its output budget scores 0, and that is a choice.</b></div>
+<p class="small" style="margin:8px 0 0">Some models think in a separate channel that is billed as output. One can spend its <em>entire</em> allowance reasoning and emit almost nothing a checker can read — measured here at <strong>32,766 of 32,768 tokens reasoning and two tokens of answer, eleven attempts out of eighteen</strong>. We score that <strong>0</strong>, the same as a wrong answer, and it is worth being plain that this is a decision rather than an oversight: the budget is uniform, and a model that cannot fit its reasoning inside it did not complete the task under the conditions everyone else faced. The cost of the choice is real, though — that 0 does not distinguish <em>could not do it</em> from <em>was not given room to say so</em>, and the same model may well answer correctly at a larger budget. Where a cell hit its ceiling having emitted essentially nothing, the <a href="special.html">Special</a> page can re-run it with the budget raised; those probe results are experimental and counted toward nothing, existing purely so the question is answerable rather than assumed.</p></div>
+
 <div class="catcard"><div class="h"><b>The answer lane is all-or-nothing.</b></div>
 <p class="small" style="margin:8px 0 0">A right answer in the wrong format scores 0. That's deliberate — following the output contract is part of the task — but a 0 here doesn't always mean the model didn't know. Any 0 whose expected value is sitting inside the ANSWER line gets flagged <code>[FORMAT-MISS]</code> so it can be reviewed rather than quietly averaged in.</p></div>
 
@@ -1158,17 +1288,17 @@ matter:</p>
 <li><strong>The list price is a snapshot, not a live rate.</strong> A model's
 <code>$/Mtok</code> is captured in its yaml <em>when the model is registered</em>
 and does not update itself. Providers change their prices; this site does not
-notice. <strong>2166 of 2964 cost figures
-(73%) are computed from that snapshot.</strong></li>
+notice. <strong>2031 of 2804 cost figures
+(72%) are computed from that snapshot.</strong></li>
 <li><strong>Only billed figures are authoritative.</strong> When the gateway
 reports what it actually charged, we use that and mark it <b>✓</b>. That is
-798 of 2964 results (27%) — the
+773 of 2804 results (28%) — the
 rest are arithmetic.</li>
 <li><strong>The same model is served by different providers at different
 prices.</strong> OpenRouter routes to whichever upstream it likes, and they differ
 in price <em>and in quantization</em>. Across this dataset the catalog was served
-by <strong>46 different hosts</strong>
-(OpenAI, claude-haiku-4-5-20251001, claude-opus-4-8, claude-sonnet-5, Novita, claude-sonnet-4-6, …).
+by <strong>47 different hosts</strong>
+(OpenAI, claude-haiku-4-5-20251001, claude-opus-4-8, claude-sonnet-5, claude-sonnet-4-6, claude-fable-5, …).
 A model's cost — and its score — can move between runs without the model changing
 at all.</li>
 <li><strong>Claude subscription runs report the API-equivalent price</strong>, not
@@ -1250,11 +1380,11 @@ is checkable rather than assumed.</p>
 
 <tr><td>NVIDIA GeForce RTX 5090, 32607 MiB, 596.49</td><td class="small">Windows-11-10.0.26200-SP0</td>
 <td class="small">3.14.5</td><td class="small">UNIFIBG-GAMES</td>
-<td class="small">67</td></tr>
+<td class="small">75</td></tr>
 
 </tbody></table>
 
-<p class="small">All 67 runs in this dataset were measured on one
+<p class="small">All 75 runs in this dataset were measured on one
 configuration, so speed comparisons are sound.</p>
 
 <p class="small">Local models additionally record GPU telemetry per run — peak
@@ -1308,7 +1438,55 @@ view an archived set, rendered with its own task-definition snapshot.</p>
 <p><strong>Versioning policy.</strong> <code>SUITE_VERSION</code> versions the *test dataset*, not the code:</p>
 <ul><li><strong>Minor/major bump</strong> (<code>0.4</code> → <code>0.5</code>) — the tests or the methodology changed. The old data is archived first (<code>harness archive --as 0.4</code>) so live reports always show exactly one coherent dataset.</li><li><strong>Patch bump</strong> (<code>0.5.6</code> → <code>0.5.7</code>) — scoring fixes and presentation changes *within* a dataset. Patches never archive: the archive key is <code>major.minor</code>, so every <code>0.5.x</code> run aggregates into the same &quot;0.5&quot; dataset.</li><li><strong>No bump</strong> — run-engine, server, and UI changes that don&#x27;t affect what is tested or how it is scored.</li></ul>
 <p>Scores are aggregated as the <strong>mean of every scored run per model·task</strong>, so re-running a model fleshes its number out rather than replacing it; unscored runs (crash / spiral / DNF) stay out of the mean.</p>
-<p><strong>Changelog layout.</strong> Only the top `## 0.6.18 — the fairness budget applies to Claude too</p>
+<p><strong>Changelog layout.</strong> Only the top <code>## Unreleased</code> section holds pending work; its entries are <code>###</code> subsections. When a version is cut, those subsections move under the new <code>## x.y.z</code> header. So every <code>###</code> below a version number belongs to that version — there is never an <code>## Unreleased</code> stranded between two releases.</p>
+<hr>
+<h2>Unreleased</h2>
+<h3>The private held-out mirror is reachable, and refuses a variant it cannot grade</h3>
+<p>The mirror measures contamination instead of asserting immunity: the public set stays fully open (a correct reply in <code>runs/</code> *is* the answer key, so hiding tasks would only cost auditability) and a private variant of the same task, regenerated at a different seed, is held back. A model that scores markedly higher on the published instance memorised *that instance*.</p>
+<p>It had a working core and no way to reach it. Now <code>/mirror</code> builds the variants at a seed offset, runs them into <code>private/runs/</code>, and shows the public-vs-private delta; <code>/private-data/…</code> browses the private transcripts, because reading one is the only way to act on a delta. The <strong>measurement</strong> is public even though the controls are not — info page <code>#mirror</code> carries the coverage fraction and the per-model table, and each model page gains a *Held-out mirror* row with its per-task pairs.</p>
+<p><strong>Building it found the core shipping a variant that could not be scored.</strong> ctx-013&#x27;s generator wrote <code>prompt.md</code> and *printed* its five answers for a human to paste into <code>checker.py</code>. Re-seeded, the mirrored copy therefore carried the <strong>public</strong> key against a ledger it had never seen: every model would have scored 0, and a 0 on the private instance beside a pass on the public one is exactly the shape of a contamination finding. The frontier long-context task would have accused the whole fleet.</p>
+<ul><li>The generator now <strong>emits <code>checker.py</code></strong> from the values it computed — byte-identical to the shipped file at the shipped seed, since the task is content-hashed over raw bytes and 26 recorded results carry that hash.</li><li><code>build_mirror</code> <strong>refuses</strong> any variant whose answer key the generator did not rewrite, or rewrote to identical bytes, and grades every admitted one against itself (correct → 1.0, empty → 0.0) before letting it count — rule #5 applied to generated content no human read. A refused variant is *removed*, not flagged, so a run cannot pick it up. Reasons land in <code>private/mirror.json</code> and on the page.</li><li>Coverage is stated against the whole suite: <strong>6 of 55</strong> tasks are re-seedable, so every surface says what the check is silent about rather than reading as full coverage. With no private runs yet, all of them say <strong>no claim is made in either direction</strong>.</li><li><code>active_run()</code> watches <code>private/runs/</code> — a mirror run uses the same GPU and CLI, so it holds the one-run-at-a-time lock. The delta is frozen while a run executes rather than recomputed on every poll.</li></ul>
+<p><strong>A full sweep is one action: <code>/run</code> with &quot;then mirror&quot; ticked.</strong> The public suite runs, then a <strong>second leg</strong> of the re-seeded variants into <code>private/runs/</code>. It is deliberately a second leg and not extra tasks in the public run, because a variant carries the <strong>same task id</strong> as its public counterpart — a private result in <code>runs/</code> would be indistinguishable from a public one and would merge into that cell&#x27;s mean, quietly averaging a held-out score into the published number. Two trees is the invariant, not a convenience, which is also why the private variants are absent from <code>/run</code>&#x27;s task list.</p>
+<ul><li>Scoped to the selected tasks that have a built variant, and the hint beside the checkbox says how many that is: a hardened-only or <code>✦ New</code> run has no public score for the others, so running them would buy a private number with nothing beside it.</li><li>The mirror leg runs <strong>after</strong> the public one, so every cell the delta pairs has a public score; a stopped run does not start it.</li><li>Private run ids are suffixed <code>-mirror</code>. Ids are second-resolution, so a fast sweep started both legs in the same second and named them identically in two trees — a log line naming one did not say which.</li><li>The progress header names the running leg, since the run report shows the public leg&#x27;s results and not the private ones.</li></ul>
+<h3>Decided: a model that reasons past its budget keeps its 0</h3>
+<p>A cell where the model spent its whole output allowance in the think channel and emitted nothing readable <strong>scores 0, the same as a wrong answer</strong>. Settled deliberately rather than left as an inherited default, and now stated as a caveat on the info page instead of being discoverable only by reading <code>metrics.json</code>.</p>
+<p>The reasoning, in the open: the budget is uniform, so a model that cannot fit its reasoning inside it did not complete the task under the conditions everyone else faced. The cost is stated alongside — that 0 does not distinguish *could not do it* from *was not given room to say so*, and the same model may answer correctly at a larger budget. The token-budget probe below exists so that question is answerable rather than assumed, and its results stay in <code>special/</code>, counted toward nothing.</p>
+<h3>Token-budget probe: was our ceiling doing the measuring?</h3>
+<p>Some zeros are not capability. A thinking model can spend its whole output budget in the <strong>think channel</strong> and emit almost nothing a checker can read — measured on agents-a1 across a 3×6 sweep: <strong>32,766–32,768 of 32,768 tokens reasoning, 0–2 tokens of answer, eleven of eighteen attempts</strong>. Those cells are marked <code>status: &quot;scored&quot;, score: 0.0</code>, so they are in the mean, and the number records &quot;cannot do the task&quot; when what was observed is &quot;was not given room to say so&quot;.</p>
+<p><code>/special</code> gains a third probe beside the window and turn-budget ones: re-run the affected cells with <code>max_tokens</code> raised, into <code>special/</code>, which counts toward nothing. The verdict separates outcomes the single 0.0 was merging — <strong>converted</strong> (our ceiling was the measurement), <strong>spoke, still wrong</strong> (the zero was right for the wrong reason), <strong>still mute</strong> (no budget makes it converge). Time is raised in proportion to the budget, since a doubled allowance on the original deadline would be cut off by the clock instead and answer a different question.</p>
+<p>Qualification is strict, and every rule came from a false positive on live data:</p>
+<ul><li><strong>Missing token accounting is not evidence.</strong> Coercing a null <code>tokens_out</code> to zero visible tokens admitted 20 cells across 9 models on nothing at all.</li><li><strong><code>stop_reason == &quot;length&quot;</code> is not enough.</strong> qwen3-32b stopped at &quot;length&quot; after 1,799 of 32,768 tokens because prompt + output filled its loaded *context window*; a bigger budget cannot fix that. A cell must reach ≥90% of its own configured budget, so the threshold is relative to the model.</li><li><strong>A runaway that answered does not qualify</strong> — that is a loop or a clipped reply, and more budget feeds the loop.</li></ul>
+<p>33 candidate cells become <strong>7 across 2 models</strong> once all three rules apply.</p>
+<p><strong>A run-launching bug found by testing this.</strong> <code>want = selection or matrix</code> treated an explicitly empty selection as &quot;unspecified&quot; and fell back to *every* qualifying cell — so posting <code>{&quot;selection&quot;: {}}</code> started a real GPU run across the whole board, which it did, here, before being stopped and cleaned up. Absent now means all; present-but-empty means nothing. The window and turn probes carried the same conflation and are fixed with it, as is the handler that collapsed <code>{}</code> to <code>None</code> before the job ever saw it.</p>
+<h3>Subset standings now require the whole subset, like every other page</h3>
+<p>The discriminate page ranked a model on Hard / Easy / Frontier if it had scored <strong>half</strong> the subset. The leaderboard and the overview matrix have always done the opposite — a model that has not attempted the whole set sinks below every complete one, because the mean of a partial row is not comparable to a full one — so the same model was ranked by one rule on one page and another rule on the next.</p>
+<p>It was not hypothetical. On the live data, <strong><code>glm-5.2</code> sat at #1 on the Hard subset with a perfect 1.000 from 2 of its 5 tasks</strong>, displacing <code>claude-cli-fable-5</code>, which had scored all five at 0.988. Skipping the three tasks you might lose is not a way to win a subset.</p>
+<p>Now only models that scored every task in a subset are ranked. Partial models are still listed — below every ranked row, most coverage first, with a badge saying what they actually completed — because &quot;not measured here&quot; is information, and dropping them would hide it. An unranked row reports no rank *move* either: a shift measured against a rank it never held is a number about nothing.</p>
+<p>The sort was the other half of the hole. Every standings table is sortable, so one click on &quot;score&quot; floated a partial row back to the top — including on the leaderboard, where a model with 1 of 55 tasks could lead. The shared sort now keeps partial rows last on every column and in both directions.</p>
+<h3>The mirror&#x27;s method ships; its key does not</h3>
+<p>Three things had to change before the public export could carry the contamination measurement, all found by simulating the public build rather than reading the allowlist.</p>
+<ul><li><strong><code>harness/mirror.py</code> shipped nowhere.</strong> It was in neither <code>PUBLIC_HARNESS</code> nor <code>PRIVATE_HARNESS</code>, and <code>report.py</code> imports it inside a <code>try/except</code> — so in a public clone the import failed and the whole Contamination → held-out-mirror section *silently vanished*, along with the per-model row. Verified by rendering the public build with the module hidden. It is now on the allowlist.</li><li><strong>The seed offset was a constant in the code.</strong> <code>tasks-refs/</code> is published and the generators are deterministic in <code>SEED</code>, so a published offset is a complete recipe for regenerating the held-out variants. <code>config.mirror_seed_offset()</code> now reads it from <code>MIRROR_SEED_OFFSET</code> or gitignored <code>settings.local.json</code>, minting one per operator if absent. <strong>Publish the method, keep the key.</strong></li><li><strong>The offset and the private seeds are no longer rendered in any page.</strong> These screens get recorded for the video series, and either value reconstructs the held-out set. They stay in <code>private/mirror.json</code> and <code>MIRROR.txt</code> on disk. A test asserts they do not come back out through the page payload.</li><li><strong>Two new test files would have broken a fresh public clone</strong>: <code>test_mirror_leg</code> imports <code>harness.jobs</code> (explicitly private), and <code>test_mirror</code> exercises <code>private/</code> and reads <code>tools/export_public.py</code>, none of which ship. Both held back.</li></ul>
+<p><strong>A build is now refused while any run is executing.</strong> A build <code>rmtree</code>s and rewrites <code>private/tasks/&lt;task&gt;</code> — the exact path a run reads its prompt from — so a rebuild mid-run swaps the paper out from under the exam and the recorded result belongs to neither variant. The guard was only in the web handler; the test suite calls <code>build_mirror</code> directly and <strong>did rebuild the live variants 16 seconds into a real mirror run</strong>. No harm done that time (same pinned offset, deterministic generators — verified all 13 variant files byte-identical to a fresh build), which is luck, not a safety property. The guard now lives in <code>build_mirror</code> itself, the endpoint turns it into a 409, and the mirror tests build into a sandboxed private tree so they can never touch the operator&#x27;s variants.</p>
+<p><code>active_run()</code> watching the private tree also exposed a test-isolation gap: <code>test_studio</code> redirected only <code>RUNS_DIR</code> while asserting &quot;nothing is running&quot;, so a live mirror run failed it. It now isolates every tree that shares the GPU/CLI.</p>
+<h3>The contamination verdict is sized by task count, not a fixed cutoff</h3>
+<p>The delta was coloured red at <code>≥ 0.15</code>. With 6 paired tasks one task flipping 1.0→0.0 moves the mean by <code>1/6 = 0.167</code>, so a <strong>single</strong> differing task tripped &quot;investigate&quot; — at one trial per cell, well inside noise. <code>mirror.delta_band</code> now returns <code>flat</code> / <code>watch</code> / <code>suspect</code> in units of *tasks&#x27; worth of difference* (one, two, beyond), and the operator page, the info table and the model row all read it so they cannot disagree. Re-seeding is not difficulty-neutral, so <code>flat</code> is the expected result and is stated as such.</p>
+<p>First real measurement, from two frontier models across all six variants: <code>claude-cli-fable-5</code> scored <strong>1.000 public / 1.000 private</strong> (delta <code>+0.000</code>) and <code>claude-cli-opus-5</code> <strong>1.000 / 0.967</strong> (<code>+0.033</code>, one checkpoint of ctx-013) — both flat. Solving unpublished instances as well as published ones is the *learned the skill* outcome, measured rather than argued.</p>
+<h3>Sampling is now CONFIRMED RECEIVED, not just declared</h3>
+<p><code>sampling_used</code> on a cell records what the harness *intended* to send. That is a different claim from &quot;the provider got it&quot;, and <strong>every configuration bug this suite has shipped lived in that gap</strong> — a value written in a yaml that never reached the model, found by accident after it had already affected results.</p>
+<p>LM Studio logs each request&#x27;s full body, so for local models the gap is closable from the server&#x27;s own account. <code>lmstudio.received_requests()</code> parses the log (<code>~/.lmstudio/server-logs/</code>), and <code>confirm_sampling()</code> joins each attempt&#x27;s <code>t_start</code> to the request the server logged for that model, comparing every value including <code>max_tokens</code>. Local model pages gain a <strong>Sampling confirmed received</strong> row beside the sampling it verifies.</p>
+<p>It catches four distinct shapes, each covered by a test that proves the detector *fires* (a check that can only say &quot;fine&quot; is the same free credit these tests exist to prevent in task checkers): a value that changed in flight, a value that never arrived, a value <strong>we never sent</strong> that arrived anyway (an app-side preset injecting one would move results invisibly), and a <code>max_tokens</code> that did not apply — which is exactly how the Claude models ran uncapped for a whole dataset. JSON renders <code>1.0</code> as <code>1</code>, so comparison is numeric, not by type. A cell with no logged request is <code>unlogged</code>, not failed: the logs rotate and predate the check, so absence of a record is not a finding. Cloud models are not checked at all rather than claim a confirmation nobody earned.</p>
+<p>First result: <code>agents-a1</code>, <strong>20 of 20 requests confirmed identical</strong> — all six of the creator&#x27;s published values plus the 32,768 budget arrived exactly as sent. What the log cannot prove is that the sampler *honoured* <code>repetition_penalty</code> under that name; receipt is confirmed, application is not. (Also settled while looking: LM Studio exposes no *load-time* sampling state to poll, because on the OpenAI-compat endpoint sampling is per-request — <code>/api/v0/models</code> reports load state only. And <code>~/.lmstudio/config-presets/</code> is empty, so an unset knob really does fall through to llama.cpp&#x27;s own default rather than a hidden app preset.)</p>
+<h3>Sampling: a creator&#x27;s published preset can be entered as a whole</h3>
+<p>Creators publish sampling <strong>per use case, as a set of knobs chosen together</strong> — Qwen&#x27;s thinking preset is temperature + top_p + top_k + min_p at once. The <code>/manage</code> editor exposed one temperature column per profile, so a real preset could not be entered at all and the yamls were being hand-edited. Replaced by a per-model summary plus an expandable grid: every profile × every sampling key, with the task categories each profile governs shown beside it. The backend already accepted full profiles; this was only ever a UI limit.</p>
+<p>Two adjacent defects, both found by round-tripping a real preset through the endpoint rather than reading the code:</p>
+<ul><li>A POST carrying <strong>only</strong> profiles answered <code>{&quot;ok&quot;: true}</code> and wrote <strong>nothing</strong> — the profile block sat inside a guard that never tested for it, so its validation never ran either and a bad profile name passed silently.</li><li><code>set_yaml_key</code> replaced the whole line, <strong>destroying that line&#x27;s own trailing comment</strong>. Every save rewrites <code>max_tokens</code>, so any save silently deleted *&quot;uniform thinking budget across all local models (fairness)&quot;* — the value kept, the reason gone. It now carries across, and a <code>#</code> with no preceding whitespace (a URL fragment in <code>sampling_source</code>) is correctly not treated as a comment. <code>set_yaml_key</code> had no tests despite writing the operator&#x27;s config; it has six.</li></ul>
+<p><code>load_tasks()</code> resolves its default per call — binding <code>config.TASKS_DIR</code> at def time froze the real <code>tasks/</code> into every no-arg caller, so nothing could redirect them.</p>
+<h3>CHANGELOG repair</h3>
+<p>Cutting 0.6.18 renamed the *first* <code>## Unreleased</code> in the file — which was the one quoted inside the layout note above — so the note lost its second half, the version heading ended up mid-paragraph, and a duplicate <code>## Unreleased</code> was left stranded 150 lines down. <code>_changelog_for_version</code> could not find <code>## 0.6.18</code> at a line start, so the info page&#x27;s &quot;this dataset&#x27;s changelog&quot; was serving the whole file, preamble included. Note restored, heading back on its own line, stranded section folded in — the same repair fb6cf1b6 made once before, so when cutting a version match the heading at a line start.</p>
+<h3>Three frontier tasks built + reference-verified (not yet in a version)</h3>
+<p>Targeting the top-8 tied cohort, each on a lane that already discriminates and each multi-checkpoint so partial credit spreads: <code>web-013-billiards</code> (webapp; a <code>window.sim</code> physics API graded on reflection/friction/elastic collisions/pockets/determinism, 13 checks), <code>ctx-013-ledger-supersede-64k</code> (123k-char settled-balance aggregation under void/amend noise, response lane, 5 answers), <code>rs-013-statemachine-trace</code> (40-op adversarial stack-machine trace, response lane, 5 answers). All 1.0-good / 0.0-empty; traps 0.15 / 0.20 / 0.00. <strong>Awaiting the top-8 calibration run and a version decision</strong> — admit only if σ(top-8) ≥ 0.15. Nothing here bumps SUITE_VERSION or archives yet. Generators and reference apps in <code>tasks-refs/</code>; see <code>docs/PUBLIC-FEEDBACK-ROADMAP.md</code>.</p>
+<hr>
+<h2>0.6.18 — the fairness budget applies to Claude too</h2>
 <h3>The token budget was never enforced on the Claude CLI</h3>
 <p>Rule #3 grants every <strong>non-claude</strong> model <code>max_tokens: 32768</code>. Claude was exempt — not by choice but by transport: <code>claude -p</code> takes no max-tokens flag, so nothing bounded its output. That produced a real double standard on exactly the tasks that decide the board:</p>
 <p>| ctx-013 | tokens | score | |---|---|---| | hy3 | capped at 32,768, cut off mid-thought | <strong>0.0</strong> | | claude-cli-sonnet-4-6 | uncapped, <strong>64,465</strong> (2× the cap) | <strong>1.0</strong> |</p>
@@ -1325,8 +1503,6 @@ view an archived set, rendered with its own task-definition snapshot.</p>
 <h3>Operator</h3>
 <ul><li><code>/manage</code> sets model prices by hand (for providers that publish no catalog).</li><li><code>/backend</code> manages interface keys per row with a live <strong>Test</strong>, and flags a key <strong>shared</strong> between two interfaces — which is how a Moonshot key silently overwrote <code>OPENROUTER_API_KEY</code> and 401&#x27;d every OpenRouter model.</li><li><code>/run</code> gains Hard / Frontier / Easy / Hardened selectors with five distinct marker colours, all derived live from the discrimination tiers; the discriminate page gains the <strong>Frontier</strong> lens.</li><li>Runs persist their narration to <code>runs/&lt;id&gt;/run.log</code>, and tasks dropped without a score are recorded in the manifest&#x27;s <code>dropped_unscored</code>.</li></ul>
 <hr>
-<h2>Unreleased</h2>
-<ul><li><strong>Three frontier tasks built + reference-verified (not yet in a version).</strong> Targeting the top-8 tied cohort, each on a lane that already discriminates and each multi-checkpoint so partial credit spreads: <code>web-013-billiards</code> (webapp; a <code>window.sim</code> physics API graded on reflection/friction/elastic collisions/pockets/determinism, 13 checks), <code>ctx-013-ledger-supersede-64k</code> (123k-char settled-balance aggregation under void/amend noise, response lane, 5 answers), <code>rs-013-statemachine-trace</code> (40-op adversarial stack-machine trace, response lane, 5 answers). All 1.0-good / 0.0-empty; traps 0.15 / 0.20 / 0.00. <strong>Awaiting the top-8 calibration run and a version decision</strong> — admit only if σ(top-8) ≥ 0.15. Nothing here bumps SUITE_VERSION or archives yet. Generators and reference apps in <code>tasks-refs/</code>; see <code>docs/PUBLIC-FEEDBACK-ROADMAP.md</code>.</li></ul>
 <h2>0.6.16 — compare page, contamination &amp; sample-size honesty, freshness</h2>
 <p>Four roadmap items (<code>docs/PUBLIC-FEEDBACK-ROADMAP.md</code>), all working in the operator and public builds:</p>
 <ul><li><strong>Head-to-head compare (D3).</strong> New <code>/compare</code> page: two model dropdowns in the header, a side-by-side metric table with per-metric winners and deltas, and a per-task matrix grouped by category with a swatch + delta per task. All numbers are embedded once as JSON and rendered client-side, so it works on a static host with no server. Linked in the nav; routed in both servers.</li><li><strong>Contamination &amp; memorization (G3).</strong> New <code>info.html#contamination</code> section stating the guards — original (non-public) tasks, twisted-classics that score memorized answers zero, behaviour-graded apps, freshly-assembled long-context payloads, content-hashing — and what is *not* claimed.</li><li><strong>Sample-size honesty (G5).</strong> New <code>info.html#samplesize</code> section with the real counts (runs, models, scored cells, total graded trials, % of cells with repeats) and how the 95% band is computed, all derived from the data.</li><li><strong>Freshness (G6).</strong> The overview shows &quot;data as of &lt;newest run date&gt;&quot; and links an Atom <code>feed.xml</code> of models entering the benchmark. Both derive from run dates, not the wall clock, so the shipped <code>reports/</code> stay byte-stable between publishes.</li></ul>

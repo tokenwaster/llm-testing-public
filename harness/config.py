@@ -74,6 +74,37 @@ TASKS_DIR = ROOT / "tasks"
 RUNS_DIR = ROOT / "runs"
 SCOUTS_DIR = ROOT / "scouts"
 SPECIAL_DIR = ROOT / "special"
+
+PRIVATE_DIR = ROOT / "private"
+PRIVATE_TASKS_DIR = PRIVATE_DIR / "tasks"
+PRIVATE_RUNS_DIR = PRIVATE_DIR / "runs"
+
+
+def mirror_seed_offset() -> int:
+    """The seed shift that turns a public task into its private variant.
+
+    Deliberately NOT a constant in this file. The generators in `tasks-refs/` are
+    published, and they are deterministic in SEED — so a published offset is a
+    complete recipe for regenerating the exact private variants, and the held-out
+    set stops being held out. Publish the method, keep the key: this function
+    ships, the number does not.
+
+    Read from `MIRROR_SEED_OFFSET` (env or .env) or `settings.local.json` — both
+    gitignored and absent from the export allowlist. Minted once and persisted if
+    neither carries it, so a given operator's variants stay reproducible while
+    two operators do not share a private set.
+    """
+    for raw in (os.environ.get("MIRROR_SEED_OFFSET"),
+                load_settings().get("mirror_seed_offset")):
+        try:
+            if raw is not None and int(raw) > 0:
+                return int(raw)
+        except (TypeError, ValueError):
+            pass
+    import secrets
+    minted = 1000 + secrets.randbelow(9_000_000)
+    save_setting("mirror_seed_offset", minted)
+    return minted
 REPORTS_DIR = ROOT / "reports"
 
 
@@ -101,6 +132,24 @@ DEFAULT_REQUEST_TIMEOUT_S = 180
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.2
+
+CATEGORY_SAMPLING_PROFILE = {
+    "coding-python":         "coding",
+    "one-shot-apps":         "coding",
+    "agentic":               "coding",
+    "reasoning":             "reasoning",
+    "math":                  "reasoning",
+    "long-context":          "general",
+    "extraction":            "general",
+    "hallucination":         "general",
+    "instruction-following": "general",
+    "tool-use":              "general",
+}
+
+
+def sampling_profile_for(category: str) -> str:
+    """Which named profile a task category draws from ('' if unmapped)."""
+    return CATEGORY_SAMPLING_PROFILE.get(category or "", "")
 DEFAULT_AGENT_MAX_TURNS = 15
 CLAUDE_SPIRAL_S = 300
 

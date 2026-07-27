@@ -47,6 +47,7 @@ _NAV = [
     ("Review", "/review", True),
     ("Backend", "/backend", True), ("Manage data", "/manage", True),
     ("Organize", "/families-edit", True),
+    ("Mirror", "/mirror", True),
     ("Special", "special.html", False),
     ("Info", "info.html", False),
 ]
@@ -1235,7 +1236,7 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
 <th class="num" data-type="num" title="score per dollar; a local model's dollar is measured GPU electricity ⚡">Score / $</th>
 <th data-type="num" title="weights on disk + quant; picking a GPU size shows VRAM needed at your context">VRAM / fit</th></tr>
 {% for r in standings %}
-<tr data-kind="{{ r.kind }}" data-w="{{ r.w_v }}" data-kvtok="{{ r.kvtok }}"
+<tr{% if r.partial %} data-partial="1"{% endif %} data-kind="{{ r.kind }}" data-w="{{ r.w_v }}" data-kvtok="{{ r.kvtok }}"
     data-kvfixed="{{ r.kvfixed }}" data-native="{{ r.native }}"
     data-pure="{{ r.pure_v }}" data-value="{{ r.value_v }}" data-speed="{{ r.speed_v }}"
     data-eff="{{ r.eff_v }}" data-hard="{{ r.hard_v }}" data-frontier="{{ r.frontier_v }}" data-easy="{{ r.easy_v }}" data-firsttry="{{ r.firsttry_v }}">
@@ -1747,6 +1748,12 @@ document.querySelectorAll('table.sortable').forEach(function(table){
       th.querySelector('.caret').textContent = dir==='asc'?'▲':'▼';
       var rows = [].slice.call(table.rows).slice(1);
       rows.sort(function(a,b){
+        // A partial row stays below every complete one on EVERY column and in
+        // both directions. Without this, one click on "score" floats a model
+        // that attempted 1 of 55 tasks to the top — the mean of a near-empty row
+        // is not comparable to a full one, which is exactly why it was unranked.
+        var pa = a.dataset.partial === '1', pb = b.dataset.partial === '1';
+        if (pa !== pb) return pa ? 1 : -1;
         if (num){
           var va=numval(a.cells[col]), vb=numval(b.cells[col]);
           var na=isNaN(va), nb=isNaN(vb);
@@ -2989,8 +2996,77 @@ def _model_detail_rows(mo, mi: dict, fp, hosts: list) -> list[dict]:
         add(f"VRAM to run @{VRAM_REF_CTX // 1024}k",
             f"{total:.0f} GB (weights + KV cache)")
     if mo:
-        add("Generation budget (as tested)",
-            f"{mo.max_tokens:,} max tokens · temperature {mo.temperature}")
+        bits = [f"{mo.max_tokens:,} max tokens"]
+        if not mo.sampling_settable:
+            bits.append("sampling: <b>not settable</b> — "
+                        + html.escape(mo.unsettable_reason))
+        else:
+            if mo.temperature is None:
+                bits.append("temperature: <b>not settable</b> (provider default)")
+            else:
+                bits.append(f"temperature {mo.temperature}")
+            for k in mo.SAMPLING_KEYS:
+                v = (mo.sampling or {}).get(k)
+                if v is not None:
+                    bits.append(f"{k} {v}")
+        _why = ""
+        if mo.local and mo.max_tokens < 65536:
+            _why = ("local: the budget also sizes the loaded context window, so a "
+                    "larger one would spill VRAM to shared memory")
+        elif not mo.local and mo.max_tokens < 65536:
+            _why = ("held below the fleet ceiling because this model's provider "
+                    "caps completions here")
+        unset = ([k for k in mo.SAMPLING_KEYS
+                  if (mo.sampling or {}).get(k) is None]
+                 if mo.sampling_settable else [])
+        if not mo.sampling_settable:
+            _note = ("<b>Nothing was transmitted.</b> Every sampling value this "
+                     "model ran under is the provider's own, and no number here "
+                     "was chosen by us. ")
+        elif unset:
+            _note = ("Not sent, so left at this provider's own default: <code>"
+                     + "</code>, <code>".join(unset) + "</code>. "
+                     "Provider defaults are not uniform — llama.cpp behind LM "
+                     "Studio applies its own top-k and repeat penalty where a "
+                     "gateway typically disables them — so \"unset\" means "
+                     "\"whatever this provider does\", not a value we chose. ")
+        else:
+            _note = "Every sampling parameter was set explicitly. "
+        add("Sampling (as tested)", " · ".join(bits)
+            + '<div class="note" style="font-size:11.5px;margin-top:2px">'
+            + _note
+            + (f"<b>Budget note:</b> {_why}." if _why else "") + "</div>")
+        if mo.sampling_profiles:
+            from . import config as _cfg
+            rows_p = []
+            for prof, vals in sorted(mo.sampling_profiles.items()):
+                cats = sorted(c for c, p in
+                              _cfg.CATEGORY_SAMPLING_PROFILE.items() if p == prof)
+                shown = " · ".join(f"{k} {v}" for k, v in sorted(vals.items()))
+                rows_p.append(f"<b>{html.escape(prof)}</b> → {shown}"
+                              + (f'<div class="note" style="font-size:11px">'
+                                 f'applies to: {", ".join(cats)}</div>'
+                                 if cats else
+                                 '<div class="note" style="font-size:11px">'
+                                 'no task category maps to this profile</div>'))
+            add("Sampling by use case",
+                "<div>" + "</div><div style='margin-top:3px'>".join(rows_p) + "</div>"
+                + '<div class="note" style="font-size:11.5px;margin-top:3px">'
+                "The creator publishes different settings for different kinds of "
+                "work, so each task category draws from the profile above that "
+                "matches it. A category with no matching profile uses the base "
+                "row.</div>")
+        if mo.sampling_source:
+            src = html.escape(str(mo.sampling_source))
+            add("Sampling reference",
+                f'<a href="{src}" rel="nofollow noopener">{src}</a>'
+                '<div class="note" style="font-size:11.5px;margin-top:2px">'
+                "the creator's published recommendation these values came "
+                "from</div>")
+        else:
+            add("Sampling reference",
+                '<span class="note">none recorded — these are the suite\'s '
+                "house defaults, not a vendor recommendation</span>")
         if not mo.local:
             p = mo.pricing or {}
             if p.get("input_per_mtok") or p.get("output_per_mtok"):
@@ -3035,9 +3111,71 @@ def _mx_cell(entry, tdef, acfg, suspect, href):
     return {"cls": "na", "a": "0", "tip": f"{tid} · {cat}", "href": href}
 
 
+def _mirror_detail_row(entry: dict | None) -> dict | None:
+    """The 'Held-out mirror' detail row for one model, or None if the mirror has
+    not been run against it. Absence is left silent here — the info page carries
+    the coverage statement, and a row saying 'not measured' on every model page
+    would be noise rather than disclosure."""
+    if not entry:
+        return None
+    d = entry["delta"]
+    col = {"suspect": "#d03b3b", "watch": "#fab219"}.get(entry.get("band"),
+                                                        "#0ca30c")
+    pairs = " · ".join(
+        f'{html.escape(p["task"])} {p["public"]:.2f}→{p["private"]:.2f}'
+        for p in entry.get("pairs") or [])
+    return {"k": "Held-out mirror (contamination)",
+            "v": (f'public <b>{entry["public"]:.3f}</b> vs private '
+                  f'<b>{entry["private"]:.3f}</b> on {entry["n"]} re-seeded '
+                  f'task(s) · delta <b style="color:{col}">{d:+.3f}</b> '
+                  f'<span style="color:{col}">({entry.get("band", "flat")})</span>'
+                  '<div class="note" style="font-size:11.5px;margin-top:2px">'
+                  'The same task shapes regenerated at a different seed and never '
+                  'published, so a memorised instance cannot help. Positive means '
+                  'this model did better on the <em>published</em> instance. One '
+                  f'task differing moves this by {entry.get("one_task", 0):.3f}, so '
+                  '<b>flat</b> is within one task\'s worth and the expected result '
+                  '— re-seeding is not difficulty-neutral. '
+                  f'Per task: {pairs}. '
+                  '<a href="../info.html#mirror">How this is measured</a>.</div>')}
+
+
+def _confirmed_row(entry: dict | None) -> dict | None:
+    """The 'Sampling confirmed received' row for a local model.
+
+    `sampling_used` on a cell is what the harness INTENDED to send. This row is
+    the provider's own account of what arrived, read from LM Studio's server log —
+    a different claim, and the one that matters, because every configuration bug
+    this suite has shipped lived in the gap between the two.
+    """
+    if not entry or not entry.get("total"):
+        return None
+    ok, bad, none = entry["confirmed"], entry["mismatched"], entry["unlogged"]
+    if bad:
+        det = "; ".join(f"{html.escape(t)}: {html.escape('; '.join(d))}"
+                        for t, d in entry["details"][:4])
+        val = (f'<b style="color:#d03b3b">{bad} of {entry["total"]} request(s) '
+               f'did NOT match what was sent</b>'
+               '<div class="note" style="font-size:11.5px;margin-top:2px">'
+               f'{det}</div>')
+    else:
+        val = (f'<b style="color:#0ca30c">{ok} of {entry["total"]}</b> request(s) '
+               'confirmed identical to what was sent'
+               + (f' · {none} predate the server log and cannot be checked'
+                  if none else ""))
+    return {"k": "Sampling confirmed received",
+            "v": val + '<div class="note" style="font-size:11.5px;margin-top:2px">'
+            "Read back from LM Studio's own request log, not from our side: the "
+            "values this model was <em>configured</em> with are one claim, the "
+            "values the server <em>received</em> are another. Only local models "
+            "can be checked this way — a gateway keeps no log we can read.</div>"}
+
+
 def build_model_report(model: str, runs: list[dict], tdefs: dict,
                        dataset_label: str = "",
-                       versions: list[tuple] | None = None) -> str:
+                       versions: list[tuple] | None = None,
+                       mirror_row: dict | None = None,
+                       confirmed_row: dict | None = None) -> str:
     task_data = {tid: info for tid, info in collect_task_data(runs).items()
                  if tid in tdefs}
     mine = [(tid, info["agg"][model]) for tid, info in task_data.items()
@@ -3114,6 +3252,10 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
                       "k": f"VRAM @{VRAM_REF_CTX // 1024}k · "
                            f"{fp['weights_gb']:.0f}GB wt + KV · {fp['quant']}"})
     detail_rows = _model_detail_rows(mo, meta_info, fp, hosts)
+    if confirmed_row:
+        detail_rows.append(confirmed_row)
+    if mirror_row:
+        detail_rows.append(mirror_row)
     model_links = _model_links(model, mo, local=s["local"],
                                publisher=meta_info.get("publisher", ""))
 
@@ -3452,11 +3594,12 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                 _fp_cache[mo.model] = None
         return _fp_cache[mo.model]
 
-    def _standing(m, rank, cov):
+    def _standing(m, rank, cov, partial=False):
         s = summaries[m]
         fp = _footprint(m)
         return {
-            "rank": rank, "kind": "local" if s["local"] else "remote",
+            "rank": rank, "partial": partial,
+            "kind": "local" if s["local"] else "remote",
             "model": _mlink(m), "model_sort": m,
             "where": "local ⚡" if s["local"] else "API / CLI",
             "score": (f"{s['avg_score_val']:.3f}"
@@ -3503,7 +3646,8 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                            f"{len(by_model.get(m, []))}/{n_suite}")
                  for i, m in enumerate(complete)]
     standings += [_standing(m, "—",
-                            f"{len(by_model.get(m, []))}/{n_suite} partial")
+                            f"{len(by_model.get(m, []))}/{n_suite} partial",
+                            partial=True)
                   for m in incomplete]
 
     points = []
@@ -3915,6 +4059,22 @@ CAVEATS = [
      "authoritative. Published rates change, and a gateway routes the same model "
      "to different upstream hosts at different prices. See <a href=\"#pricing\">"
      "Pricing</a> below for exactly how many of these numbers are snapshots."),
+    ("A model that reasons past its output budget scores 0, and that is a choice.",
+     "Some models think in a separate channel that is billed as output. One can "
+     "spend its <em>entire</em> allowance reasoning and emit almost nothing a "
+     "checker can read — measured here at <strong>32,766 of 32,768 tokens "
+     "reasoning and two tokens of answer, eleven attempts out of eighteen</strong>. "
+     "We score that <strong>0</strong>, the same as a wrong answer, and it is "
+     "worth being plain that this is a decision rather than an oversight: the "
+     "budget is uniform, and a model that cannot fit its reasoning inside it did "
+     "not complete the task under the conditions everyone else faced. The cost of "
+     "the choice is real, though — that 0 does not distinguish "
+     "<em>could not do it</em> from <em>was not given room to say so</em>, and the "
+     "same model may well answer correctly at a larger budget. Where a cell hit "
+     "its ceiling having emitted essentially nothing, the "
+     "<a href=\"special.html\">Special</a> page can re-run it with the budget "
+     "raised; those probe results are experimental and counted toward nothing, "
+     "existing purely so the question is answerable rather than assumed."),
     ("The answer lane is all-or-nothing.",
      "A right answer in the wrong format scores 0. That's deliberate — "
      "following the output contract is part of the task — but a 0 here doesn't "
@@ -4174,9 +4334,72 @@ is simply the mean of one. Runs that never produced a score (crash, spiral,
 DNF) stay out of the mean. A <em>rescore</em> still supersedes — it re-grades
 the same run in place rather than adding one — and a genuinely botched run is
 deleted on /manage rather than averaged in.</li>
-<li><strong>Equal budget.</strong> Every non-Claude model gets the same
-<code>max_tokens</code>. A model that died at a smaller budget is re-run before
-its zeros are allowed to count.</li>
+<li><strong>Output budget, and why it is not identical for everyone.</strong> The
+budget is a <em>runaway backstop</em>, not a fairness device — the model is never
+told the number, so it cannot plan around it, and truncating mid-sentence would
+measure verbosity rather than skill. It is sized well clear of real use (the 99th
+percentile of actual output is ~27k tokens). Cloud models get 65,536; local
+models get 32,768, because a local model's budget also sizes its loaded context
+window and a bigger one spills VRAM to shared memory — a hardware limit, not a
+policy choice. One model (<code>laguna-xs-2.1</code>) is held lower still because
+its provider caps completions there. The Claude CLI accepts no budget flag, so
+the cap is applied after the fact: output past it is discarded exactly as a
+provider would have refused to generate it.</li>
+<li><strong>Every knob we set, in one place.</strong> These are the suite-wide
+configuration choices, not per-model ones. Each is a decision that could have
+gone another way, so it is listed rather than left to be discovered:
+<ul>
+<li><b>Output budget</b> — cloud 65,536 tokens, local 32,768, and any model whose
+provider caps completions lower is held at its provider's limit. A
+<em>backstop</em>, not a fairness lever: the model is never told the number.</li>
+<li><b>Temperature</b> — 0.2 where we can set it, and there are three ways we
+cannot. Moonshot fixes kimi-k3 at 1.0 server-side (it <em>refuses</em> anything
+else). The Claude CLI exposes no flag at all. And the OpenAI reasoning models take
+no sampling parameters whatsoever — behind a gateway an unsupported one is
+<em>dropped rather than refused</em>, so it would silently never apply. Each of
+those is marked <b>not settable</b> on the model's own page, with the reason,
+instead of showing a number that never reached the model.</li>
+<li><b>Other sampling</b> (top_p, top_k, min_p, penalties, seed) — <em>not sent
+at all</em> unless a model's page lists it. An unsent knob runs at the provider's
+own default; we do not substitute a house value silently.</li>
+<li><b>Retries</b> — one retry per task. A retry is kept because across this
+dataset it rescued 7 of 8 timed-out cells, usually a cold model load or a slow
+first token. It does mean a model that fails transiently gets a second attempt
+while one that succeeds immediately does not — unequal trials, stated plainly.</li>
+<li><b>A refused request is not a score.</b> A provider 4xx (bad parameter,
+unknown model, bad key) means the model never saw the prompt, so the task is
+dropped unscored and that model stops for the run — the same refusal would repeat
+on every remaining task. A context-overflow 400 is deliberately excluded: that is
+a real limit and still scores zero.</li>
+<li><b>Cache pricing</b> — a cache discount is only applied where the provider
+publishes one. Anthropic's 0.10×/1.25× is applied to Anthropic; everyone else
+prices cached input at the full rate until a real number is configured, so we
+never flatter a model's cost with an invented discount.</li>
+<li><b>Timing and local cost are machine-specific.</b> The timing-scored task and
+every local $/run figure were measured on one particular GPU and CPU. They are
+not reproducible on different hardware and should not be read as portable.</li>
+</ul></li>
+<li><strong>Odd per-model configuration is on the model's own page.</strong>
+Anything unusual about how a single model was run — a provider-fixed temperature,
+a budget held below the fleet ceiling, a sampling value taken from a vendor
+recommendation, or the absence of one — appears in the <em>Sampling (as
+tested)</em> row of that model's page, with the reason. If a number looks
+surprising, that row is where the explanation lives.</li>
+<li><strong>Sampling is per model, and stated per model.</strong> There is no
+single temperature for the fleet, because some models and transports do not let us
+choose one: Moonshot fixes <code>temperature=1.0</code> server-side for kimi-k3,
+the Claude CLI exposes no temperature at all, and the OpenAI reasoning models
+accept no sampling parameters — so those run at their creator's setting whatever
+we write down. The last case is the quiet one: a gateway <em>drops</em> a
+parameter the model does not support instead of returning an error, so nothing
+fails and the only symptom would be a number on this site that never applied. Such
+models are marked <b>not settable</b> and transmit nothing at all. Rather than
+pretend otherwise, <strong>every
+model's page lists the exact sampling parameters it was run with</strong> — and
+the reference URL for the creator recommendation they came from, or an explicit
+note that none was recorded and the value is a house default. Only parameters
+listed there were transmitted; every other knob ran at the provider's default.
+Open any model page and read the <em>Sampling (as tested)</em> row.</li>
 <li><strong>Local models run fully on the GPU (fixed 2026-07-18).</strong> Local
 models are loaded with <code>--gpu max</code> and a context window sized to each
 group of tasks. Before this, LM Studio's default "auto" offload left layers on
@@ -4230,6 +4453,61 @@ model was tested before or after a given model's training cutoff.</li>
 never saw a task. We claim the tasks are built so that seeing them helps little,
 and that the twisted-classic scores are direct evidence a model is reasoning
 rather than reciting.</p>
+
+{% if mirror %}
+<h3 id="mirror">Measured, not assumed: the private held-out mirror</h3>
+<p>Everything above is a design argument. This is a measurement. Publishing the
+suite publishes the answers — a correct model reply recorded in
+<code>runs/</code> <em>is</em> the answer key, so withholding the tasks would only
+cost the auditability that makes the public data worth anything. So instead the
+public set stays fully open, and a <strong>private variant of the same task</strong>
+is held back: identical shape, identical checker, <strong>regenerated at a
+different seed</strong>, never published. A model that scores markedly higher on
+the published instance than on the unpublished one has memorised
+<em>that instance</em>.</p>
+<p><strong>Coverage, stated honestly:</strong> {{ mirror.n_mirrorable }} of
+{{ mirror.n_public }} tasks can be re-seeded and {{ mirror.n_built }} have a
+variant built. The rest are hand-written app specs, agent workspaces or fixed
+prompts with no generator behind them — they cannot be re-rolled, so
+<strong>this check says nothing about them</strong>. It covers the long-context
+and reasoning tasks, which is where a memorised payload would pay off most.</p>
+{% if mirror.delta %}
+<div class="card" style="margin:12px 0">
+<table><thead><tr><th data-type="text">Model</th><th class="num">tasks</th>
+<th class="num">public</th><th class="num">private (held out)</th>
+<th class="num">delta</th><th class="num">verdict</th></tr></thead><tbody>
+{% for r in mirror.delta %}
+<tr><td class="model">{{ r.model }}</td><td class="num">{{ r.n }}</td>
+<td class="num">{{ "%.3f"|format(r.public) }}</td>
+<td class="num">{{ "%.3f"|format(r.private) }}</td>
+<td class="num"><b style="color:{{ '#d03b3b' if r.band == 'suspect' else
+  '#fab219' if r.band == 'watch' else '#0ca30c' }}">{{ "%+.3f"|format(r.delta) }}</b></td>
+<td class="num" style="color:{{ '#d03b3b' if r.band == 'suspect' else
+  '#fab219' if r.band == 'watch' else '#0ca30c' }}">{{ r.band }}</td></tr>
+{% endfor %}
+</tbody></table></div>
+<p class="small">Positive = better on the published instance. The verdict is sized
+against the number of paired tasks rather than a fixed cutoff, because one task
+differing moves the mean by <code>1/n</code> — on {{ mirror.n_built }} tasks that
+is {{ "%.3f"|format(1.0 / mirror.n_built) if mirror.n_built else "—" }}. So
+<b>flat</b> means "within one task's worth", which is the <em>expected</em> result:
+re-seeding changes the specific numbers and is not difficulty-neutral, so a small
+delta is instance noise rather than evidence. <b>watch</b> is within two tasks'
+worth; <b>suspect</b> is beyond that and means read the transcripts, not that a
+verdict has been reached. Both score columns use the same aggregation rule as the
+rest of the site (every scored run of that model·task, meaned), and each model's
+own page shows the per-task pairs.</p>
+{% else %}
+<p class="small"><strong>No held-out results yet.</strong> The variants are built
+and verified different from their public counterparts, but no model has been run
+against them, so <strong>no contamination claim is made in either direction</strong>
+— this section will fill in with real numbers rather than a reassurance.</p>
+{% endif %}
+<p class="small">What this catches and what it doesn't: it detects memorisation of
+the published <em>instance</em>. A model that genuinely learned the skill from the
+published task scores the same on both — and should. That is learning, not
+cheating, and the delta is designed to read it as such.</p>
+{% endif %}
 
 <h2 id="samplesize">Sample size &amp; how much to trust a number</h2>
 <p>Be a skeptic — here is exactly how much data is behind each figure, stated
@@ -4511,6 +4789,14 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
     n_cost = n_billed + n_list or 1
     host_list = [h for h, _ in sorted(hosts.items(), key=lambda kv: -kv[1])]
 
+    mirror_ctx = None
+    if dataset_key == "live":
+        try:
+            from .mirror import mirror_state
+            mirror_ctx = mirror_state(_td)
+        except Exception:
+            mirror_ctx = None
+
     return _env.from_string(INFO_TEMPLATE).render(
         nav=_nav(""),
         css=BASE_CSS,
@@ -4523,6 +4809,7 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         power_rate=(f"{_power_cfg().get('currency', '$')}"
                     f"{_power_cfg().get('cost_per_kwh', 0)}"),
         human_graded=human_graded,
+        mirror=mirror_ctx,
         dataset_label=dataset_label, dataset_key=dataset_key,
         n_tasks=len(tasks), n_models=n_models, n_runs=len(runs),
         ss=ss,
@@ -4637,28 +4924,40 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
     def _rank_on(subset: list[str]) -> list[dict]:
         """Rank models on one task subset; delta = shift vs the global rank.
 
+        Only models that scored EVERY task in the subset are ranked. The same rule
+        the leaderboard and the overview matrix already apply suite-wide: the mean
+        of a partial row is not comparable to a full one, so a model with half the
+        subset would out-rank a complete one purely by having skipped the tasks it
+        loses on. Partial models are still listed — below every ranked one, most
+        coverage first, marked with what they actually completed — rather than
+        dropped, because "not measured here" is information too.
+
         Both sides use competition ranks, so a tie can never fabricate a move."""
         bucket: dict[str, list[float]] = {}
         for tid in subset:
             for m, e in td[tid]["agg"].items():
                 if e["score"].get("status") == "scored":
                     bucket.setdefault(m, []).append(e["score"]["score"])
-        need = max(1, len(subset) // 2)
-        out = sorted(
-            ({"model": m, "mean": sum(v) / len(v), "n": len(v),
-              "global": means.get(m)} for m, v in bucket.items() if len(v) >= need),
-            key=lambda x: -x["mean"])
-        ranks = _competition_ranks([r["mean"] for r in out])
+        n_sub = len(subset) or 1
+        rows_ = [{"model": m, "mean": sum(v) / len(v), "n": len(v),
+                  "cover": f"{len(v)}/{n_sub}", "partial": len(v) < n_sub,
+                  "global": means.get(m)} for m, v in bucket.items()]
+        full = sorted((r for r in rows_ if not r["partial"]), key=lambda x: -x["mean"])
+        part = sorted((r for r in rows_ if r["partial"]),
+                      key=lambda x: (-x["n"], -x["mean"]))
+        ranks = _competition_ranks([r["mean"] for r in full])
         counts: dict[int, int] = {}
         for rk in ranks:
             counts[rk] = counts.get(rk, 0) + 1
-        for r, rk in zip(out, ranks):
+        for r, rk in zip(full, ranks):
             gi = grank.get(r["model"])
             r["rank"] = rk
             r["tied"] = counts[rk] > 1
             r["tied_with"] = counts[rk]
             r["delta"] = (gi - rk) if gi is not None else None
-        return out
+        for r in part:
+            r.update({"rank": None, "tied": False, "tied_with": 1, "delta": None})
+        return full + part
 
     hard_rank = _rank_on(hard)
     easy_rank = _rank_on(easy)
@@ -4761,6 +5060,12 @@ DISCRIMINATE_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="u
 .whosbest .tasks .mx-cells { border:0; height:auto; padding:3px 0; }
 .whosbest th.tasks { font-weight:600; white-space:nowrap; }
 .whosbest tr.fleetrow td { border-top:1px solid var(--rule); color:var(--muted); }
+/* partial rows sit below every ranked one; dim them so the break is visible —
+   same treatment the overview matrix gives an incomplete model */
+.whosbest tr.partialrow td { opacity:.62; }
+.whosbest .pcov { font-size:9.5px; padding:0 4px; border-radius:6px;
+  border:1px solid var(--warn); color:var(--warn); vertical-align:middle;
+  opacity:1; }
 </style></head><body>
 <div class="topbar">
   <div><h1>LLM Testing</h1>
@@ -4794,8 +5099,9 @@ ones.<br><span class="note">top cohort: {{ top_models }}<br>bottom cohort:
 {% if s.cats %}<th class="tasks">On each {{ label|lower }} task →
   <div class="mx-cells">{% for c in s.cats %}<div class="mx-grp" style="grid-template-columns:repeat({{ c.n }},15px);gap:3px"><span class="mx-clabel" title="{{ c.key }}" style="grid-column:1/-1">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div></th>{% endif %}</tr>
 {% for h in s.rank %}
-<tr><td class="num">{{ h.rank }}{% if h.tied %}<span class="note" style="font-size:10px"
-  title="{{ h.tied_with }} models share this exact score — they are tied, not ordered. Any apparent order between them is arbitrary; separate them on speed or cost instead.">=</span>{% endif %}</td><td class="nowrap">{{ h.model }}</td>
+<tr{% if h.partial %} class="partialrow" data-partial="1"{% endif %}><td class="num">{{ h.rank }}{% if h.tied %}<span class="note" style="font-size:10px"
+  title="{{ h.tied_with }} models share this exact score — they are tied, not ordered. Any apparent order between them is arbitrary; separate them on speed or cost instead.">=</span>{% endif %}</td><td class="nowrap">{{ h.model }}{% if h.partial %} <span class="pcov"
+  title="scored only {{ h.cover }} of this subset, so it is not ranked against models that completed all of it — the mean of a partial row is not comparable to a full one">{{ h.cover }}</span>{% endif %}</td>
 <td class="num" data-sort="{{ h.mean_v }}">{{ h.mean }}</td>
 <td class="num">{{ h.glob }}</td><td class="num">{{ h.move }}</td>
 {% if s.cats %}<td class="tasks"><div class="mx-cells">{% for g in h.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div></td>{% endif %}</tr>
@@ -4820,12 +5126,12 @@ rank: <span style="color:#3a3">▲climbs</span> = stronger on that subset than i
 overall score suggests, <span style="color:#c55">▼drops</span> = was riding the
 other end.</p>
 <div class="seg" id="sbseg">
-  <button type="button" data-sb="frontier" class="on">◆ Frontier ({{ frontier.n }})</button>
-  <button type="button" data-sb="hard">◆ Hard ({{ hard.n }})</button>
+  <button type="button" data-sb="hard" class="on">◆ Hard ({{ hard.n }})</button>
+  <button type="button" data-sb="frontier">◆ Frontier ({{ frontier.n }})</button>
   <button type="button" data-sb="easy">◆ Easy ({{ easy.n }})</button>
 </div>
-<div id="sb-frontier">{{ standings(frontier, 'Frontier') }}</div>
-<div id="sb-hard" style="display:none">{{ standings(hard, 'Hard') }}</div>
+<div id="sb-hard">{{ standings(hard, 'Hard') }}</div>
+<div id="sb-frontier" style="display:none">{{ standings(frontier, 'Frontier') }}</div>
 <div id="sb-easy" style="display:none">{{ standings(easy, 'Easy') }}</div>
 <script>
 document.querySelectorAll('#sbseg button').forEach(b =>
@@ -4959,9 +5265,11 @@ def build_discriminate_page(runs: list[dict], tdefs: dict,
                     grp.append({"cls": "na", "a": "0", "tip": f"{tid} · no data",
                                 "href": f"tasks/{tid}.html"})
             foot.append(grp)
-        rank = [{"rank": h.get("rank", i + 1),
+        rank = [{"rank": h.get("rank") or "—",
                  "tied": h.get("tied", False),
                  "tied_with": h.get("tied_with", 1),
+                 "partial": h.get("partial", False),
+                 "cover": h.get("cover", ""),
                  "model": _mlink(h["model"]),
                  "mean": f"{h['mean']:.3f}", "mean_v": f"{h['mean']:.4f}",
                  "glob": (f"{h['global']:.3f}" if h["global"] is not None else "—"),
@@ -5670,6 +5978,95 @@ def special_turns_summary() -> dict:
     return {"rows": rows, "models": model_rows, "tasks": task_rows}
 
 
+def special_budget_summary() -> dict:
+    """Read the token-budget probe results in special/ (tag budget@<N>).
+
+    The question: did a bigger budget let the model SPEAK, and if it spoke, was it
+    right? Those are two separate outcomes and the verdict keeps them apart —
+    "spoke, still wrong" is a capability failure the original 0.0 was accidentally
+    right about; "still mute" means the model never converges however much room it
+    gets; "converted" means the published 0.0 measured our ceiling, not the model.
+    """
+    import re
+    import statistics
+    from . import assess
+    base = config.SPECIAL_DIR
+    thr = assess.load_cfg().get("pass_threshold", 0.8)
+    run_budget: dict = {}
+    if base.is_dir():
+        for rj in base.glob("*/run.json"):
+            m = re.search(r"budget@(\d+)", read_json(rj, {}).get("tag") or "")
+            if m:
+                run_budget[rj.parent.name] = int(m.group(1))
+    cells: dict = {}
+    if base.is_dir():
+        for mfile in base.glob("*/*/*/metrics.json"):
+            run = mfile.parents[2].name
+            if run not in run_budget:
+                continue
+            model, task = mfile.parents[1].name, mfile.parent.name
+            c = cells.setdefault((model, task), {
+                "model": model, "task": task, "trials": 0, "budgets": set(),
+                "scores": [], "spoke": 0, "visible": []})
+            d = read_json(mfile, {})
+            c["budgets"].add(run_budget[run])
+            c["trials"] += 1
+            atts = d.get("attempts") or []
+            vis = max(((a.get("tokens_out") or 0) - (a.get("reasoning_tokens") or 0)
+                       for a in atts), default=0)
+            c["visible"].append(vis)
+            from .runner import BUDGET_MUTE_TOKENS
+            if vis > BUDGET_MUTE_TOKENS:
+                c["spoke"] += 1
+            sc = read_json(mfile.parent / "score.json", {})
+            if sc.get("status") == "scored" and sc.get("score") is not None:
+                c["scores"].append(sc["score"])
+
+    def _span(xs):
+        xs = sorted(xs)
+        return "—" if not xs else (f"{xs[0]:,}" if len(xs) == 1
+                                  else f"{xs[0]:,}–{xs[-1]:,}")
+
+    rows, models = [], {}
+    for c in cells.values():
+        savg = (round(sum(c["scores"]) / len(c["scores"]), 3)
+                if c["scores"] else None)
+        spoke = c["spoke"] > 0
+        verdict = ("still mute" if not spoke
+                   else "converted" if savg is not None and savg >= thr
+                   else "spoke, partial" if savg else "spoke, still wrong")
+        rows.append({
+            "model": c["model"], "task": c["task"], "trials": c["trials"],
+            "budget": _span(c["budgets"]),
+            "visible_max": max(c["visible"]) if c["visible"] else None,
+            "visible_med": (round(statistics.median(c["visible"]))
+                            if c["visible"] else None),
+            "spoke": c["spoke"], "score_avg": savg, "verdict": verdict})
+        mm = models.setdefault(c["model"], {"model": c["model"], "probed": 0,
+                                            "spoke": 0, "converted": 0,
+                                            "scores": []})
+        mm["probed"] += 1
+        if spoke:
+            mm["spoke"] += 1
+        if savg is not None:
+            mm["scores"].append(savg)
+            if savg >= thr:
+                mm["converted"] += 1
+    rows.sort(key=lambda r: (r["model"], r["task"]))
+    model_rows = [{
+        "model": mm["model"], "probed": mm["probed"], "spoke": mm["spoke"],
+        "converted": mm["converted"],
+        "score_avg": (round(sum(mm["scores"]) / len(mm["scores"]), 3)
+                      if mm["scores"] else None),
+        "verdict": ("budget-limited" if mm["converted"] == mm["probed"]
+                    else "partly budget-limited" if mm["converted"]
+                    else "speaks but wrong" if mm["spoke"]
+                    else "never converges")}
+        for mm in models.values()]
+    model_rows.sort(key=lambda r: (-r["converted"], -r["spoke"], r["model"]))
+    return {"rows": rows, "models": model_rows}
+
+
 SPECIAL_STATIC_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Special · LLM Testing</title><style>{{ css }}
@@ -5881,9 +6278,26 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
         seen_models = sorted({res["model"] for r in runs
                               for res in r["results"]} - hidden)
         versions = load_versions() if dataset_key == "live" else None
+        mirror_by_model: dict[str, dict] = {}
+        if dataset_key == "live":
+            try:
+                from .mirror import contamination_delta
+                mirror_by_model = {r["model"]: r
+                                   for r in contamination_delta(_tdata)}
+            except Exception:
+                mirror_by_model = {}
+        confirmed: dict[str, dict] = {}
+        if dataset_key == "live":
+            try:
+                from .lmstudio import confirm_sampling
+                confirmed = confirm_sampling(runs_dir)
+            except Exception:
+                confirmed = {}
         for m in seen_models:
             _w(out_models / f"{_slug_name(m)}.html",
-               build_model_report(m, runs, tdefs, dataset_label, versions))
+               build_model_report(m, runs, tdefs, dataset_label, versions,
+                                  _mirror_detail_row(mirror_by_model.get(m)),
+                                  _confirmed_row(confirmed.get(m))))
         _w(out_dir / "info.html",
            build_info_page(runs, tdefs, dataset_label, dataset_key))
         _w(out_dir / "discriminate.html",

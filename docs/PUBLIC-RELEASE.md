@@ -18,6 +18,8 @@ harness, not a results website.
   rescore, discover, interfaces, and the read-only `viewer`.
 - **`tasks/`, `tasks-refs/`** — the test definitions and their reference
   solutions. This is the methodology, in the open.
+- **`harness/mirror.py`** — how contamination is measured (see below). The
+  *method* is public; the held-out instances are not.
 - **`tests/`** — the harness's own test suite.
 - **`runs/`, `archive/`** — the actual run data. The receipts. A leaderboard
   backed by inspectable transcripts is the strongest trust signal we have.
@@ -38,8 +40,69 @@ Never in the public repo:
 - **`studio/`** — the content pipeline: channel strategy, drafts, and (later)
   OAuth tokens.
 - **Secrets & operator state**: `.env`, `interfaces.yaml`, `models/` (your
-  registered models, some carry endpoint config), `watch/`, `scouts/`.
+  registered models, some carry endpoint config), `watch/`, `scouts/`,
+  `settings.local.json`.
+- **`private/`** — the held-out mirror: the re-seeded task variants and their run
+  data. Publishing these would defeat the only thing they exist to do.
 - **Strategy**: `docs/CONTENT-PLAN.md`.
+
+## Contamination — the held-out mirror
+
+Publishing the suite publishes the answers. Not in a key file: **a correct model
+reply recorded in `runs/` *is* the answer key**, and `runs/` is exactly what we
+publish so the numbers can be audited. So every public task decays once it's
+indexed — a later model can score well by having seen the instance rather than by
+having the skill. Withholding the tasks would fix that and destroy the
+auditability that makes the data worth anything.
+
+So the public set stays fully open, and a **private variant of the same task** is
+held back: same generator, re-run at a **different seed**, never published. A model
+that scores markedly higher on the published instance than on the unpublished one
+has memorised *that instance*.
+
+**What ships and what doesn't:**
+
+- **Public**: `harness/mirror.py` (the whole method — how variants are built,
+  verified, and compared), and the *result* — the per-model public-vs-private table
+  in the info page's Contamination section plus a *Held-out mirror* row on each
+  model page.
+- **Private**: `private/tasks/` (the variants), `private/runs/` (their results),
+  and **the seed offset**. The offset is not a constant anywhere in the shipped
+  code — `config.mirror_seed_offset()` reads it from `MIRROR_SEED_OFFSET` or
+  `settings.local.json`, and mints one per operator if absent. It has to be secret
+  because `tasks-refs/` *is* published and the generators are deterministic in
+  their seed: a published offset is a complete recipe for regenerating the held-out
+  set. Publish the method, keep the key.
+
+**Honest limits, stated on the site as well as here:**
+
+- **Coverage is partial.** Only tasks whose content comes from a seeded generator
+  can be re-rolled. Hand-written app specs, agent workspaces and fixed prompts
+  cannot, so the check is *silent* about them — the info page states the fraction
+  rather than implying whole-suite coverage.
+- **Private results never enter the public aggregate.** A variant carries the
+  *same task id* as its public counterpart, so a private result in `runs/` would be
+  indistinguishable from a public one and would average a held-out score into the
+  published cell. Two trees, permanently; every aggregation path reads `runs/`
+  only. The published score is unaffected by whether the mirror was ever run.
+- **Re-seeding is not difficulty-neutral.** A re-rolled instance can be genuinely
+  easier or harder, so a small delta is instance noise, not evidence. The verdict
+  is therefore sized against the number of paired tasks — one task differing moves
+  the mean by `1/n` — instead of a fixed cutoff.
+- **It detects memorisation of the published instance, nothing more.** A model that
+  genuinely learned the skill scores the same on both, and should. That's learning,
+  not cheating, and the delta is built to read it that way.
+- **A held-out set is not externally verifiable**, by construction. You can audit
+  how it is measured; you cannot re-run it. That is the cost of the only design
+  that keeps the public set open.
+
+**A variant only counts if it grades itself.** The build refuses any variant whose
+answer key the generator didn't rewrite — or rewrote to identical bytes — and
+requires a correct submission to score 1.0 and an empty one 0.0 before admitting
+it. This is the same gate new public tasks pass, and it exists because it caught a
+real failure: a generator that wrote a fresh prompt but left the answer key from
+the published instance, which would have scored every model 0 and read as total
+contamination.
 
 ## The one rule, enforced in code
 

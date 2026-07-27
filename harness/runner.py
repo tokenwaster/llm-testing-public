@@ -39,7 +39,8 @@ def active_run() -> str | None:
     """
     from .util import read_json
     for base in (config.RUNS_DIR, getattr(config, "SCOUTS_DIR", None),
-                 getattr(config, "SPECIAL_DIR", None)):
+                 getattr(config, "SPECIAL_DIR", None),
+                 getattr(config, "PRIVATE_RUNS_DIR", None)):
         if not base or not base.is_dir():
             continue
         for run_dir in sorted(p for p in base.iterdir() if p.is_dir()):
@@ -137,6 +138,54 @@ def measured_window_need(model: str, task: str) -> float | None:
     return _WINDOW_NEED.get((model, task))
 
 
+def sampling_drift(models=None) -> dict[str, dict]:
+    """{model: {mismatch, mismatch_tasks, unverified, current, total}} — which of
+    a model's CELLS were measured under sampling that no longer applies.
+
+    Per CELL, not per run: a partial re-run must not clear the flag for the tasks
+    it did not touch. Each cell records the exact `sampling_used` that produced
+    it, so this compares that against what the model would send for that task's
+    category today. Re-running a task overwrites its record, so the count falls
+    on its own as work is done — nothing to reset by hand.
+
+    mismatch   = recorded, and different -> definitely stale, re-run these
+    unverified = no record (measured before it was tracked) -> cannot be proven
+    current    = recorded and identical
+    """
+    from .registry import load_models
+    from .tasks import load_tasks
+    from .util import read_json
+    models = models or load_models(include_disabled=True)
+    tasks = {t.id: t for t in load_tasks()}
+    newest: dict[tuple, dict] = {}
+    if config.RUNS_DIR.is_dir():
+        for mfile in sorted(config.RUNS_DIR.glob("*/*/*/metrics.json")):
+            key = (mfile.parents[1].name, mfile.parent.name)
+            if key[1] in tasks:
+                newest[key] = read_json(mfile, {})
+    out = {}
+    for m in models:
+        mismatch, unverified, current = [], 0, 0
+        for tid, task in tasks.items():
+            d = newest.get((m.name, tid))
+            if d is None:
+                continue
+            used = d.get("sampling_used")
+            if used is None:
+                unverified += 1
+                continue
+            want = m.sampling_payload(task.category)
+            if used != want:
+                mismatch.append(tid)
+            else:
+                current += 1
+        out[m.name] = {"mismatch": len(mismatch),
+                       "mismatch_tasks": sorted(mismatch),
+                       "unverified": unverified, "current": current,
+                       "total": len(mismatch) + unverified + current}
+    return out
+
+
 def turns_matrix() -> dict[str, list[str]]:
     """{model: [agentic task ids]} where the model FAILED by exhausting the turn
     budget — status=="max_turns" AND it did not reach a passing score. Feeds the
@@ -164,6 +213,98 @@ def turns_matrix() -> dict[str, list[str]]:
             continue
         out.setdefault(mfile.parents[1].name, set()).add(mfile.parent.name)
     return {m: sorted(t) for m, t in sorted(out.items())}
+
+
+BUDGET_MUTE_TOKENS = 64
+BUDGET_CEILING_FRAC = 0.9
+
+
+def budget_matrix() -> dict[str, list[str]]:
+    """{model: [task ids]} where the TOKEN budget, not the model, ended the attempt.
+
+    A cell qualifies when it ran to the ceiling (error_kind 'runaway') and emitted
+    essentially no visible answer — `tokens_out - reasoning_tokens` at or below
+    BUDGET_MUTE_TOKENS. That is the case a bigger budget might convert: the whole
+    allowance went into the think channel and the model never reached its answer.
+
+    Measured on agents-a1: six consecutive attempts on ctx-013 spent 32,766-32,768
+    of 32,768 tokens reasoning and emitted 1-2 tokens of answer. Scoring that 0.0
+    records "cannot aggregate a ledger" when what was observed is "was not given
+    room to say so".
+
+    Excluded on purpose: a runaway that DID emit a substantial answer (a real
+    repetition loop, or a genuinely clipped reply) — more budget feeds the loop
+    rather than fixing it. The third-party analogue is _window_limited (time) and
+    turns_matrix (steps); budget, time and turns are three different remedies and
+    a cell must qualify for the one it actually needs.
+
+    Also excluded: a runaway with NO token accounting. Older runs record
+    tokens_out/reasoning_tokens as null, and treating a missing count as zero
+    visible tokens classified 20 cells across 9 models as budget-silenced on no
+    evidence at all. Unknown is not the same as muted, so it does not qualify —
+    see _visible_answer.
+    """
+    out: dict[str, set] = {}
+    if not config.RUNS_DIR.is_dir():
+        return {}
+    caps = _model_caps()
+    for mfile in config.RUNS_DIR.glob("*/*/*/metrics.json"):
+        vis = _visible_answer(mfile, caps.get(mfile.parents[1].name))
+        if vis is not None and vis <= BUDGET_MUTE_TOKENS:
+            out.setdefault(mfile.parents[1].name, set()).add(mfile.parent.name)
+    return {m: sorted(t) for m, t in sorted(out.items())}
+
+
+def _model_caps() -> dict[str, int]:
+    from .registry import load_models
+    try:
+        return {m.name: m.max_tokens for m in load_models(include_disabled=True)}
+    except Exception:
+        return {}
+
+
+def _visible_answer(mfile, cap: int | None = None) -> int | None:
+    """Most visible (non-reasoning) answer tokens any RUNAWAY attempt of this cell
+    produced, or None when the cell did not run away or kept no token accounting.
+
+    None means "cannot tell", and must never collapse to 0 — that is the whole
+    difference between a measured mute and an unrecorded one.
+    """
+    from .util import read_json
+    d = read_json(mfile, {})
+    best = None
+    for a in (d.get("attempts") or []):
+        if a.get("error_kind") != "runaway":
+            continue
+        out, rz = a.get("tokens_out"), a.get("reasoning_tokens")
+        if out is None or rz is None or out <= 0:
+            continue
+        if cap and out < cap * BUDGET_CEILING_FRAC:
+            continue
+        v = out - rz
+        best = v if best is None else max(best, v)
+    return best
+
+
+def budget_reasons() -> dict[str, dict[str, str]]:
+    """Per cell, how little answer it managed — so the page can show WHY each cell
+    is in the probe set rather than asserting it."""
+    from .util import read_json
+    out: dict[str, dict[str, str]] = {}
+    matrix = budget_matrix()
+    if not matrix:
+        return {}
+    for mfile in config.RUNS_DIR.glob("*/*/*/metrics.json"):
+        model, task = mfile.parents[1].name, mfile.parent.name
+        if task not in matrix.get(model, []):
+            continue
+        vis = _visible_answer(mfile)
+        if vis is None:
+            continue
+        d = read_json(mfile, {})
+        cap = max((a.get("tokens_out") or 0) for a in (d.get("attempts") or []))
+        out.setdefault(model, {})[task] = f"{vis} of {cap:,} tokens went to output"
+    return out
 
 
 class UsageLimitReached(Exception):
@@ -387,6 +528,7 @@ class TaskRunner:
 
 
     def run_task(self, task: Task) -> dict:
+        self.adapter.task_category = task.category
         task_dir = self._task_dir(task)
         workspace = task_dir / "workspace"
         if workspace.exists():
@@ -450,6 +592,8 @@ class TaskRunner:
             "tokens_in": tokens_in, "tokens_out": tokens_out,
             "cache_read_tokens": cache_read, "cache_write_tokens": cache_write,
             "reasoning_tokens": reasoning_tokens,
+            "sampling_used": self.model.sampling_payload(task.category),
+            "sampling_profile": self.model.resolved_sampling(task.category)[1],
             "cost_usd": cost_usd, "cost_source": cost_source,
             "served_by": served_by or None,
             "gen_tokens_per_sec": (round(tokens_out / (gen_ms / 1000), 2)
@@ -980,6 +1124,12 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
     """
     import threading
 
+    from .validate import validate_models
+    problems = validate_models(models)
+    if problems:
+        raise ValueError("model configuration problems — fix these before "
+                         "running:\n  " + "\n  ".join(problems))
+
     busy = None if force else active_run()
     if busy:
         raise RunInProgress(
@@ -997,6 +1147,12 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
         "env": env_snapshot(),
         "mode": "parallel" if parallel else "serial",
         "models": [m.name for m in models],
+        "model_sampling": {
+            m.name: {"max_tokens": m.max_tokens, "temperature": m.temperature,
+                     "sampling": dict(m.sampling or {}),
+                     "sampling_profiles": {k: dict(v) for k, v in
+                                           (m.sampling_profiles or {}).items()}}
+            for m in models},
         "tasks": [{"id": t.id, "hash": t.content_hash, "tier": t.tier,
                    "category": t.category} for t in tasks],
         "finished": None,

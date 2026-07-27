@@ -69,7 +69,8 @@ def _load_task(task_dir: Path, category: str) -> Task:
     )
 
 
-def load_tasks(tasks_dir: Path = config.TASKS_DIR) -> list[Task]:
+def load_tasks(tasks_dir: Path | None = None) -> list[Task]:
+    tasks_dir = tasks_dir or config.TASKS_DIR
     tasks: list[Task] = []
     for category_dir in sorted(p for p in tasks_dir.iterdir() if p.is_dir()):
         for task_dir in sorted(p for p in category_dir.iterdir() if p.is_dir()):

@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Billiards Simulation</title>
+<style>
+    body { margin:0; background:#2c2c2c; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; font-family:sans-serif; color:white; overflow:hidden; }
+    #game-container { position:relative; border:8px solid #3e2723; box-shadow: 0 0 20px rgba(0,0,0,0.5); border-radius:4px; display:flex; flex-direction:column; align-items:center;}
+    canvas { display:block; background-color:#1a6b2c; cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='6' fill='%23f5f5f5'/%3E%3Cpath d='M7,18 L9.5,15.5 M17,6 C17,4.3 18.3,3 20,3 S23,4.3 23,6 L22,6 C22,5.4 21.6,5 21,5 S20,5.4 20,6' stroke='black' fill='none'/%3E%3C/svg%3E"), auto; }
+    #ui { position:absolute; top:10px; left:10px; pointer-events:none; text-shadow:1px 1px 2px black; z-index:10;}
+    button { background:#5d4037; color:white; border:none; padding:8px 16px; font-size:14px; cursor:pointer; margin-top:10px; pointer-events:auto; box-shadow: inset -2px -2px rgba(0,0,0,0.4); }
+    button:hover { background:#795548; }
+</style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="c" width="1200" height="600"></canvas>
+    <div id="ui">
+        <h3>Billiards Physics Demo</h3>
+        <p><strong>Aim & Shoot:</strong> Click on the white cue ball. Drag BACK to set power/direction (like a slingshot). Release to shoot.</p>
+        <button onclick="sim.rack()">Re-Rack / Reset</button>
+    </div>
+</div>
+
+<script>
+// --- Constants & Configuration ---
+const W = 1200; // Playfield Width
+const H = 600;  // Playfield Height
+const R = 14;   // Ball Radius
+const POCKET_RADIUS = 18;
+const FRICTION_COEFFICIENT = 0.15; // Decays speed per second (exponential)
+
+// --- Pockets Definition ---
+// Corners + Middle of Long Rails (Top/Bottom in this landscape view, as W > H).
+const POCKET_SITES = [
+    {x: R+20, y: R+20},           // TL Corner Pocket Center
+    {x: W-R-20, y: R+20},         // TR Corner Pocket Center
+    {x: W-R-20, y: H-R-20},       // BR Corner Pocket Center (Wait, Bottom Right? X=W-R)
+    {x: R+20, y: H-R-20},         // BL Corner Pocket Center
+    
+    {x: W/2, y: R+15},            // Mid Long Rail (Top edge is Y=0. Inset by R approx) -> Actually Top Edge length=W, mid X=W/2
+    {x: W/2, y: H-R-15}           // Mid Long Rail (Bottom edge is Y=H). 
+];
+
+// Note on orientation: If table runs horizontally with player facing "lengthwise", the side walls are Top & Bottom edges. These are LONG RAILS. Pockets should be at corners + midpoints of these sides.
+// My definition matches this (Top/Bottom mids and Corners).
+
+let pocketPoints = POCKET_SITES; // Reference for collision logic check
+
+// --- Global Simulation Object ---
+window.sim = {
+    W: W, H: H, R: R,
+    
+    _balls: [], // Internal state
+    
+    reset(balls) {
+        if (!balls || !Array.isArray(balls)) balls = []; 
+        this._balls = JSON.parse(JSON.stringify(balls));
+        
+        // Ensure indices are consistent. We rely on array order for determinism and `state()`.
+        return;
+    },
+
+    shoot(vx, vy) {
+        let cueBall = this.getBallByIndex(this._cueIdx);
+        if (cueBall) {
+            cueBall.vx = vx;
+            cueBall.vy = vy;
+            // Reset aiming for UI visual consistency if needed.
+            window.sim.gameState = 'idle'; 
+        }
+    },
+
+    pause() { this.isPaused = true; },
+    resume() { this.isPaused = false; },
+
+    rack: function() {
+        let cueBall = { x: W/2, y: H - 150, vx: 0, vy: 0, cue: true };
+        // Create a simple cluster of ~6 balls centered near table midpoint for gameplay ease.
+        const cx = Math.floor(W/2);
+        const cy = Math.floor(H*3/8) + R; 
+        
+        let objectBalls = [];
+        // Simple rack positions (row by row manually defined to avoid loops complexity and ensure determinism).
+        // Row 1: Center top of rack.
+        objectBalls.push({x: cx, y: cy - 4*R});
+        
+        // Row 2: Two balls below.
+        objectBalls.push({x: cx-30, y: cy - R}, {x: cx+30, y: cy - R});
+        
+        // Row 3: Three balls.
+        objectBalls.push({x: cx-60, y: cy + 2*R}, 
+                         {x: cx,     y: cy + 1*R}, // center (offset slightly)
+                         {x: cx+60, y: cy + 2*R});
+
+        this._balls = [cueBall, ...objectBalls];
+        
+        // Mark indices for UI convenience.
+        let cueIndex = -1;
+        this._balls.forEach((b,i)=>{ if(b.cue) cueIndex=i; });
+        this._cueIdx = cueIndex;
+
+        window.sim.gameState = 'idle';
+    },
+
+    getBallByIndex: function(idx) { return this._balls[idx]; },
+    
+    _stepCount: 0,
+    isPaused: false,
+    
+    // This method advances physics by dt seconds then redraws.
+    step(dt) {
+        if (this.isPaused || !document.hidden) { 
+            this.stepLoop(dt); 
+        }
+    },
+
+    stepLoop(dt) {
+        this._stepCount++;
+        
+        // Use sub-steps for stability and determinism regardless of dt jumps.
+        const SUB_STEPS = 8;
+        const subDt = dt / SUB_STEPS;
+        
+        let isPottingActive = false;
+
+        for(let s=0; s<SUB_STEPS; s++) {
+            this._physicsStep(subDt);
+            
+            // Check pockets after movement in each substep (or before collision resolution). 
+            // Simpler: After position update, check potted status.
+            isPottingActive = false;
+            for(let b of this._balls) {
+                if(b.potted === true || !b.cue && false) continue; // Potted balls frozen or ignored? We skip them in movement but they remain in array.
+
+                let pot = false;
+                for(let p of pocketPoints) {
+                    if(distance(b.x,b.y,p.x,p.y) < POCKET_RADIUS + 5) { 
+                        pot = true; break; 
+                    }
+                }
+                
+                // Mark as potted if not already. Once potted, they are removed from simulation (frozen).
+                if(pot && !b.potted) b.potted = true;
+
+            }
+        }
+        
+        this.render();
+    },
+
+    _physicsStep(dt) {
+        let balls = this._balls;
+        
+        // 1. Apply Friction to moving non-potted balls.
+        for(let b of balls) {
+            if(b.potted === true || !b.cue && false) continue; 
+            const factor = Math.exp(-FRICTION_COEFFICIENT * dt);
+            b.vx *= factor;
+            b.vy *= factor;
+
+            // Stop very slow moving balls to avoid micro-jitter.
+            if(Math.abs(b.vx) < 0.15 && Math.abs(b.vy) < 0.15) {
+                b.vx = 0; b.vy = 0;
+            }
+        }
+
+        // 2. Move Positions (Euler integration). Handle boundary constraints after move? No, usually before to prevent tunneling? 
+        // We will integrate then clamp within bounds in a separate phase or inline here with correction.
+        
+        for(let b of balls) {
+            if(b.potted === true || !b.cue && false) continue; 
+
+            let nx = b.x + b.vx * dt;
+            let ny = b.y + b.vy * dt;
+
+            // Boundary Constraint (Cushions). Reflect velocity.
+            let bouncedX = false, bouncedY = false;
+            
+            if(nx < R) { 
+                nx = R; 
+                b.vx *= -0.95; // Dampen on wall bounce slightly to dissipate energy safely. 
+                bouncedX = true;
+            } else if (nx > W-R) { 
+                nx = W-R; 
+                b.vx *= -0.95;
+                bouncedX = true;
+            }
+
+            if(ny < R) { 
+                ny = R; 
+                b.vy *= -0.95; 
+                bouncedY = true;
+            } else if (ny > H-R) { 
+                ny = H-R; 
+                b.vy *= -0.95; 
+                bouncedY = true;
+            }
+
+            // Only update position if not hitting boundary to avoid "sliding" along walls due to sub-step errors? 
+            // Actually we clamp nx/ny then assign.
+            
+            // Collision with other balls happens after movement but before next step's velocity application?
+            b.x = nx;
+            b.y = ny;
+
+        }
+
+        // 3. Resolve Ball-to-Ball Collisions iteratively (for stability and penetration correction).
+        const ITERATIONS = 4;
+        for(let k=0; k<ITERATIONS; k++) {
+            this._resolveCollisions();
+        }
+    },
+
+    _resolveCollisions() {
+        let balls = this._balls;
+        let len = balls.length;
+        
+        // Iterate pairs i < j. Determinism relies on order of iteration (index based).
+        for(let i=0; i<len-1; i++) {
+            let b1 = balls[i];
+            if(b1.potted === true || !b1.cue && false) continue;
+
+            for(let j=i+1; j<len; j++) {
+                let b2 = balls[j];
+                if(b2.potted === true || !b2.cue && false) continue;
+
+                let dx = b2.x - b1.x;
+                let dy = b2.y - b1.y;
+                let distSq = dx*dx + dy*dy;
+
+                // Check overlap
+                if (distSq > 4*R*R) continue; 
+
+                let dist = Math.sqrt(distSq);
+                // Normalize contact normal. If centers coincide, avoid division by zero by setting normal to random or skip? Dist < epsilon implies exact stack -> ignore for simplicity as unlikely in this sim.
+                let nx = (dist === 0) ? 1 : dx / dist;
+                let ny = (dist === 0) ? 0 : dy / dist;
+
+                // Position Correction: Push apart to avoid sticking (overlap).
+                if (dist < 2*R) {
+                    let overlap = 2*R - dist;
+                    b1.x -= nx * overlap * 0.5;
+                    b1.y -= ny * overlap * 0.5;
+                    b2.x += nx * overlap * 0.5;
+                    b2.y += ny * overlap * 0.5;
+                }
+
+                // Velocity Impulse (Elastic-ish Collision, equal mass).
+                let rvx = b2.vx - b1.vx;
+                let rvy = b2.vy - b1.vy;
+                
+                let dotProduct = rvx*nx + rvy*ny;
+                
+                if (dotProduct > 0) continue; // Moving apart, no impulse needed.
+
+                const restitution = 0.98; // Slight loss on collision for realism/stability.
+                let jVal = -(1 + restitution) * dotProduct / (1/b1.mass + 1/b2.mass); 
+                
+                b1.vx += nx * jVal;
+                b1.vy += ny * jVal;
+                b2.vx -= nx * jVal;
+                b2.vy -= ny * jVal;
+
+            }
+        }
+    },
+
+    state() {
+        let ret = [];
+        for(let i=0; i<this._balls.length; i++) {
+            let b = this._balls[i];
+            // If ball is currently potted according to check, return that flag. 
+            // Also re-check potting status here? No state should reflect current simulation snapshot (including positions). Potting might be checked in step or independently.
+            // We'll compute potting status based on position at this moment for consistency with physics world state (maybe slightly out of sync if just potted, but acceptable).
+            
+            let isPot = false;
+            for(let p of pocketPoints) {
+                if(distance(b.x,b.y,p.x,p.y) < POCKET_RADIUS + 5) { 
+                    isPot = true; break; 
+                }
+            }
+
+            // Return snapshot: order preserved. Include 'potted' boolean and other attributes.
+            ret.push({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, potted: (b.potted || isPot), cue: b.cue });
+        }
+        return ret;
+    },
+
+    _render() {
+        let ctx = document.getElementById('c').getContext('2d');
+        
+        // Background Felt
+        ctx.fillStyle = "#1a6b2c";
+        ctx.fillRect(0, 0, W, H);
+
+        // Rails (Border)
+        ctx.strokeStyle = "#3e2723";
+        ctx.lineWidth = 8;
+        ctx.strokeRect(4, 4, W-8, H-8);
+
+        // Pockets Visuals (Black circles on felt)
+        for(let p of pocketPoints) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, POCKET_RADIUS + 10, 0, Math.PI*2);
+            ctx.fillStyle = "#0a291c"; // Dark void color
+            ctx.fill();
+            
+            // Optional: White rim around pocket (classic look)
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, POCKET_RADIUS + 5, 0, Math.PI*2);
+            ctx.strokeStyle = "rgba(255,255,255,0.3)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+
+        // Balls Visuals
+        for(let b of this._balls) {
+            if(b.potted === true && false) continue; // Optional: don't draw potted? We'll draw all to show state. 
+            
+            let cx = b.x;
+            let cy = b.y;
+            
+            ctx.beginPath();
+            ctx.arc(cx, cy, R, 0, Math.PI*2);
+
+            if(b.cue) {
+                // Cue Ball: White with a small center dot? Or just white.
+                ctx.fillStyle = "#f5f5f5";
+                // Add shadow for depth
+                ctx.shadowColor = "rgba(0,0,0,0.4)";
+                ctx.shadowBlur = 3;
+            } else {
+                // Object Balls: Various colors (deterministic based on index or just default). 
+                let cidx = this._balls.indexOf(b); // Rough way to assign color if needed.
+                // For simplicity in code without complex data, use consistent patterns? Or random distinct colors per ball stored initially?
+                // Let's just draw solid circles of varying colors (e.g., yellow, red, blue) based on index modulo 5 for visual variety.
+                const colors = ["#fdd835", "#d50000", "#1e88e5", "#42a5f5", "#ef5350"]; 
+                ctx.fillStyle = colors[cidx % colors.length];
+            }
+
+            ctx.shadowBlur = 0; // Reset shadow for others? Or keep.
+            if(b.cue) {
+                 ctx.fill();
+                 ctx.stroke();
+            } else {
+                 ctx.fill();
+                 ctx.strokeStyle = "rgba(0,0,0,0.2)";
+                 ctx.lineWidth = 1;
+                 ctx.stroke();
+            }
+
+            // Stripe for cue ball? Not necessary but nice. 
+        }
+
+        // Aim Line Visual (When aiming)
+        if(window.sim && window.sim.gameState === 'aiming' && !window.sim.isPaused) {
+            let b = this._balls.find(ball => ball.cue);
+            if(b) {
+                // Draw line from cue ball to mouse pos? No, aim line points in direction of shot (opposite drag).
+                // Wait UI logic: Mouse Down on Ball -> Drag creates vector. If dragging BACK -> Aim opposite vector.
+                // We need access to current drag vector for visual. Let's store it in sim variable during draw loop or update state before render? 
+                // Since we call step(dt) then redraw, and aim line is part of UI visuals.
+                if(sim.lastMousePos && sim.startingBallPos) {
+                    let dx = sim.lastMousePos.x - b.x;
+                    let dy = sim.lastMousePos.y - b.y;
+                    
+                    // Draw dashed line in direction opposite to drag (like pulling string back).
+                    let angle = Math.atan2(dy, dx);
+                    let len = Math.min(150, Math.sqrt(dx*dx+dy*dy)); 
+                    let ex = b.x + Math.cos(angle) * len;
+                    let ey = b.y + Math.sin(angle) * len;
+
+                    // Also show aim vector direction (the line where ball will go): It points opposite to drag.
+                    ctx.beginPath();
+                    ctx.moveTo(b.x, b.y);
+                    ctx.lineTo(ex, ey);
+                    ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+                    ctx.lineWidth = 3;
+                    ctx.setLineDash([10, 5]); // Dashed line
+                    ctx.stroke();
+
+                    // Draw power indicator (circle around ball?) Optional.
+                }
+            }
+        }
+    },
+
+    render: function() { this._render(); }
+};
+
+// --- Game Loop & Interaction Logic ---
+
+let canvas = document.getElementById('c');
+const STATE = window.sim;
+STATE.isPaused = false;
+
+// Global variables for UI interaction state.
+let isAiming = false;
+let mouseDownPos = null; // {x,y} where mouse down on ball occurred (relative to screen)
+let currentDragVec = null; // Current drag vector from ball center
+
+// Mouse Event Handlers attached to canvas
+canvas.addEventListener('mousedown', e => {
+    const rect = canvas.getBoundingClientRect();
+    let mx = e.clientX - rect.left;
+    let my = e.clientY - rect.top;
+    
+    // Check if clicked near Cue Ball (radius + tolerance)
+    let cueBall = STATE._balls.find(b => b.cue);
+    if(cueBall && distance(mx,my,cueBall.x,cueBall.y) < R * 3.5) {
+        isAiming = true;
+        mouseDownPos = {x: mx, y: my};
+        currentDragVec = null;
+        
+        // Visual feedback for aim start? Maybe just wait.
+    } else if (!isAiming) {
+        // Clicked elsewhere -> maybe shoot or do nothing. We'll ignore clicks not on ball.
+    }
+});
+
+canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    let mx = e.clientX - rect.left;
+    let my = e.clientY - rect.top;
+    
+    if(isAiming) {
+        // Calculate vector from CueBall to Mouse (current pos). 
+        // If we want "drag back" control: Vector points towards mouse. Aim direction is OPPOSITE of this.
+        let cueBall = STATE._balls.find(b => b.cue);
+        if(cueBall) {
+            currentDragVec = { x: mx - cueBall.x, y: my - cueBall.y };
+        } else {
+            isAiming = false; // Should not happen.
+        }
+    }
+});
+
+canvas.addEventListener('mouseup', e => {
+    if(isAiming && currentDragVec) {
+        let dx = currentDragVec.x;
+        let dy = currentDragVec.y;
+        
+        // Calculate shot power and direction (opposite to drag).
+        // Max power capped. Drag length determines magnitude.
+        const MAX_POWER = 300; // pixels/sec approx
+        
+        let mag = Math.sqrt(dx*dx + dy*dy);
+        if(mag > MAX_POWER) {
+            dx *= (MAX_POWER / mag);
+            dy *= (MAX_POWER / mag);
+            mag = MAX_POWER;
+        }
+
+        // Shot direction is opposite to drag vector.
+        let vx = -dx * 0.8; // Scaling factor to convert pixel-drag to velocity magnitude roughly. 
+        let vy = -dy * 0.8;
+
+        STATE.shoot(vx, vy);
+        
+        // Reset aiming state for visual UI update in render loop (sim.lastMousePos is not needed if we store currentDragVec? Wait my _render uses sim variables directly).
+        window.sim.gameState = 'idle';
+    } else {
+        isAiming = false;
+    }
+});
+
+// --- Start Game Loop ---
+
+let lastTime = 0;
+function loop(timestamp) {
+    if(!lastTime) lastTime = timestamp;
+    const dt = (timestamp - lastTime) / 1000; // seconds since last frame
+    
+    STATE.step(dt); // This calls physics then render() internally for our game.
+
+    // Update UI state variables needed for aiming line drawing in _render? 
+    if(isAiming && mouseDownPos) {
+         let cueBall = STATE._balls.find(b => b.cue);
+         if(cueBall) window.sim.lastMousePos = currentDragVec; // Store vector relative to ball pos. Actually we can store absolute or delta. Let's store in a way _render can use. 
+         // For simplicity, I'll modify render logic: it draws aim line by accessing STATE variables? Better to keep simulation clean of UI state except flags.
+         // My current code uses `sim.lastMousePos` inside `_render`. That is acceptable coupling for this small app.
+    }
+
+    lastTime = timestamp;
+    
+    if(!STATE.isPaused) {
+        requestAnimationFrame(loop);
+    } else {
+        loop(timestamp + 0); // Keep running but step paused? Or stop calling? The prompt says "stop / start the animation loop". 
+                             // I'll just keep requesting frame so `step` can be called manually later, or continue idling. 
+        requestAnimationFrame(loop);
+    }
+}
+
+// Start Loop
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>

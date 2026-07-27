@@ -5,18 +5,29 @@ Used by the runner so local timing is honest and deterministic:
   1. `lms unload --all`  — clear VRAM/RAM of every other model
   2. `lms load <key>`    — explicit pre-load, measured as preload_ms
   3. warm-up ping        — verifies serving; its latency is the *warm* baseline
+
+Also reads LM Studio's own server log to CONFIRM what the server received, which
+is a different claim from what we sent — see confirm_sampling.
 """
 
+import json
 import os
+import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 
-from .util import now_ms, run_capped
+from .util import now_ms, read_json, run_capped
 
 LOAD_TIMEOUT_S = 900
 UNLOAD_TIMEOUT_S = 120
+
+SERVER_LOG_DIR = Path.home() / ".lmstudio" / "server-logs"
+_REQ_MARK = "Received request: POST to /v1/chat/completions with body {"
+_TS_LINE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
+_LOG_READ_CAP = 64 * 1024 * 1024
 
 
 def lms_exe() -> str | None:
@@ -114,3 +125,162 @@ def load_model(model_id: str, progress=print,
         progress(f"lms load failed: {(proc.stderr or proc.stdout).strip()[:200]}")
         return None
     return now_ms() - t0
+
+
+def received_requests(days: set[str] | None = None) -> list[dict]:
+    """What the SERVER says it received: [{ts, model, body}], ts naive LOCAL time.
+
+    The harness records `sampling_used` — what it intended to send. That is not
+    the same claim as "the provider got it", and every configuration bug this
+    suite has shipped lived in exactly that gap. LM Studio logs each request's
+    full body, so the gap is closable from the server's own account rather than
+    from ours.
+
+    `days` filters to "YYYY-MM-DD" keys (the log file names), so a report render
+    reads only the days its runs actually span.
+    """
+    out: list[dict] = []
+    if not SERVER_LOG_DIR.is_dir():
+        return out
+    for path in sorted(SERVER_LOG_DIR.glob("*/*.log")):
+        day = path.name.split(".")[0]
+        if days is not None and day not in days:
+            continue
+        try:
+            if path.stat().st_size > _LOG_READ_CAP:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        pos = 0
+        while True:
+            at = text.find(_REQ_MARK, pos)
+            if at < 0:
+                break
+            pos = at + len(_REQ_MARK)
+            line_start = text.rfind("\n", 0, at) + 1
+            m = _TS_LINE.match(text[line_start:at])
+            if not m:
+                continue
+            depth, buf = 1, ["{"]
+            for line in text[pos:].splitlines():
+                if _TS_LINE.match(line):
+                    depth = -1
+                    break
+                buf.append(line)
+                depth += line.count("{") - line.count("}")
+                if depth <= 0:
+                    break
+            if depth != 0:
+                continue
+            try:
+                body = json.loads("\n".join(buf))
+            except ValueError:
+                continue
+            out.append({"ts": datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"),
+                        "model": str(body.get("model") or ""), "body": body})
+    return out
+
+
+_SAMPLING_KEYS_SEEN = ("temperature", "top_p", "top_k", "min_p", "top_a", "seed",
+                       "repetition_penalty", "presence_penalty",
+                       "frequency_penalty")
+
+
+def _num_eq(a, b) -> bool:
+    """JSON renders 1.0 as 1, so compare numerically, not by type."""
+    if a is None or b is None:
+        return a is b
+    try:
+        return abs(float(a) - float(b)) < 1e-9
+    except (TypeError, ValueError):
+        return a == b
+
+
+def _match(expected: dict, body: dict) -> list[str]:
+    """Differences between what we meant to send and what arrived ([] = clean)."""
+    diffs = []
+    for k, v in (expected or {}).items():
+        if k not in body:
+            diffs.append(f"{k}: sent {v}, NOT RECEIVED")
+        elif not _num_eq(v, body[k]):
+            diffs.append(f"{k}: sent {v}, received {body[k]}")
+    for k in _SAMPLING_KEYS_SEEN:
+        if k in body and k not in (expected or {}):
+            diffs.append(f"{k}: received {body[k]} but never sent — something "
+                         f"else is injecting it")
+    return diffs
+
+
+def confirm_sampling(runs_dir=None, models=None) -> dict:
+    """Per LOCAL model: were its cells' sampling values actually RECEIVED?
+
+    Joins each attempt's `t_start` to the nearest request the server logged for
+    that model at or after it. Returns
+    {model: {confirmed, mismatched, unlogged, total, details}} where a detail is
+    (task, [difference, ...]).
+
+    `unlogged` is not a failure — LM Studio's logs rotate and predate this check,
+    so an old cell simply has no record. Only `mismatched` is a finding.
+    """
+    from . import config
+    from .registry import load_models
+    runs_dir = runs_dir or config.RUNS_DIR
+    models = models or load_models(include_disabled=True)
+    local = {m.name for m in models if m.local}
+    ids = {m.name: m.model for m in models if m.local}
+    if not local or not runs_dir.is_dir():
+        return {}
+
+    cells = []
+    days: set[str] = set()
+    for mfile in sorted(runs_dir.glob("*/*/*/metrics.json")):
+        if mfile.parents[1].name not in local:
+            continue
+        d = read_json(mfile, {})
+        used = d.get("sampling_used")
+        if used is None:
+            continue
+        for att in (d.get("attempts") or []):
+            t = att.get("t_start")
+            if not t:
+                continue
+            try:
+                when = datetime.fromisoformat(t).astimezone().replace(tzinfo=None)
+            except ValueError:
+                continue
+            days.add(when.strftime("%Y-%m-%d"))
+            cells.append({"model": mfile.parents[1].name, "task": mfile.parent.name,
+                          "when": when, "expected": {**used,
+                                                     "max_tokens": d.get("max_tokens")
+                                                     if d.get("max_tokens") else None}})
+    if not cells:
+        return {}
+    for c in cells:
+        c["expected"] = {k: v for k, v in c["expected"].items() if v is not None}
+
+    logged = [r for r in received_requests(days) if r["model"]]
+    by_model: dict[str, list] = {}
+    for r in logged:
+        by_model.setdefault(r["model"], []).append(r)
+    for v in by_model.values():
+        v.sort(key=lambda r: r["ts"])
+
+    out: dict[str, dict] = {}
+    for c in cells:
+        slot = out.setdefault(c["model"], {"confirmed": 0, "mismatched": 0,
+                                           "unlogged": 0, "total": 0,
+                                           "details": []})
+        slot["total"] += 1
+        cand = [r for r in by_model.get(ids.get(c["model"], c["model"]), [])
+                if -2 <= (r["ts"] - c["when"]).total_seconds() <= 120]
+        if not cand:
+            slot["unlogged"] += 1
+            continue
+        diffs = _match(c["expected"], cand[0]["body"])
+        if diffs:
+            slot["mismatched"] += 1
+            slot["details"].append((c["task"], diffs))
+        else:
+            slot["confirmed"] += 1
+    return out

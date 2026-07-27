@@ -27,6 +27,11 @@ class Model:
     temperature: float = config.DEFAULT_TEMPERATURE
     context_length: int = 0
     pricing: dict = field(default_factory=lambda: {"input_per_mtok": 0.0, "output_per_mtok": 0.0})
+    sampling: dict = field(default_factory=dict)
+    sampling_profiles: dict = field(default_factory=dict)
+    sampling_source: str = ""
+    sampling_settable_yaml: bool | None = None
+    sampling_unsettable_reason: str = ""
     extra: dict = field(default_factory=dict)
     enabled: bool = True
     color: str = ""
@@ -48,6 +53,92 @@ class Model:
         if self.key_env:
             return os.environ.get(self.key_env)
         return None
+
+    SAMPLING_KEYS = ("top_p", "top_k", "min_p", "top_a", "seed",
+                     "repetition_penalty", "presence_penalty",
+                     "frequency_penalty")
+
+    @property
+    def sampling_settable(self) -> bool:
+        """Can sampling actually reach this model?
+
+        Two ways it cannot, and both must read the same to the UI:
+
+        * the TRANSPORT has no flags — `claude -p` exposes none, so a value set on
+          a claude-cli model is displayed and never sent;
+        * the MODEL accepts none — the OpenAI reasoning models take no temperature
+          or top_p, and top_k/min_p are not OpenAI parameters at all. A strict
+          endpoint 4xxs (loud, and RequestRejected handles it); a forgiving gateway
+          DROPS them silently, which is worse: the run looks fine and the model
+          page reports a setting that never applied.
+
+        The yaml override wins where set, because only the model's own docs know
+        the second case — nothing in the transport reveals it, and for a gateway
+        model there is no request log to verify against.
+        """
+        if self.sampling_settable_yaml is not None:
+            return bool(self.sampling_settable_yaml)
+        return self.provider != "claude-cli"
+
+    @property
+    def unsettable_reason(self) -> str:
+        """One line explaining why sampling cannot be sent, for the model page."""
+        if self.sampling_settable:
+            return ""
+        if self.sampling_unsettable_reason.strip():
+            return self.sampling_unsettable_reason.strip()
+        if self.provider == "claude-cli":
+            return ("the Claude CLI exposes no sampling flags, so nothing "
+                    "configured here would be transmitted")
+        return "this model does not accept sampling parameters"
+
+    def resolved_sampling(self, category: str = "") -> tuple[dict, str]:
+        """(params, profile_name) for a task in `category`.
+
+        Base `sampling` is overlaid with the profile that category maps to, so a
+        model can follow its creator's per-use-case recommendation (code cooler
+        than prose) without us inventing a value for a use case the creator did
+        not cover. Returns the profile name for the record, '' when none applied.
+        """
+        prof = config.sampling_profile_for(category)
+        over = (self.sampling_profiles or {}).get(prof) or {}
+        merged = {**(self.sampling or {}), **over}
+        return merged, (prof if over else "")
+
+    def sampling_payload(self, category: str = "") -> dict:
+        """The sampling params to put in a request — explicitly set ones only.
+
+        temperature is included when set; None means "do not send", which is how
+        a provider that fixes it server-side (Moonshot's kimi-k3) or exposes no
+        knob at all (the claude CLI) is represented honestly. Omitting beats
+        sending a default, because an unsupported parameter can be rejected and a
+        rejection skips the model.
+
+        Anything NOT set here is left to the provider's own default — which is
+        not a single well-defined state: llama.cpp behind LM Studio ships
+        opinionated defaults (a top_k and a repeat penalty) while a gateway
+        typically disables those. So "unset" means "whatever this provider does",
+        and the model page says so rather than implying we chose it.
+
+        A model that cannot RECEIVE sampling gets an empty payload whatever its
+        yaml holds. validate_models refuses such a config before a run, so this is
+        defence in depth — but it belongs here: this function decides what goes on
+        the wire AND what `sampling_used` records, so if it can emit an
+        undeliverable value then the recorded evidence of what was sent is wrong
+        too, and that record is what the confirmed-received check compares against.
+        """
+        if not self.sampling_settable:
+            return {}
+        merged, _ = self.resolved_sampling(category)
+        out = {}
+        temp = merged.get("temperature", self.temperature)
+        if temp is not None:
+            out["temperature"] = temp
+        for k in self.SAMPLING_KEYS:
+            v = merged.get(k)
+            if v is not None:
+                out[k] = v
+        return out
 
     def cost_usd(self, tokens_in: int | None, tokens_out: int | None,
                  cache_read: int | None = None,
@@ -158,6 +249,8 @@ def load_models(models_dir: Path = config.MODELS_DIR,
         if f.name.startswith("_"):
             continue
         raw = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        if "sampling_settable" in raw:
+            raw["sampling_settable_yaml"] = raw.pop("sampling_settable")
         known = {k: v for k, v in raw.items() if k in Model.__dataclass_fields__}
         m = Model(**known)
         m.source_file = f.name
@@ -180,12 +273,14 @@ def set_yaml_key(path: Path, key: str, value: str) -> None:
                       count=1, flags=re.MULTILINE)
         path.write_text(text, encoding="utf-8")
         return
-    line = f"{key}: {value}"
     pattern = re.compile(rf"^{re.escape(key)}:.*$", re.MULTILINE)
-    if pattern.search(text):
-        text = pattern.sub(line, text, count=1)
+    found = pattern.search(text)
+    if found:
+        keep = re.search(r"\s+#.*$", found.group(0))
+        line = f"{key}: {value}" + (keep.group(0) if keep else "")
+        text = pattern.sub(lambda _: line, text, count=1)
     else:
-        text = text.rstrip("\n") + "\n" + line + "\n"
+        text = text.rstrip("\n") + "\n" + f"{key}: {value}" + "\n"
     path.write_text(text, encoding="utf-8")
 
 

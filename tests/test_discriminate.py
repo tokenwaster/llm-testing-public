@@ -69,3 +69,63 @@ def test_family_stats_groups_and_scores():
     assert len(fams["Gemma"]) == 2
     assert fams["Gemma"][0]["model"] == "gemma-4-12b"
     assert fams["Gemma"][0]["score"] > fams["Gemma"][1]["score"]
+
+
+
+def _subset_fixture():
+    """Five tasks with a real spread, so they land in one subset together."""
+    tdefs = {f"t{i}": types.SimpleNamespace(tier=1, scoring_type="answer",
+                                            category="reasoning")
+             for i in range(5)}
+    res = []
+    for i in range(5):
+        res.append(_res("whole", f"t{i}", 0.6))
+        res.append(_res("floor", f"t{i}", 0.1))
+    for i in range(2):
+        res.append(_res("skipper", f"t{i}", 1.0))
+    return [_run(res)], tdefs
+
+
+def _find(rows, model):
+    return next((r for r in rows if r["model"] == model), None)
+
+
+def test_a_model_missing_part_of_a_subset_is_not_ranked_in_it():
+    runs, tdefs = _subset_fixture()
+    d = discrimination_stats(runs, tdefs)
+    for key in ("hard_rank", "easy_rank", "frontier_rank"):
+        sk = _find(d[key], "skipper")
+        if sk is None:
+            continue
+        assert sk["partial"] is True, f"{key}: an incomplete model was ranked"
+        assert sk["rank"] is None, f"{key}: an incomplete model kept a rank"
+        assert sk["cover"] == "2/5"
+
+
+def test_the_ranked_rows_all_completed_the_subset():
+    runs, tdefs = _subset_fixture()
+    d = discrimination_stats(runs, tdefs)
+    for key, sub in (("hard_rank", "hard_subset"), ("easy_rank", "easy_subset"),
+                     ("frontier_rank", "frontier_subset")):
+        n = len(d[sub])
+        ranked = [r for r in d[key] if not r["partial"]]
+        assert all(r["n"] == n for r in ranked), \
+            f"{key}: a ranked row did not complete all {n} tasks"
+
+
+def test_partial_rows_sort_below_every_ranked_one():
+    runs, tdefs = _subset_fixture()
+    d = discrimination_stats(runs, tdefs)
+    for key in ("hard_rank", "easy_rank", "frontier_rank"):
+        flags = [r["partial"] for r in d[key]]
+        assert flags == sorted(flags), f"{key}: a partial row came first"
+
+
+def test_an_unranked_model_reports_no_rank_move():
+    """A shift measured against a rank it never held is a number about nothing."""
+    runs, tdefs = _subset_fixture()
+    d = discrimination_stats(runs, tdefs)
+    for key in ("hard_rank", "easy_rank", "frontier_rank"):
+        for r in d[key]:
+            if r["partial"]:
+                assert r["delta"] is None
