@@ -1,15 +1,3 @@
-"""Reference-verify web-013-billiards through the real scoring lane. Run:
-
-    python tasks-refs/web-013-billiards/verify.py
-
-Expects:
-    app.html               -> 0.800  playable + all physics; machine max is 0.8,
-                                      the last 0.2 is fit-and-finish on /review
-    traps/app_empty        -> 0.000  no window.sim: fails everything
-    traps/app_static       -> low    API present, no physics, unplayable
-    traps/app_physics_only -> 0.500  perfect physics but NOT playable (no shot,
-                                      no reset, no instructions): the gate caps it
-"""
 import shutil
 import sys
 import tempfile

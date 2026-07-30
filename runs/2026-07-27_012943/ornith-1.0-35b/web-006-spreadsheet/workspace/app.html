@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;padding:10px;background:#f0f0f0;min-width:620px;}
+h2{margin-top:0;font-size:18px;}
+
+.grid-table{border-collapse:collapse;background:#fff;display:inline-block;}
+.grid-table th,.grid-table td{border:1px solid #bbb;text-align:center;vertical-align:middle;padding:0;}
+.grid-table .hdr{background:#ddd;width:46px;min-width:46px;font-weight:bold;user-select:none;font-size:13px;}
+
+.cell-wrap{height:28px;padding:0;background:#fff;}
+.cell-input{width:100%;height:100%;border:none;outline:none;text-align:left;padding:2px 5px;font-size:13px;font-family:'Consolas',monospace,sans-serif;}
+.cell-input:focus{background:#e8f0fe;outline:2px solid #1a73e8;z-index:1;}
+
+#controls{margin-top:12px;display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;}
+button#export{padding:8px 18px;font-size:14px;cursor:pointer;background:#1a73e8;color:#fff;border:none;border-radius:4px;}
+button#export:hover{background:#1557b0;}
+textarea#csv{width:620px;height:180px;font-family:'Consolas',monospace;font-size:12px;padding:6px;border:1px solid #bbb;resize:none;}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <h2>Mini Spreadsheet (A–J × 1–10)</h2>
+  <table class="grid-table" id="grid"></table>
+  <div id="controls">
+    <button id="export">Export CSV</button>
+    <textarea id="csv" readonly placeholder="CSV output will appear here…"></textarea>
+  </div>
+</div>
+
+<script>
+(function(){'use strict';
+
+var COLS='ABCDEFGHIJ';
+var RAW={};
+var COMP={};
+
+/* ── Build grid ─────────────────────────────────────────────────── */
+var tbl=document.getElementById('grid');
+
+// Column header row
+var hr=document.createElement('tr');
+var corner=document.createElement('th');corner.className='hdr';hr.appendChild(corner);
+for(var ci=0;ci<10;ci++){var th=document.createElement('th');th.className='hdr';th.textContent=COLS[ci];hr.appendChild(th);}
+tbl.appendChild(hr);
+
+// Data rows
+for(var r=1;r<=10;r++){
+  var tr=document.createElement('tr');
+  var rh=document.createElement('td');rh.className='hdr';rh.textContent=r;tr.appendChild(rh);
+  for(var c=0;c<10;c++){
+    var cid=COLS[c]+r, td=document.createElement('td'), inp=document.createElement('input');
+    td.className='cell-wrap';
+    inp.type='text';inp.id='cell-'+cid;inp.className='cell-input';inp.dataset.cid=cid;
+
+    inp.addEventListener('focus',function(){this.value=RAW[this.dataset.cid]||'';});
+    inp.addEventListener('blur',function(){commit(this.dataset.cid);});
+    inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();commit(this.dataset.cid);this.blur();}});
+
+    td.appendChild(inp);tr.appendChild(td);
+  }
+  tbl.appendChild(tr);
+}
+
+/* ── Helpers ─────────────────────────────────────────────────────── */
+function commit(id){RAW[id]=document.getElementById('cell-'+id).value;recalc();refresh(id);}
+
+function refresh(id){var inp=document.getElementById('cell-'+id);if(inp&&document.activeElement!==inp)inp.value=COMP[id]||'';}
+
+/* ── Recalculation ──────────────────────────────────────────────── */
+function recalc(){
+  var deps={};
+  for(var k in RAW){if(RAW[k]&&RAW[k][0]==='=')deps[k]=xrefs(RAW[k]);}
+
+  var cyc=findCycles(deps);
+  COMP={};
+
+  function calc(id){
+    if(id in COMP)return COMP[id];
+    var raw=RAW[id];
+    if(!raw||raw[0]!=='='){COMP[id]=raw||'';return COMP[id];}
+    if(cyc.has(id)){COMP[id]='#CYCLE';return '#CYCLE';}
+    try{var v=evalF(raw,COMP);COMP[id]=String(v);}catch(e){COMP[id]='#ERR';}
+    return COMP[id];
+  }
+
+  var order=topo(deps,cyc);
+  for(var i=0;i<order.length;i++)calc(order[i]);
+  for(var r2=1;r2<=10;r2++)for(var c2=0;c2<10;c2++){var id2=COLS[c2]+r2;if(!(id2 in COMP))calc(id2);}
+
+  for(var r3=1;r3<=10;r3++)for(var c3=0;c3<10;c3++)refresh(COLS[c3]+r3);
+}
+
+/* ── Tokenizer ──────────────────────────────────────────────────── */
+function tok(text){
+  var T=[],i=0;
+  while(i<text.length){
+    var ch=text[i];
+    if(ch===' '||ch==='\t'){i++;continue;}
+    if(/[0-9.]/.test(ch)){var n='';while(i<text.length&&/[0-9.]/.test(text[i]))n+=text[i++];T.push(n);continue;}
+    if(/[A-Za-z]/.test(ch)){
+      var ref=ch.toUpperCase();i++;
+      while(i<text.length&&/[0-9]/.test(text[i]))ref+=text[i++];
+      var colIdx=COLS.indexOf(ref[0]),rn=parseInt(ref.slice(1),10);
+      if(colIdx>=0&&rn>=1&&rn<=10){T.push(ref);}else{throw new Error('Bad ref '+ref);}
+      continue;
+    }
+    if('+-*/()'.indexOf(ch)!==-1){T.push(ch);i++;continue;}
+    throw new Error('Unexpected: '+ch);
+  }
+  return T;
+}
+
+/* ── Parser / Evaluator ─────────────────────────────────────────── */
+function evalF(formula,cache){
+  var txt=formula.slice(1),T=tok(txt),p=0;
+  function pk(){return p<T.length?T[p]:null;}
+  function expr(){var L=term();while(pk()==='+'||pk()==='-'){var op=T[p++];var R=term();L=op==='+'?L+R:L-R;}return L;}
+  function term(){var L=unary();while(pk()==='*'||pk()==='/'){var op=T[p++];var R=unary();if(op==='*')L*=R;else{if(R===0)throw new Error('Div/0');L/=R;}}return L;}
+  function unary(){if(pk()==='-'){p++;return -unary();}if(pk()==='+'){p++;return unary();}return factor();}
+  function factor(){
+    var t=pk();if(!t)throw new Error('EOF');
+    if(/^(\d+\.?\d*|\.\d+)$/.test(t)){p++;return parseFloat(t);}
+    if(/^[A-J]\d{1,2}$/.test(t)){p++;var v=cache[t];if(v==='#CYCLE'||v==='#ERR')return 0;if(!v)return 0;var n=parseFloat(v);if(isNaN(n))throw new Error('Non-num '+t);return n;}
+    if(t==='('){p++;var inner=expr();if(pk()!==')')throw new Error('Unmatched (');p++;return inner;}
+    throw new Error('Unexpected: '+t);
+  }
+  var res=expr();if(p<T.length)throw new Error('Trailing tokens');return res;
+}
+
+/* ── Dependency extraction ──────────────────────────────────────── */
+function xrefs(f){var R=[],re=/([A-Ja-j])(\d{1,2})/g,m;while((m=re.exec(f))!==null){var ci=COLS.indexOf(m[1].toUpperCase()),rn=parseInt(m[2],10);if(ci>=0&&rn>=1&&rn<=10)R.push(m[1].toUpperCase()+m[2]);}return R;}
+
+/* ── Tarjan SCC cycle detection ─────────────────────────────────── */
+function findCycles(D){
+  var cyc=new Set(),idx=0,stk=[],on={},ind={},lo={};
+  function sc(v){
+    ind[v]=idx;lo[v]=idx++;stk.push(v);on[v]=true;
+    (D[v]||[]).forEach(function(w){
+      if(!(w in ind)){sc(w);lo[v]=Math.min(lo[v],lo[w]);}
+      else if(on[w])lo[v]=Math.min(lo[v],ind[w]);
+    });
+    if(lo[v]===ind[v]){
+      var scc=[];var w;do{w=stk.pop();on[w]=false;scc.push(w);}while(w!==v);
+      if(scc.length>1)scc.forEach(function(n){cyc.add(n);});
+      else if(D[scc[0]]&&D[scc[0]].indexOf(scc[0])!==-1)cyc.add(scc[0]);
+    }
+  }
+  var all={};for(var k in D)if(D[k]!==undefined){all[k]=true;(D[k]||[]).forEach(function(w){all[w]=true;});}
+  for(var n in all)if(all[n]&&!(n in ind))sc(n);
+  return cyc;
+}
+
+/* ── Topological sort (DFS-based) ──────────────────────────────── */
+function topo(D,cyc){
+  var vis={},res=[];
+  function visit(v){if(vis[v])return;vis[v]=true;(D[v]||[]).forEach(function(w){if(!cyc[w])visit(w);});res.push(v);}
+  for(var k in D)if(D[k]!==undefined&&!cyc[k])visit(k);
+  return res;
+}
+
+/* ── Export CSV ─────────────────────────────────────────────────── */
+document.getElementById('export').addEventListener('click',function(){
+  var lines=[];
+  for(var r4=1;r4<=10;r4++){var row=[];for(var c4=0;c4<10;c4++)row.push(COMP[COLS[c4]+r4]||'');lines.push(row.join(','));}
+  document.getElementById('csv').value=lines.join('\n');
+});
+
+/* ── Public API ─────────────────────────────────────────────────── */
+window.sheet={
+  set:function(id,val){RAW[id]=val;recalc();refresh(id);},
+  get:function(id){return COMP[id]||'';},
+  raw:function(id){return RAW[id]||'';}
+};
+
+/* initial display pass */
+recalc();
+for(var ir=1;ir<=10;ir++)for(var ic=0;ic<10;ic++)refresh(COLS[ic]+ir);
+
+})();
+</script>
+</body>
+</html>

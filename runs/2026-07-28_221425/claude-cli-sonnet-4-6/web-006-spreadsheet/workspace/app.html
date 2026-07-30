@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Spreadsheet</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: Arial, Helvetica, sans-serif; padding: 10px; background: #f0f2f5; }
+
+.app-title { font-size: 16px; font-weight: bold; margin-bottom: 8px; color: #222; }
+.toolbar { margin-bottom: 7px; }
+
+#export {
+  padding: 5px 14px;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+}
+#export:hover { background: #1d4ed8; }
+
+.grid-outer { overflow-x: auto; border: 1px solid #c9cdd4; border-radius: 4px; background: #fff; }
+
+table { border-collapse: collapse; table-layout: fixed; }
+
+.corner-cell { width: 36px; min-width: 36px; background: #e8eaed; border: 1px solid #c9cdd4; }
+.col-head {
+  width: 82px; min-width: 82px;
+  background: #e8eaed; border: 1px solid #c9cdd4;
+  text-align: center; font-size: 12px; font-weight: 700;
+  color: #555; padding: 4px 0; user-select: none;
+}
+.row-head {
+  background: #e8eaed; border: 1px solid #c9cdd4;
+  text-align: center; font-size: 12px; font-weight: 700;
+  color: #555; padding: 4px 0; user-select: none;
+}
+
+td.dc { border: 1px solid #d0d3d8; padding: 0; }
+td.dc input {
+  display: block; width: 100%; height: 28px;
+  border: none; outline: none; padding: 2px 5px;
+  font-size: 13px; font-family: inherit;
+  background: #fff; color: #111;
+}
+td.dc:focus-within { border: 1px solid #2563eb; background: #fffde7; }
+td.dc:focus-within input { background: #fffde7; }
+
+input.is-err   { color: #cc0000 !important; }
+input.is-cycle { color: #b45309 !important; }
+
+.csv-section { margin-top: 10px; }
+.csv-section label { display: block; font-size: 12px; font-weight: 600; color: #444; margin-bottom: 4px; }
+#csv {
+  width: 100%; height: 120px;
+  font-family: 'Courier New', monospace; font-size: 12px;
+  border: 1px solid #c9cdd4; border-radius: 4px;
+  padding: 6px; resize: vertical; color: #222;
+}
+</style>
+</head>
+<body>
+
+<div class="app-title">Spreadsheet</div>
+<div class="toolbar">
+  <button id="export">Export CSV</button>
+</div>
+<div class="grid-outer">
+  <table id="sptbl"></table>
+</div>
+<div class="csv-section">
+  <label>CSV Output</label>
+  <textarea id="csv" placeholder="Click 'Export CSV' to generate…"></textarea>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  const ROWS = [1,2,3,4,5,6,7,8,9,10];
+
+  const rawStore = {};   // cellId -> raw string
+  let   cache    = {};   // cellId -> computed result
+  let   inStack  = new Set(); // DFS stack for cycle detection
+
+  /* ── Formula evaluator ──────────────────────────────────────────────── */
+  function evalFormula(src) {
+    let p = 0;
+
+    function ws() { while (p < src.length && src[p] === ' ') p++; }
+
+    function expr() {
+      ws(); let v = term(); ws();
+      while (p < src.length && (src[p] === '+' || src[p] === '-')) {
+        const op = src[p++]; ws();
+        const r = term();
+        v = op === '+' ? v + r : v - r;
+        ws();
+      }
+      return v;
+    }
+
+    function term() {
+      ws(); let v = unary(); ws();
+      while (p < src.length && (src[p] === '*' || src[p] === '/')) {
+        const op = src[p++]; ws();
+        const r = unary();
+        if (op === '/') { if (r === 0) throw new Error('div0'); v = v / r; }
+        else v = v * r;
+        ws();
+      }
+      return v;
+    }
+
+    function unary() {
+      ws();
+      if (src[p] === '-') { p++; return -unary(); }
+      if (src[p] === '+') { p++; return unary();  }
+      return primary();
+    }
+
+    function primary() {
+      ws();
+      if (p >= src.length) throw new Error('eof');
+
+      // Parentheses
+      if (src[p] === '(') {
+        p++;
+        const v = expr(); ws();
+        if (src[p] !== ')') throw new Error('paren');
+        p++;
+        return v;
+      }
+
+      // Cell reference: [A-J](10|[1-9]) NOT followed by another digit
+      const cm = /^([A-Ja-j])(10|[1-9])(?![0-9])/.exec(src.slice(p));
+      if (cm) {
+        p += cm[0].length;
+        const cid = cm[1].toUpperCase() + cm[2];
+        const cv = computeCell(cid);
+        if (cv === '#CYCLE') { const e = new Error('cycle'); e.cycle = true; throw e; }
+        if (cv === '#ERR')   throw new Error('cell-err');
+        if (typeof cv === 'number') return cv;
+        // String cell referenced in arithmetic
+        const n = Number(cv);
+        if (!isFinite(n)) throw new Error('non-numeric');
+        return n;
+      }
+
+      // Number literal
+      const nm = /^[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?/.exec(src.slice(p));
+      if (nm) { p += nm[0].length; return parseFloat(nm[0]); }
+
+      throw new Error('unexpected:' + src[p]);
+    }
+
+    const result = expr(); ws();
+    if (p < src.length) throw new Error('trailing');
+    return result;
+  }
+
+  /* ── Cell computation ───────────────────────────────────────────────── */
+  function computeCell(cid) {
+    if (Object.prototype.hasOwnProperty.call(cache, cid)) return cache[cid];
+    if (inStack.has(cid)) return '#CYCLE'; // cycle: return sentinel, caller will propagate
+
+    inStack.add(cid);
+    let result;
+    try {
+      const r = rawStore[cid] || '';
+      if (!r) {
+        result = 0; // empty counts as 0 in formulas
+      } else if (r[0] === '=') {
+        try {
+          const v = evalFormula(r.slice(1).trim());
+          result = isFinite(v) ? v : '#ERR';
+        } catch (e) {
+          result = (e && e.cycle) ? '#CYCLE' : '#ERR';
+        }
+      } else {
+        const n = parseFloat(r);
+        result = isNaN(n) ? r : n; // plain text or numeric
+      }
+    } catch (_) {
+      result = '#ERR';
+    }
+    inStack.delete(cid);
+    cache[cid] = result;
+    return result;
+  }
+
+  function displayValue(cid) {
+    const r = rawStore[cid] || '';
+    if (!r) return '';          // empty cell shows blank
+    const v = computeCell(cid);
+    return typeof v === 'number' ? String(v) : String(v);
+  }
+
+  function recalcAll() {
+    cache   = {};
+    inStack = new Set();
+    COLS.forEach(c => ROWS.forEach(r => computeCell(c + r)));
+  }
+
+  /* ── Build table ────────────────────────────────────────────────────── */
+  const tbl = document.getElementById('sptbl');
+
+  // Header row
+  const thead = tbl.createTHead();
+  const hr = thead.insertRow();
+  const cornerTh = document.createElement('th');
+  cornerTh.className = 'corner-cell';
+  hr.appendChild(cornerTh);
+  COLS.forEach(col => {
+    const th = document.createElement('th');
+    th.className = 'col-head';
+    th.textContent = col;
+    hr.appendChild(th);
+  });
+
+  // Data rows
+  const tbody = tbl.createTBody();
+  ROWS.forEach(rowNum => {
+    const tr = tbody.insertRow();
+
+    const rowTh = document.createElement('th');
+    rowTh.className = 'row-head';
+    rowTh.textContent = rowNum;
+    tr.appendChild(rowTh);
+
+    COLS.forEach(col => {
+      const cid = col + rowNum;
+      const td = tr.insertCell();
+      td.className = 'dc';
+
+      const inp = document.createElement('input');
+      inp.id        = 'cell-' + cid;
+      inp.type      = 'text';
+      inp.autocomplete = 'off';
+      inp.spellcheck   = false;
+
+      inp.addEventListener('focus', () => {
+        inp.value     = rawStore[cid] || '';
+        inp.className = '';
+      });
+
+      inp.addEventListener('blur', () => {
+        rawStore[cid] = inp.value;
+        recalcAll();
+        renderAll();
+      });
+
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+      });
+
+      td.appendChild(inp);
+    });
+  });
+
+  /* ── Render ─────────────────────────────────────────────────────────── */
+  function renderCell(cid) {
+    const inp = document.getElementById('cell-' + cid);
+    if (!inp || document.activeElement === inp) return;
+    const dv = displayValue(cid);
+    inp.value     = dv;
+    inp.className = dv === '#ERR' ? 'is-err' : dv === '#CYCLE' ? 'is-cycle' : '';
+  }
+
+  function renderAll() {
+    COLS.forEach(c => ROWS.forEach(r => renderCell(c + r)));
+  }
+
+  recalcAll();
+  renderAll();
+
+  /* ── Export CSV ─────────────────────────────────────────────────────── */
+  document.getElementById('export').addEventListener('click', () => {
+    const lines = ROWS.map(r => COLS.map(c => displayValue(c + r)).join(','));
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  /* ── Public scripting API ───────────────────────────────────────────── */
+  window.sheet = {
+    set(cellId, value) {
+      const id = String(cellId).replace(/\s/g, '').toUpperCase();
+      rawStore[id] = String(value);
+      recalcAll();
+      renderAll();
+    },
+    get(cellId) {
+      const id = String(cellId).replace(/\s/g, '').toUpperCase();
+      return displayValue(id);
+    },
+    raw(cellId) {
+      const id = String(cellId).replace(/\s/g, '').toUpperCase();
+      return rawStore[id] || '';
+    }
+  };
+
+})();
+</script>
+</body>
+</html>

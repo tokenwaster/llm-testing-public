@@ -1,4 +1,3 @@
-"""Reference: recursive-descent JSON parser (v0.5 py-008)."""
 
 
 class _Fail(Exception):

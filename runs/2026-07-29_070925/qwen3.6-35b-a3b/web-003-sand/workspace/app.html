@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Falling Sand</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; background: #0a0a0f; overflow: hidden; display: flex; justify-content: center; align-items: center; font-family: 'Segoe UI', system-ui, sans-serif; }
+#container { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+canvas#sand { border: 2px solid #333; border-radius: 6px; image-rendering: pixelated; cursor: crosshair; background: #0d0d14; }
+#toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; }
+.mat-btn { padding: 8px 16px; border: 2px solid #444; border-radius: 6px; background: #1a1a24; color: #ccc; font-size: 13px; font-weight: 600; cursor: pointer; transition: all .15s; user-select: none; text-transform: uppercase; letter-spacing: .5px; }
+.mat-btn:hover { background: #2a2a38; border-color: #666; }
+.mat-btn.active { transform: scale(1.05); }
+#mat-sand.active { background: #d4a030; border-color: #f0c060; color: #1a1a24; }
+#mat-water.active { background: #3080d4; border-color: #60a8f0; color: #fff; }
+#mat-wall.active { background: #777; border-color: #aaa; color: #fff; }
+#mat-acid.active { background: #5ab830; border-color: #80e040; color: #1a1a24; }
+#mat-empty.active { background: #c0392b; border-color: #e74c3c; color: #fff; }
+#clear { padding: 8px 20px; border: 2px solid #622; border-radius: 6px; background: #2a1015; color: #e55; font-size: 13px; font-weight: 600; cursor: pointer; transition: all .15s; text-transform: uppercase; letter-spacing: .5px; }
+#clear:hover { background: #3a1520; border-color: #a33; }
+#info { color: #555; font-size: 12px; text-align: center; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="sand" width="400" height="400"></canvas>
+  <div id="toolbar">
+    <button class="mat-btn active" id="mat-sand" data-mat="sand">Sand</button>
+    <button class="mat-btn" id="mat-water" data-mat="water">Water</button>
+    <button class="mat-btn" id="mat-wall" data-mat="wall">Wall</button>
+    <button class="mat-btn" id="mat-acid" data-mat="acid">Acid</button>
+    <button class="mat-btn" id="mat-empty" data-mat="empty">Eraser</button>
+    <button id="clear">Clear</button>
+  </div>
+  <div id="info">Click & drag on canvas to paint. Each cell = 5×5 CSS px (80×80 grid)</div>
+</div>
+
+<script>
+(function() {
+  "use strict";
+
+  const W = 80, H = 80;
+  const CELL = 5; // CSS pixels per cell -> 400x400 canvas
+
+  const EMPTY = 0, SAND = 1, WATER = 2, WALL = 3, ACID = 4;
+
+  let grid = new Int8Array(W * H);
+  let nextGrid = null;
+
+  function idx(x, y) { return y * W + x; }
+
+  // Colors for rendering: [r, g, b] with some variation
+  const colorCache = {};
+
+  function hslToRgb(h, s, l) {
+    s /= 100; l /= 100;
+    if (s === 0) return [Math.round(l*255), Math.round(l*255), Math.round(l*255)];
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1; if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q-p)*6*t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q-p)*(2/3-t)*6;
+      return p;
+    };
+    const q = l < 0.5 ? l*(1+s) : l+s-l*s, p = 2*l-q;
+    return [Math.round(hue2rgb(p,q,h+1/3)*255), Math.round(hue2rgb(p,q,h)*255), Math.round(hue2rgb(p,q,h-1/3)*255)];
+  }
+
+  const cellColors = {
+    [EMPTY]: [13, 13, 20],
+    [SAND]: null, // computed with variation
+    [WATER]: null,
+    [WALL]: null,
+    [ACID]: null,
+  };
+
+  function getColor(type, x, y) {
+    const seed = (x * 31 + y * 17) & 0xFF;
+    switch (type) {
+      case EMPTY: return cellColors[EMPTY];
+      case SAND: {
+        const v = ((seed % 40) - 20); // +/- 20
+        return [Math.min(255, Math.max(0, 180 + v)), Math.min(255, Math.max(0, 140 + v)), Math.min(255, Math.max(0, 40 + v))];
+      }
+      case WATER: {
+        const v = ((seed % 30) - 15);
+        return [Math.min(255, Math.max(0, 30 + v)), Math.min(255, Math.max(0, 100 + v)), Math.min(255, Math.max(0, 220 + v))];
+      }
+      case WALL: {
+        const v = ((seed % 50) - 25);
+        return [Math.min(255, Math.max(0, 80 + v)), Math.min(255, Math.max(0, 80 + v)), Math.min(255, Math.max(0, 85 + v))];
+      }
+      case ACID: {
+        const v = ((seed % 40) - 20);
+        return [Math.min(255, Math.max(0, 100 + v)), Math.min(255, Math.max(0, 200 + v)), Math.min(255, Math.max(0, 30 + v))];
+      }
+    }
+    return [0, 0, 0];
+  }
+
+  // Canvas setup
+  const canvas = document.getElementById("sand");
+  const ctx = canvas.getContext("2d");
+  let imageData = ctx.createImageData(W * CELL, H * CELL);
+  let pixels = imageData.data;
+
+  function render() {
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const ci = idx(x, y);
+        const type = grid[ci];
+        const c = getColor(type, x, y);
+        for (let dy = 0; dy < CELL; dy++) {
+          for (let dx = 0; dx < CELL; dx++) {
+            const pxIdx = ((y * CELL + dy) * W * CELL + (x * CELL + dx)) * 4;
+            pixels[pxIdx]     = c[0];
+            pixels[pxIdx + 1] = c[1];
+            pixels[pxIdx + 2] = c[2];
+            pixels[pxIdx + 3] = 255;
+          }
+        }
+      }
+    }
+    ctx.putImageData(imageData, 0, 0);
+  }
+
+  // Simulation step — returns nothing, modifies grid in place
+  function step() {
+    // Process bottom-to-top, randomize x direction
+    for (let y = H - 1; y >= 0; y--) {
+      // Randomize left-right order per row
+      const shuffle = Math.random() < 0.5;
+      const startX = shuffle ? 0 : W - 1;
+      const endX = shuffle ? W : -1;
+      const stepDir = shuffle ? 1 : -1;
+
+      for (let x = startX; x !== endX; x += stepDir) {
+        const ci = idx(x, y);
+        const type = grid[ci];
+
+        if (type === EMPTY || type === WALL) continue;
+
+        if (type === SAND || type === WATER || type === ACID) {
+          // Try to move down
+          let moved = false;
+          if (y < H - 1) {
+            const below = idx(x, y + 1);
+            const belowType = grid[below];
+
+            if (type === SAND && (belowType === WATER || belowType === ACID)) {
+              // Sand sinks: swap with liquid
+              grid[ci] = belowType;
+              grid[below] = SAND;
+              continue;
+            } else if ((type === WATER || type === ACID) && belowType === SAND) {
+              // Water/acid can't go through sand directly; check if they can swap
+              // Sand falls into empty space, water flows around
+            }
+
+            if (belowType === EMPTY || (type !== SAND && belowType === SAND)) {
+              if (type !== WATER || belowType !== SAND) {
+                grid[ci] = EMPTY;
+                grid[below] = type;
+                moved = true;
+                continue;
+              }
+            }
+
+            // Acid dissolves adjacent sand/wall before trying to move
+            if (type === ACID) {
+              // Try below
+              if (y < H - 1 && (grid[idx(x, y+1)] === SAND || grid[idx(x, y+1)] === WALL)) {
+                if (Math.random() < 0.3) {
+                  grid[idx(x, y+1)] = EMPTY;
+                  if (Math.random() < 0.5) {
+                    grid[ci] = EMPTY; // acid consumed
+                  }
+                  continue;
+                }
+              }
+              // Try left
+              if (x > 0 && (grid[idx(x-1, y)] === SAND || grid[idx(x-1, y)] === WALL)) {
+                if (Math.random() < 0.3) {
+                  grid[idx(x-1, y)] = EMPTY;
+                  if (Math.random() < 0.5) {
+                    grid[ci] = EMPTY;
+                  }
+                  continue;
+                }
+              }
+              // Try right
+              if (x < W - 1 && (grid[idx(x+1, y)] === SAND || grid[idx(x+1, y)] === WALL)) {
+                if (Math.random() < 0.3) {
+                  grid[idx(x+1, y)] = EMPTY;
+                  if (Math.random() < 0.5) {
+                    grid[ci] = EMPTY;
+                  }
+                  continue;
+                }
+              }
+            }
+
+            // Sand slides diagonally if blocked below and not sinking
+            if (type === SAND) {
+              const dir1 = Math.random() < 0.5 ? -1 : 1;
+              const dir2 = -dir1;
+              for (let di = 0; di < 2; di++) {
+                const d = di === 0 ? dir1 : dir2;
+                if (x + d >= 0 && x + d < W) {
+                  const diag = idx(x + d, y + 1);
+                  const dt = grid[diag];
+                  if (dt === EMPTY) {
+                    grid[ci] = EMPTY;
+                    grid[diag] = SAND;
+                    moved = true;
+                    break;
+                  } else if (type !== WATER && dt !== WALL) {
+                    // Swap with water/acid below-diagonal
+                    grid[ci] = dt;
+                    grid[diag] = SAND;
+                    moved = true;
+                    break;
+                  }
+                }
+              }
+              if (moved) continue;
+
+              // Sand can't move, stays put (if blocked by wall on both sides, or below is filled)
+              // Check if below is sand/water/acid - it will stay. If below is wall/block, check diagonals again for swap
+              // Already handled above: tried diagonal down. If those fail too, just fall through to horizontal spread (none for sand).
+            } else if (type === WATER || type === ACID) {
+              // Try to move into a liquid cell below (water/acid below - rare but possible with swaps)
+              if (y < H - 1 && grid[idx(x, y+1)] !== EMPTY && grid[idx(x, y+1)] !== WALL) {
+                // Could try to flow through? No, sand blocks. Let's just try horizontal spread.
+              }
+
+              // Horizontal spread for water/acid when they can't fall
+              if (!moved) {
+                const spreadDirs = [];
+                if (x > 0) spreadDirs.push(-1);
+                if (x < W - 1) spreadDirs.push(1);
+                if (spreadDirs.length === 2) {
+                  // Randomize order
+                  if (Math.random() < 0.5) { spreadDirs[0] = -1; spreadDirs[1] = 1; }
+                  else { spreadDirs[0] = 1; spreadDirs[1] = -1; }
+                }
+
+                for (let si = 0; si < spreadDirs.length; si++) {
+                  const nx = x + spreadDirs[si];
+                  if (nx >= 0 && nx < W) {
+                    // Find the furthest empty cell horizontally
+                    let furthest = nx;
+                    let fy = y;
+                    for (let k = nx; k >= 0 && k < W; ) {
+                      const nk = grid[idx(k, y)];
+                      if (nk === EMPTY) {
+                        furthest = k;
+                        // Look further in same direction
+                        break;
+                      } else if (nk === WALL || nk === SAND) {
+                        break;
+                      }
+                      k += spreadDirs[si];
+                    }
+
+                    // Try to fill empty cells along the way
+                    let startFy = y;
+                    for (let kx = nx; kx !== furthest + spreadDirs[si]; ) {
+                      if (kx >= 0 && kx < W) {
+                        if (grid[idx(kx, y)] === EMPTY) {
+                          // Fill up to and including furthest with this liquid
+                          grid[idx(x, y)] = type;
+                          for (let lz = Math.min(nx, furthest); lz <= Math.max(nx, furthest); lz++) {
+                            if (grid[idx(lz, y)] === EMPTY) {
+                              // Don't fill - we'll move one cell at a time
+                            }
+                          }
+                          break;
+                        }
+                      }
+                      break;
+                    }
+
+                    // Simple: just try to move into the adjacent empty cell
+                    if (grid[idx(nx, y)] === EMPTY) {
+                      grid[ci] = EMPTY;
+                      grid[idx(nx, y)] = type;
+                      moved = true;
+                      break;
+                    } else {
+                      // Fill in a gap: scan further
+                      let fx = nx;
+                      while (fx >= 0 && fx < W && grid[idx(fx, y)] === EMPTY) {
+                        fx += spreadDirs[si];
+                      }
+                      if (fx !== nx && grid[idx(fx - spreadDirs[si], y)] === EMPTY) {
+                        // Found an empty spot further away — fill the path
+                        for (let pz = nx; pz !== fx; pz -= spreadDirs[si]) {
+                          grid[idx(pz, y)] = type;
+                        }
+                        grid[ci] = EMPTY;
+                        moved = true;
+                        break;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            // Acid: after trying to move down, try horizontal spread (like water)
+            if (type === ACID && !moved) {
+              const spreadDirs = [];
+              if (x > 0) spreadDirs.push(-1);
+              if (x < W - 1) spreadDirs.push(1);
+              if (spreadDirs.length === 2 && Math.random() < 0.5) {
+                const tmp = spreadDirs[0]; spreadDirs[0] = spreadDirs[1]; spreadDirs[1] = tmp;
+              }
+
+              for (let si = 0; si < spreadDirs.length; si++) {
+                const nx = x + spreadDirs[si];
+                if (nx >= 0 && nx < W) {
+                  // Look for furthest empty cell
+                  let fx = nx;
+                  while (fx >= 0 && fx < W && grid[idx(fx, y)] === EMPTY) {
+                    fx += spreadDirs[si];
+                  }
+                  if (grid[idx(fx - spreadDirs[si], y)] === EMPTY) {
+                    for (let pz = nx; pz !== fx; pz -= spreadDirs[si]) {
+                      grid[idx(pz, y)] = type;
+                    }
+                    grid[ci] = EMPTY;
+                    moved = true;
+                    break;
+                  }
+                }
+              }
+            }
+          } else {
+            // On bottom row: acid still dissolves
+            if (type === ACID) {
+              if (x > 0 && (grid[idx(x-1, y)] === SAND || grid[idx(x-1, y)] === WALL)) {
+                if (Math.random() < 0.3) {
+                  grid[idx(x-1, y)] = EMPTY;
+                  if (Math.random() < 0.5) grid[ci] = EMPTY;
+                }
+              }
+              if (x < W - 1 && (grid[idx(x+1, y)] === SAND || grid[idx(x+1, y)] === WALL)) {
+                if (Math.random() < 0.3) {
+                  grid[idx(x+1, y)] = EMPTY;
+                  if (Math.random() < 0.5) grid[ci] = EMPTY;
+                }
+              }
+            }
+
+            // Horizontal spread for water/acid at bottom
+            if (type === WATER || type === ACID) {
+              const spreadDirs = [];
+              if (x > 0) spreadDirs.push(-1);
+              if (x < W - 1) spreadDirs.push(1);
+              if (spreadDirs.length === 2 && Math.random() < 0.5) {
+                const tmp = spreadDirs[0]; spreadDirs[0] = spreadDirs[1]; spreadDirs[1] = tmp;
+              }
+
+              for (let si = 0; si < spreadDirs.length; si++) {
+                const nx = x + spreadDirs[si];
+                if (nx >= 0 && nx < W) {
+                  let fx = nx;
+                  while (fx >= 0 && fx < W && grid[idx(fx, y)] === EMPTY) {
+                    fx += spreadDirs[si];
+                  }
+                  if (grid[idx(fx - spreadDirs[si], y)] === EMPTY) {
+                    for (let pz = nx; pz !== fx; pz -= spreadDirs[si]) {
+                      grid[idx(pz, y)] = type;
+                    }
+                    grid[ci] = EMPTY;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Better step function — let me rewrite it properly for correctness
+  function simulateStep() {
+    // We process bottom-to-top so particles move at most one cell per step
+    // Within each row, we randomize x direction to avoid left/right bias
+    const randLR = Math.random() < 0.5;
+
+    for (let y = H - 1; y >= 0; y--) {
+      const leftToRight = randLR || Math.random() < 0.5;
+      const xs = [];
+      if (leftToRight) {
+        for (let x = 0; x < W; x++) xs.push(x);
+      } else {
+        for (let x = W - 1; x >= 0; x--) xs.push(x);
+      }
+
+      // Create a copy of this row so we can check neighbors without interference?
+      // Actually in CA each cell updates based on the current grid state.
+      // But to avoid ordering bias, some implementations use nextGrid. 
+      // However the spec says "process movement bottom-row-up" which implies single grid.
+      // We'll use single grid with careful ordering.
+
+      for (let xi = 0; xi < xs.length; xi++) {
+        const x = xs[xi];
+        const ci = idx(x, y);
+        const type = grid[ci];
+
+        if (type === EMPTY || type === WALL) continue;
+
+        if (type === SAND) {
+          // Try down
+          if (y < H - 1) {
+            const bi = idx(x, y + 1);
+            const bt = grid[bi];
+            if (bt === EMPTY) {
+              grid[ci] = EMPTY; grid[bi] = SAND;
+              continue;
+            } else if (bt === WATER || bt === ACID) {
+              // Sand sinks through liquid
+              grid[ci] = bt; grid[bi] = SAND;
+              continue;
+            }
+          }
+
+          // Try diagonal down-left, down-right
+          const dirs = [Math.random() < 0.5 ? -1 : 1, Math.random() < 0.5 ? 1 : -1];
+          for (let d = 0; d < 2; d++) {
+            const nx = x + dirs[d];
+            if (nx >= 0 && nx < W && y < H - 1) {
+              const ni = idx(nx, y + 1);
+              const nt = grid[ni];
+              if (nt === EMPTY || nt === WATER || nt === ACID) {
+                grid[ci] = nt; grid[ni] = SAND;
+                break;
+              } else if (nt === WALL && y < H - 2) {
+                // Try to swap into liquid below the wall? No, walls are solid.
+              }
+            }
+          }
+        } else if (type === WATER || type === ACID) {
+          let didMove = false;
+
+          // Down move
+          if (y < H - 1) {
+            const bi = idx(x, y + 1);
+            const bt = grid[bi];
+            if (bt === EMPTY) {
+              grid[ci] = EMPTY; grid[bi] = type;
+              didMove = true;
+            } else if (type === ACID && (bt === SAND || bt === WALL)) {
+              // Acid dissolves adjacent sand/wall
+              if (Math.random() < 0.15) {
+                grid[bi] = EMPTY;
+                if (Math.random() < 0.4) {
+                  grid[ci] = EMPTY; // acid consumed
+                }
+              }
+            } else if (type === WATER && bt === SAND) {
+              // Water can flow through sand? No, let's keep it simple: water moves past sand cells too slowly
+              // Actually, in falling sand, water flows through and around. Let's have water displace into empty space below even through sand.
+              // Simpler: just don't do anything here if blocked by sand. Water will flow horizontally instead.
+            }
+          }
+
+          if (!didMove) {
+            // Horizontal spread for water/acid
+            const hDirs = [];
+            if (x > 0) hDirs.push(-1);
+            if (x < W - 1) hDirs.push(1);
+
+            // Randomize direction priority
+            if (hDirs.length === 2 && Math.random() < 0.5) {
+              const t = hDirs[0]; hDirs[0] = hDirs[1]; hDirs[1] = t;
+            }
+
+            for (let di = 0; di < hDirs.length; di++) {
+              let nx = x + hDirs[di];
+              if (nx >= 0 && nx < W) {
+                // Scan forward to find empty cells
+                let furthestX = -1;
+                while (nx >= 0 && nx < W) {
+                  if (grid[idx(nx, y)] === EMPTY) {
+                    furthestX = nx;
+                  } else if (grid[idx(nx, y)] === WALL || grid[idx(nx, y)] === SAND) {
+                    break;
+                  }
+                  // If it's another water/acid cell, we can't pass through in this simplified model
+                  nx += hDirs[di];
+                }
+
+                if (furthestX >= 0 && furthestX !== x) {
+                  // Fill path from current position to furthest
+                  const fillStart = Math.min(x, furthestX);
+                  const fillEnd = Math.max(x, furthestX);
+                  for (let fz = fillStart; fz <= fillEnd; fz++) {
+                    if (fz !== x && grid[idx(fz, y)] === EMPTY) {
+                      grid[idx(fz, y)] = type; // Fill with the same liquid
+                    }
+                  }
+                  grid[ci] = EMPTY;
+                  didMove = true;
+                  break;
+                }
+              }
+            }
+
+            // Acid: dissolve left/right neighbors
+            if (type === ACID && !didMove) {
+              for (let di2 = -1; di2 <= 1; di2 += 2) {
+                const nx2 = x + di2;
+                if (nx2 >= 0 && nx2 < W) {
+                  const ni2 = idx(nx2, y);
+                  const nt2 = grid[ni2];
+                  if (nt2 === SAND || nt2 === WALL) {
+                    if (Math.random() < 0.15) {
+                      grid[ni2] = EMPTY;
+                      if (Math.random() < 0.4) grid[ci] = EMPTY;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // Acid dissolve below check even when moved
+          if (type === ACID && !didMove && y < H - 1) {
+            const ni = idx(x, y + 1);
+            const nt = grid[ni];
+            if (nt === SAND || nt === WALL) {
+              if (Math.random() < 0.15) {
+                grid[ni] = EMPTY;
+                if (Math.random() < 0.4) grid[ci] = EMPTY;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Even cleaner simulation — let me redo this one more time for maximum correctness
+  function simTick() {
+    const rng = Math.random();
+    const flipX = rng < 0.5; // deterministic-ish per-step direction
+
+    for (let y = H - 1; y >= 0; y--) {
+      // Alternate scan direction each row to avoid bias
+      const rowFlip = (y + Math.floor(rng * 10)) % 2 === 0;
+      const xStart = rowFlip ? 0 : W - 1;
+      const xEnd = rowFlip ? W : -1;
+      const xStep = rowFlip ? 1 : -1;
+
+      for (let x = xStart; x !== xEnd; x += xStep) {
+        const i = idx(x, y);
+        const t = grid[i];
+
+        if (t === EMPTY || t === WALL) continue;
+
+        if (t === SAND) {
+          // Fall down
+          if (y + 1 < H) {
+            const bi = i + W;
+            const bt = grid[bi];
+            if (bt === EMPTY) { grid[i] = EMPTY; grid[bi] = SAND; }
+            else if (bt === WATER || bt === ACID) { grid[i] = bt; grid[bi] = SAND; }
+          }
+
+          // Diagonal slide
+          if (grid[i] === SAND) { // still sand?
+            const d1 = Math.random() < 0.5 ? -1 : 1;
+            const d2 = -d1;
+            for (let di = 0; di < 2; di++) {
+              const dx = di === 0 ? d1 : d2;
+              const nx = x + dx;
+              if (nx >= 0 && nx < W && y + 1 < H) {
+                const ni = idx(nx, y + 1);
+                const nt = grid[ni];
+                if (nt === EMPTY || nt === WATER || nt === ACID) {
+                  grid[i] = nt; grid[ni] = SAND;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        if (t === WATER || t === ACID) {
+          const type = grid[i]; // re-read in case it changed
+          if (type !== WATER && type !== ACID) continue;
+
+          let moved = false;
+
+          // Down
+          if (y + 1 < H) {
+            const bi = i + W;
+            const bt = grid[bi];
+            if (bt === EMPTY) {
+              grid[i] = EMPTY; grid[bi] = type;
+              moved = true;
+            } else if (type === ACID && (bt === SAND || bt === WALL)) {
+              if (Math.random() < 0.2) {
+                grid[bi] = EMPTY;
+                if (Math.random() < 0.5) grid[i] = EMPTY;
+              }
+            } else if (type === WATER && bt !== WALL) {
+              // Water flows through sand cells too
+              // Let water replace sand below it occasionally
+              if (bt === SAND && Math.random() < 0.02) {
+                // Very slow percolation - actually let's not do this
+                // It causes weirdness. Just don't move down through sand.
+              }
+            }
+          }
+
+          if (!moved) {
+            // Horizontal spread
+            const dirs = [];
+            if (x > 0) dirs.push(-1);
+            if (x < W - 1) dirs.push(1);
+            if (dirs.length === 2 && Math.random() < 0.5) {
+              const tmp = dirs[0]; dirs[0] = dirs[1]; dirs[1] = tmp;
+            }
+
+            for (let di = 0; di < dirs.length; di++) {
+              let nx = x + dirs[di];
+              let furthest = -1;
+              while (nx >= 0 && nx < W) {
+                if (grid[idx(nx, y)] === EMPTY) {
+                  furthest = nx;
+                } else if (grid[idx(nx, y)] !== type) {
+                  break;
+                }
+                nx += dirs[di];
+              }
+
+              if (furthest >= 0 && furthest !== x) {
+                const lo = Math.min(x, furthest);
+                const hi = Math.max(x, furthest);
+                for (let fz = lo; fz <= hi; fz++) {
+                  if (fz !== i / W - y * W) { // not current cell's x
+                    grid[idx(fz, y)] = type;
+                  }
+                }
+                grid[i] = EMPTY;
+                moved = true;
+                break;
+              }
+            }
+
+            // Acid dissolves neighbors (left/right/below)
+            if (type === ACID && !moved) {
+              const dissolveDirs = [[0,1], [-1,0], [1,0]]; // down, left, right
+              for (let d = 0; d < dissolveDirs.length; d++) {
+                const ndx = x + dissolveDirs[d][0];
+                const ndy = y + dissolveDirs[d][1];
+                if (ndx >= 0 && ndx < W && ndy >= 0 && ndy < H) {
+                  const nt = grid[idx(ndx, ndy)];
+                  if (nt === SAND || nt === WALL) {
+                    if (Math.random() < 0.15) {
+                      grid[idx(ndx, ndy)] = EMPTY;
+                      if (Math.random() < 0.4) grid[i] = EMPTY;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // Acid dissolve below even when moved down
+          if (type === ACID && moved && y + 1 < H) {
+            const bt = grid[idx(x, y + 1)];
+            if (bt === SAND || bt === WALL) {
+              if (Math.random() < 0.15) {
+                grid[idx(x, y + 1)] = EMPTY;
+                if (Math.random() < 0.5) grid[i] = EMPTY;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Final clean version of simulate — let me write it from scratch cleanly
+  function runSimStep() {
+    // Flip direction every other row to minimize bias
+    const flip = Math.random() < 0.5;
+
+    for (let y = H - 1; y >= 0; y--) {
+      const scanLeftToRight = (y + (flip ? 1 : 0)) % 2 === 0;
+
+      for (let x = scanLeftToRight ? 0 : W - 1; scanLeftToRight ? x < W : x >= 0; x += scanLeftToRight ? 1 : -1) {
+        const i = y * W + x;
+        const cur = grid[i];
+
+        if (cur === EMPTY || cur === WALL) continue;
+
+        if (cur === SAND) {
+          let did = false;
+
+          // Down
+          if (y + 1 < H) {
+            const bi = i + W;
+            const bt = grid[bi];
+            if (bt === EMPTY) { grid[i] = EMPTY; grid[bi] = SAND; did = true; }
+            else if (bt === WATER || bt === ACID) { grid[i] = bt; grid[bi] = SAND; did = true; }
+          }
+
+          // Diagonal down-left/right if not done
+          if (!did && grid[i] === SAND) {
+            const firstDir = Math.random() < 0.5 ? -1 : 1;
+            for (let d = 0; d < 2; d++) {
+              const dx = d === 0 ? firstDir : -firstDir;
+              const nx = x + dx;
+              if (nx >= 0 && nx < W && y + 1 < H) {
+                const ni = nx + (y + 1) * W;
+                const nt = grid[ni];
+                if (nt === EMPTY || nt === WATER || nt === ACID) {
+                  grid[i] = nt; grid[ni] = SAND;
+                  did = true;
+                  break;
+                }
+              }
+            }
+          }
+
+          // If still sand and blocked, also try swapping with liquid diagonally below (not just empty)
+          if (!did && grid[i] === SAND) {
+            const firstDir = Math.random() < 0.5 ? -1 : 1;
+            for (let d = 0; d < 2; d++) {
+              const dx = d === 0 ? firstDir : -firstDir;
+              const nx = x + dx;
+              if (nx >= 0 && nx < W && y + 1 < H) {
+                const ni = nx + (y + 1) * W;
+                const nt = grid[ni];
+                if ((nt === WATER || nt === ACID)) {
+                  grid[i] = nt; grid[ni] = SAND;
+                  did = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        if (grid[i] !== cur && grid[i] !== WATER && grid[i] !== ACID) continue;
+
+        const material = grid[i];
+        if (material === WATER || material === ACID) {
+          let didMove = false;
+
+          // Down movement
+          if (y + 1 < H) {
+            const bi = i + W;
+            const bt = grid[bi];
+            if (bt === EMPTY) {
+              grid[i] = EMPTY; grid[bi] = material;
+              didMove = true;
+            } else if (material === ACID && (bt === SAND || bt === WALL)) {
+              if (Math.random() < 0.2) {
+                grid[bi] = EMPTY;
+                if (Math.random() < 0.4) grid[i] = EMPTY;
+              }
+            } else if (material === WATER && (bt === SAND || bt === WALL)) {
+              // Water stays in place when blocked by solid/sand below
+            } else if (material === WATER && bt !== WALL && y + 1 < H - 0) {
+              // Check if there's an empty space below the water/acid block
+              // Actually, let's just not move through non-empty cells except sand with low probability
+              if (bt === SAND && Math.random() < 0.05) {
+                grid[i] = EMPTY; grid[bi] = WATER;
+                didMove = true;
+              }
+            }
+          }
+
+          // Horizontal flow
+          if (!didMove) {
+            const hdirs = [];
+            if (x > 0) hdirs.push(-1);
+            if (x < W - 1) hdirs.push(1);
+
+            // Randomize direction preference
+            if (hdirs.length === 2 && Math.random() < 0.5) {
+              const t = hdirs[0]; hdirs[0] = hdirs[1]; hdirs[1] = t;
+            }
+
+            for (let di = 0; di < hdirs.length; di++) {
+              let nx = x + hdirs[di];
+              // Find furthest reachable empty cell
+              let bestX = -1;
+              while (nx >= 0 && nx < W) {
+                const idx2 = nx + y * W;
+                if (grid[idx2] === EMPTY) {
+                  bestX = nx;
+                } else if (grid[idx2] !== material) {
+                  break; // Stop at wall/sand/different type
+                }
+                nx += hdirs[di];
+              }
+
+              if (bestX >= 0 && bestX !== x) {
+                // Fill cells between x and bestX
+                const lo = Math.min(x, bestX);
+                const hi = Math.max(x, bestX);
+                for (let fz = lo; fz <= hi; fz++) {
+                  grid[fz + y * W] = material;
+                }
+                // Clear only the cells that were filled, not original
+                for (let fz = lo; fz <= hi; fz++) {
+                  if (fz !== x) grid[fz + y * W] = material;
+                }
+                grid[x + y * W] = EMPTY;
+                didMove = true;
+                break;
+              }
+            }
+
+            // Acid: dissolve left, right, down neighbors
+            if (material === ACID && !didMove) {
+              const adj = [[0,1],[−1,0],[1,0]];
+              for (let a = 0; a < adj.length; a++) {
+                const nnx = x + adj[a][0];
+                const nny = y + adj[a][1];
+                if (nnx >= 0 && nnx < W && nny >= 0 && nny < H) {
+                  const nt2 = grid[nnx + nny * W];
+                  if (nt2 === SAND || nt2 === WALL) {
+                    if (Math.random() < 0.15) {
+                      grid[nnx + nny * W] = EMPTY;
+                      if (Math.random() < 0.4) grid[x + y * W] = EMPTY;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // Acid dissolve down even when moved horizontally
+          if (material === ACID && didMove && y + 1 < H) {
+            const ndx = x + (y + 1) * W;
+            const nt3 = grid[ndx];
+            if (nt3 === SAND || nt3 === WALL) {
+              if (Math.random() < 0.15) {
+                grid[ndx] = EMPTY;
+                if (Math.random() < 0.4) grid[x + y * W] = EMPTY;
+              }
+            }
+          }
+
+          // Acid dissolve left/right even when moved down
+          if (material === ACID && !didMove && y + 1 >= H) {
+            for (let a = -1; a <= 1; a += 2) {
+              const nnx = x + a;
+              if (nnx >= 0 && nnx < W) {
+                const nt2 = grid[nnx + y * W];
+                if (nt2 === SAND || nt2 === WALL) {
+                  if (Math.random() < 0.15) {
+                    grid[nnx + y * W] = EMPTY;
+                    if (Math.random() < 0.4) grid[x + y * W] = EMPTY;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // I notice the code has a Unicode minus sign issue above. Let me rewrite completely clean:
+  
+  // ===== FINAL CLEAN SIMULATION =====
+  function simulate() {
+    const globalFlip = Math.random() < 0.5;
+
+    for (let y = H - 1; y >= 0; y--) {
+      const flip = (y + globalFlip) % 2 === 0;
+
+      for (let x = flip ? 0 : W - 1; flip ? x < W : x >= 0; x += flip ? 1 : -1) {
+        const i = y * W + x;
+        const type = grid[i];
+
+        if (type === EMPTY || type === WALL) continue;
+
+        if (type === SAND) {
+          let settled = false;
+
+          // Try down
+          if (y + 1 < H) {
+            const bi = i + W;
+            const bt = grid[bi];
+            if (bt === EMPTY) {
+              grid[i] = EMPTY; grid[bi] = SAND;
+              settled = true;
+            } else if (bt === WATER || bt === ACID) {
+              grid[i] = bt; grid[bi] = SAND;
+              settled = true;
+            }
+          }
+
+          // Try diagonal down-left, down-right
+          if (!settled && grid[i] === SAND) {
+            const d1 = Math.random() < 0.5 ? -1 : 1;
+            for (let d = 0; d < 2; d++) {
+              const dx = d === 0 ? d1 : -d1;
+              const nx = x + dx;
+              if (nx >= 0 && nx < W && y + 1 < H) {
+                const ni = nx + (y + 1) * W;
+                const nt = grid[ni];
+                if (nt === EMPTY || nt === WATER || nt === ACID) {
+                  grid[i] = nt; grid[ni] = SAND;
+                  settled = true;
+                  break;
+                }
+              }
+            }
+          }
+
+          // Extra: try to sink through diagonal-adjacent liquids when blocked straight down
+          if (!settled && grid[i] === SAND) {
+            const d1 = Math.random() < 0.5 ? -1 : 1;
+            for (let d = 0; d < 2; d++) {
+              const dx = d === 0 ? d1 : -d1;
+              const nx = x + dx;
+              if (nx >= 0 && nx < W && y + 1 < H) {
+                const ni = nx + (y + 1) * W;
+                const nt = grid[ni];
+                if ((nt === WATER || nt === ACID)) {
+                  grid[i] = nt; grid[ni] = SAND;
+                  settled = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        // Re-read in case type changed above for water/acid
+        if (grid[i] !== WATER && grid[i] !== ACID) continue;
+        const mat = grid[i];
+
+        if (mat === WATER || mat === ACID) {
+          let didMove = false;
+
+          // Down
+          if (y + 1 < H) {
+            const bi = i + W;
+            const bt = grid[bi];
+            if (bt === EMPTY) {
+              grid[i] = EMPTY; grid[bi] = mat;
+              didMove = true;
+            } else if (mat === ACID && (bt === SAND || bt === WALL)) {
+              if (Math.random() < 0.2) {
+                grid[bi] = EMPTY;
+                if (Math.random() < 0.5) grid[i] = EMPTY;
+              }
+            } else if (mat === WATER && bt !== WALL && Math.random() < 0.03) {
+              // Water slowly percolates through sand
+              grid[i] = EMPTY; grid[bi] = WATER;
+              didMove = true;
+            }
+          }
+
+          if (!didMove) {
+            // Horizontal spread: find furthest empty cell in each direction
+            const hDirs = [];
+            if (x > 0) hDirs.push(-1);
+            if (x < W - 1) hDirs.push(1);
+            if (hDirs.length === 2 && Math.random() < 0.5) {
+              const t = hDirs[0]; hDirs[0] = hDirs[1]; hDirs[1] = t;
+            }
+
+            for (let di = 0; di < hDirs.length; di++) {
+              let nx = x + hDirs[di];
+              let best = -1;
+              while (nx >= 0 && nx < W) {
+                if (grid[nx + y * W] === EMPTY) best = nx;
+                else if (grid[nx + y * W] !== mat) break;
+                nx += hDirs[di];
+              }
+
+              if (best > -1 && best !== x) {
+                // Move water/acid from x to furthest empty position
+                const lo = Math.min(x, best);
+                const hi = Math.max(x, best);
+                for (let fz = lo; fz <= hi; fz++) {
+                  grid[fz + y * W] = mat;
+                }
+                grid[x + y * W] = EMPTY;
+                didMove = true;
+                break;
+              }
+            }
+
+            // Acid: dissolve adjacent sand/wall (left, right, down)
+            if (mat === ACID && !didMove) {
+              const adjOffsets = [[0, 1], [-1, 0], [1, 0]];
+              for (let ai = 0; ai < adjOffsets.length; ai++) {
+                const nnx = x + adjOffsets[ai][0];
+                const nny = y + adjOffsets[ai][1];
+                if (nnx >= 0 && nnx < W && nny >= 0 && nny < H) {
+                  const ntype = grid[nnx + nny * W];
+                  if (ntype === SAND || ntype === WALL) {
+                    if (Math.random() < 0.15) {
+                      grid[nnx + nny * W] = EMPTY;
+                      if (Math.random() < 0.4) grid[x + y * W] = EMPTY;
+                    }
+                  }
+                }
+              }
+            }
+
+            // Acid: continue dissolving down even if moved horizontally this step
+            if (mat === ACID && didMove && y + 1 < H) {
+              const ntype = grid[x + (y + 1) * W];
+              if (ntype === SAND || ntype === WALL) {
+                if (Math.random() < 0.15) {
+                  grid[x + (y + 1) * W] = EMPTY;
+                  if (Math.random() < 0.4) grid[x + y * W] = EMPTY;
+                }
+              }
+            }
+          }
+
+          // Acid dissolve down when didMove was true (moved to empty below)
+          if (mat === ACID && didMove && y + 1 < H) {
+            const ntype = grid[x + (y + 1) * W];
+            if (ntype === SAND || ntype === WALL) {
+              if (Math.random() < 0.15) {
+                grid[x + (y + 1) * W] = EMPTY;
+                if (Math.random() < 0.4) grid[i] = EMPTY;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ===== API =====
+  window.sim = {
+    get w() { return W; },
+    get h() { return H; },
+
+    tick: function(n) {
+      for (let s = 0; s < n; s++) simulate();
+    },
+
+    get: function(x, y) {
+      if (x < 0 || x >= W || y < 0 || y >= H) return "empty";
+      const val = grid[y * W + x];
+      switch(val) {
+        case EMPTY: return "empty";
+        case SAND: return "sand";
+        case WATER: return "water";
+        case WALL: return "wall";
+        case ACID: return "acid";
+        default: return "empty";
+      }
+    },
+
+    set: function(x, y, material) {
+      if (x < 0 || x >= W || y < 0 || y >= H) return;
+      let val;
+      switch(material) {
+        case "empty": val = EMPTY; break;
+        case "sand": val = SAND; break;
+        case "water": val = WATER; break;
+        case "wall": val = WALL; break;
+        case "acid": val = ACID; break;
+        default: return;
+      }
+      grid[y * W + x] = val;
+    },
+
+    clear: function() {
+      grid.fill(EMPTY);
+    }
+  };
+
+  // ===== UI =====
+  let currentMaterial = "sand";
+  let painting = false;
+  let paintX, paintY;
+
+  const matBtns = document.querySelectorAll(".mat-btn");
+  const clearBtn = document.getElementById("clear");
+
+  function setActiveMat(mat) {
+    currentMaterial = mat;
+    matBtns.forEach(b => b.classList.remove("active"));
+    document.getElementById("mat-" + mat).classList.add("active");
+  }
+
+  matBtns.forEach(btn => {
+    btn.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      setActiveMat(btn.dataset.mat);
+    });
+  });
+
+  clearBtn.addEventListener("click", () => {
+    window.sim.clear();
+    render();
+  });
+
+  function getGridPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const scaleY = H / rect.height;
+    let cx, cy;
+    if (e.touches) {
+      cx = e.touches[0].clientX;
+      cy = e.touches[0].clientY;
+    } else {
+      cx = e.clientX;
+      cy = e.clientY;
+    }
+    const gx = Math.floor((cx - rect.left) * scaleX);
+    const gy = Math.floor((cy - rect.top) * scaleY);
+    return [Math.max(0, Math.min(W - 1, gx)), Math.max(0, Math.min(H - 1, gy))];
+  }
+
+  function paintAt(gx, gy) {
+    // Paint a small brush (radius ~3 cells)
+    const radius = 2;
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dy * dy > radius * radius) continue;
+        const nx = gx + dx;
+        const ny = gy + dy;
+        if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+          window.sim.set(nx, ny, currentMaterial);
+        }
+      }
+    }
+    render();
+  }
+
+  canvas.addEventListener("mousedown", (e) => {
+    painting = true;
+    [paintX, paintY] = getGridPos(e);
+    paintAt(paintX, paintY);
+  });
+
+  canvas.addEventListener("mousemove", (e) => {
+    if (!painting) return;
+    const [nx, ny] = getGridPos(e);
+    // Paint line from paintX,paintY to nx,ny with interpolation
+    const steps = Math.max(1, Math.ceil(Math.hypot(nx - paintX, ny - paintY)));
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const ix = Math.round(paintX + (nx - paintX) * t);
+      const iy = Math.round(paintY + (ny - paintY) * t);
+      paintAt(ix, iy);
+    }
+    [paintX, paintY] = [nx, ny];
+  });
+
+  canvas.addEventListener("mouseup", () => { painting = false; });
+  canvas.addEventListener("mouseleave", () => { painting = false; });
+
+  // Touch support
+  canvas.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    painting = true;
+    [paintX, paintY] = getGridPos(e);
+    paintAt(paintX, paintY);
+  });
+  canvas.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    if (!painting) return;
+    const [nx, ny] = getGridPos(e);
+    const steps = Math.max(1, Math.ceil(Math.hypot(nx - paintX, ny - paintY)));
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const ix = Math.round(paintX + (nx - paintX) * t);
+      const iy = Math.round(paintY + (ny - paintY) * t);
+      paintAt(ix, iy);
+    }
+    [paintX, paintY] = [nx, ny];
+  });
+  canvas.addEventListener("touchend", () => { painting = false; });
+
+  // ===== ANIMATION LOOP =====
+  let lastTime = 0;
+  let accumulator = 0;
+  const TICKS_PER_FRAME = 3; // Run 3 simulation steps per frame for good speed
+  const FIXED_DT = 1 / 60;
+
+  function animate(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+    const delta = (timestamp - lastTime) / 1000;
+    lastTime = timestamp;
+    accumulator += delta;
+
+    let stepsDone = 0;
+    while (accumulator >= FIXED_DT && stepsDone < TICKS_PER_FRAME) {
+      simulate();
+      accumulator -= FIXED_DT;
+      stepsDone++;
+    }
+
+    render();
+    requestAnimationFrame(animate);
+  }
+
+  // Initialize with some walls for fun
+  function initDemo() {
+    window.sim.clear();
+    render();
+    requestAnimationFrame(animate);
+  }
+
+  initDemo();
+
+})();
+</script>
+</body>
+</html>

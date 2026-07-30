@@ -1,14 +1,3 @@
-"""A provider rate limit must never be scored as a model failure.
-
-kimi-k3 landed a raw 0.25 while scoring 1.0 on every task it actually reached:
-OpenRouter's shared pool was throttling Moonshot, and each 429 was recorded as
-score 0.0 "run failed (all attempts errored)". That is the same class of lie the
-no-op-floors-at-zero rule exists to prevent - a capability failure on a model
-that never got a turn.
-
-The usage-limit path already got this right (drop the task, write no score.json,
-let a re-run fill it in). These tests hold the 429 path to the same bar.
-"""
 
 import pytest
 
@@ -48,7 +37,6 @@ def test_real_openrouter_429_body():
 
 
 class _Throttled:
-    """An adapter whose provider is always busy."""
     def __init__(self, retry_after=None):
         self.calls = 0
         self.retry_after = retry_after
@@ -88,8 +76,6 @@ def test_exhausted_retries_on_429_raise_rather_than_score_zero(tmp_path, monkeyp
 
 
 def test_a_plain_5xx_still_fails_normally(tmp_path, monkeypatch):
-    """Only rate limits get the unscored treatment - a broken provider is still
-    a failure the run records."""
     r = _runner(tmp_path, _Broken(), monkeypatch)
     attempts = []
     out = r._chat_with_retries(tmp_path, _task(), [{"role": "user", "content": "x"}],
@@ -125,8 +111,6 @@ def test_streak_threshold_exists():
 
 
 def test_bad_parameter_is_refused_not_a_model_failure():
-    """kimi-k3 took 55 zeros because Moonshot rejects temperature 0.2. The model
-    never saw the prompt, so that is our config, not its capability."""
     e = _classify_http(
         400, '{"error":{"message":"invalid temperature: only 1 is allowed"}}')
     assert e.kind == "request_rejected"
@@ -138,13 +122,6 @@ def test_unknown_model_id_is_refused():
 
 
 def test_context_overflow_is_NOT_a_refused_request():
-    """A 400 saying the prompt exceeds the window is the model's real, known
-    limit — it must keep scoring 0 for THAT task and let the model continue.
-
-    Classifying it as request_rejected made the runner drop the task unscored
-    AND skip the model's remaining tasks, so one oversized prompt would abort a
-    local model's whole suite (qwen3-32b hits this on ctx-008-recall-128k).
-    """
     body = ('{"error":{"code":400,"message":"request (182967 tokens) exceeds '
             'the available context size (32768 tokens)",'
             '"type":"exceed_context_size_error"}}')
@@ -155,8 +132,6 @@ def test_context_overflow_is_NOT_a_refused_request():
 
 
 def test_refused_kinds_are_exactly_the_drop_unscored_set():
-    """The runner unwinds unscored on these two kinds only — a wider set would
-    start dropping real capability failures."""
     assert _classify_http(400, "bad body").kind == "request_rejected"
     assert _classify_http(401, "nope").kind == "auth"
     assert _classify_http(429, "slow").kind == "rate_limit"
@@ -165,14 +140,6 @@ def test_refused_kinds_are_exactly_the_drop_unscored_set():
 
 
 def test_timeout_always_retries(tmp_path, monkeypatch):
-    """A timeout must ALWAYS retry — never skipped on predicted slowness.
-
-    The dataset shows a retry rescuing 7 of 8 timed-out cells, four of which had
-    streamed NOTHING first. Gating the retry on measured first-token time was
-    tried and immediately disproved: the probe put sonnet-4-6 at 1160s on
-    ctx-013 (over its 900s budget), yet a live attempt answered at 805s and
-    scored 1.0 — the skip would have recorded a 0. Think-time varies run to run,
-    so no measurement licenses skipping the second attempt."""
     from types import SimpleNamespace
 
     from harness import runner as R

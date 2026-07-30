@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Top-Down Billiards</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #1a1a1a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: sans-serif;
+    overflow: hidden;
+  }
+  #game {
+    position: relative;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    background: #3e2723;
+    border-radius: 14px;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  #ui {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    pointer-events: none;
+    user-select: none;
+  }
+  #resetBtn {
+    pointer-events: auto;
+    padding: 8px 16px;
+    font-size: 16px;
+    font-weight: bold;
+    color: #1b5e20;
+    background: #fff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  }
+  #resetBtn:hover { background: #e0e0e0; }
+  #instructions {
+    margin-top: 10px;
+    padding: 10px 14px;
+    background: rgba(0,0,0,0.55);
+    color: #fff;
+    border-radius: 8px;
+    font-size: 14px;
+    line-height: 1.35;
+    max-width: 260px;
+  }
+</style>
+</head>
+<body>
+<div id="game">
+  <canvas id="table"></canvas>
+  <div id="ui">
+    <button id="resetBtn">Reset / Rack</button>
+    <div id="instructions">
+      <strong>How to play</strong><br>
+      Press on the white cue ball, drag back to aim, and release to shoot.
+      A longer drag means a harder shot.
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  // ---- simulation constants ----
+  const R = 10;            // ball radius in playfield pixels
+  const W = 760;           // playfield width
+  const H = 380;           // playfield height
+  const RAIL = 40;         // rail margin used for rendering
+  const POCKET_R = 1.8 * R;
+  const FRICTION = 500;    // deceleration px/s^2
+  const STOP_V = 1.5;      // speed below which a ball is stopped
+  const WALL_E = 0.92;     // wall restitution
+  const MAX_DT = 1 / 300;  // physics substep
+
+  // ---- pocket positions (playfield coordinates) ----
+  const POCKETS = [
+    {x: 0,    y: 0},
+    {x: W/2,  y: 0},
+    {x: W,    y: 0},
+    {x: 0,    y: H},
+    {x: W/2,  y: H},
+    {x: W,    y: H}
+  ];
+
+  // ---- state ----
+  const balls = [];
+  let cueIndex = -1;
+  let running = false;
+  let rafId = null;
+  let lastT = 0;
+
+  const canvas = document.getElementById('table');
+  const ctx = canvas.getContext('2d');
+  canvas.width = W + 2 * RAIL;
+  canvas.height = H + 2 * RAIL;
+
+  // ---- aim/shoot input ----
+  const input = { dragging: false, x: 0, y: 0 };
+
+  // ---- object exposed to the harness ----
+  window.sim = {
+    W: W,
+    H: H,
+    R: R,
+
+    reset: function(arr) {
+      balls.length = 0;
+      cueIndex = -1;
+      if (Array.isArray(arr)) {
+        for (let i = 0; i < arr.length; i++) {
+          const b = arr[i];
+          balls.push({
+            x: Number(b.x) || 0,
+            y: Number(b.y) || 0,
+            vx: Number(b.vx) || 0,
+            vy: Number(b.vy) || 0,
+            potted: false,
+            cue: !!b.cue
+          });
+          if (balls[i].cue) cueIndex = i;
+        }
+      }
+      render();
+    },
+
+    state: function() {
+      return balls.map(function(b) {
+        return { x: b.x, y: b.y, vx: b.vx, vy: b.vy, potted: b.potted, cue: b.cue };
+      });
+    },
+
+    shoot: function(vx, vy) {
+      if (cueIndex >= 0 && !balls[cueIndex].potted) {
+        balls[cueIndex].vx = Number(vx) || 0;
+        balls[cueIndex].vy = Number(vy) || 0;
+      }
+    },
+
+    step: function(dt) {
+      const t = Math.max(0, Number(dt) || 0);
+      if (t > 0) {
+        const steps = Math.max(1, Math.ceil(t / MAX_DT));
+        const h = t / steps;
+        for (let i = 0; i < steps; i++) {
+          integrate(h);
+          resolveCollisions();
+          handlePockets();
+          applyFriction(h);
+        }
+      }
+      render();
+    },
+
+    pause: function() {
+      running = false;
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      lastT = 0;
+    },
+
+    resume: function() {
+      if (!running) {
+        running = true;
+        lastT = 0;
+        rafId = requestAnimationFrame(loop);
+      }
+    }
+  };
+
+  // ---- rack layout for the playable game ----
+  function makeRack() {
+    const arr = [];
+    // cue ball
+    arr.push({ x: W * 0.25, y: H / 2, vx: 0, vy: 0, cue: true });
+    // triangle of object balls
+    const apexX = W * 0.72;
+    const apexY = H / 2;
+    const dx = R * 2 * Math.cos(Math.PI / 6);
+    const dy = R * 2;
+    for (let row = 0; row < 5; row++) {
+      for (let col = 0; col <= row; col++) {
+        arr.push({
+          x: apexX + row * dx,
+          y: apexY + (col - row / 2) * dy,
+          vx: 0,
+          vy: 0
+        });
+      }
+    }
+    return arr;
+  }
+
+  // ---- coordinate helpers ----
+  function toCanvas(x, y) {
+    return { x: x + RAIL, y: y + RAIL };
+  }
+
+  function getWorldPos(evt) {
+    const rect = canvas.getBoundingClientRect();
+    const sx = canvas.width / rect.width;
+    const sy = canvas.height / rect.height;
+    const clientX = evt.touches && evt.touches.length ? evt.touches[0].clientX : evt.clientX;
+    const clientY = evt.touches && evt.touches.length ? evt.touches[0].clientY : evt.clientY;
+    return {
+      x: (clientX - rect.left) * sx - RAIL,
+      y: (clientY - rect.top) * sy - RAIL
+    };
+  }
+
+  // ---- physics ----
+  function integrate(h) {
+    for (const b of balls) {
+      if (b.potted) continue;
+      b.x += b.vx * h;
+      b.y += b.vy * h;
+      // cushions
+      if (b.x < R) { b.x = R; b.vx = Math.abs(b.vx) * WALL_E; }
+      else if (b.x > W - R) { b.x = W - R; b.vx = -Math.abs(b.vx) * WALL_E; }
+      if (b.y < R) { b.y = R; b.vy = Math.abs(b.vy) * WALL_E; }
+      else if (b.y > H - R) { b.y = H - R; b.vy = -Math.abs(b.vy) * WALL_E; }
+    }
+  }
+
+  function applyFriction(h) {
+    for (const b of balls) {
+      if (b.potted) continue;
+      const v = Math.hypot(b.vx, b.vy);
+      if (v > 0) {
+        const nv = Math.max(0, v - FRICTION * h);
+        if (nv <= STOP_V) {
+          b.vx = 0;
+          b.vy = 0;
+        } else {
+          b.vx = (b.vx / v) * nv;
+          b.vy = (b.vy / v) * nv;
+        }
+      }
+    }
+  }
+
+  function resolveCollisions() {
+    const minD = 2 * R;
+    for (let i = 0; i < balls.length; i++) {
+      const bi = balls[i];
+      if (bi.potted) continue;
+      for (let j = i + 1; j < balls.length; j++) {
+        const bj = balls[j];
+        if (bj.potted) continue;
+        const dx = bj.x - bi.x;
+        const dy = bj.y - bi.y;
+        const dist2 = dx * dx + dy * dy;
+        if (dist2 >= minD * minD) continue;
+        const dist = Math.sqrt(dist2) || 0.0001;
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const rvx = bi.vx - bj.vx;
+        const rvy = bi.vy - bj.vy;
+        const vRel = rvx * nx + rvy * ny;
+        if (vRel > 0) {
+          // equal-mass elastic collision: exchange normal velocity components
+          bi.vx -= vRel * nx;
+          bi.vy -= vRel * ny;
+          bj.vx += vRel * nx;
+          bj.vy += vRel * ny;
+        }
+        // separate overlapping balls
+        const overlap = minD - dist;
+        if (overlap > 0) {
+          const k = overlap * 0.5 + 0.001;
+          bi.x -= nx * k;
+          bi.y -= ny * k;
+          bj.x += nx * k;
+          bj.y += ny * k;
+        }
+      }
+    }
+  }
+
+  function handlePockets() {
+    for (const b of balls) {
+      if (b.potted) continue;
+      for (const p of POCKETS) {
+        const dx = b.x - p.x;
+        const dy = b.y - p.y;
+        if (dx * dx + dy * dy <= POCKET_R * POCKET_R) {
+          b.potted = true;
+          b.x = p.x;
+          b.y = p.y;
+          b.vx = 0;
+          b.vy = 0;
+          break;
+        }
+      }
+    }
+  }
+
+  // ---- rendering ----
+  const BALL_COLORS = [
+    '#f1c40f', '#e74c3c', '#3498db', '#9b59b6', '#e67e22',
+    '#2ecc71', '#1abc9c', '#34495e', '#f1c40f', '#e74c3c',
+    '#3498db', '#9b59b6', '#e67e22', '#2ecc71', '#1abc9c'
+  ];
+
+  function ballColor(idx, b) {
+    if (b.cue) return '#f5f5f5';
+    return BALL_COLORS[idx % BALL_COLORS.length];
+  }
+
+  function drawBall(b, idx) {
+    const c = toCanvas(b.x, b.y);
+    const r = R - 0.5;
+    // shadow
+    ctx.beginPath();
+    ctx.arc(c.x + 2, c.y + 2, r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fill();
+    // ball body
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = ballColor(idx, b);
+    ctx.fill();
+    // subtle highlight
+    ctx.beginPath();
+    ctx.arc(c.x - r * 0.35, c.y - r * 0.35, r * 0.35, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fill();
+    // outline
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  function drawAim() {
+    if (cueIndex < 0) return;
+    const cue = balls[cueIndex];
+    if (cue.potted) return;
+    const dx = cue.x - input.x;
+    const dy = cue.y - input.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 2) return;
+    const dirX = dx / d;
+    const dirY = dy / d;
+    const maxDrag = 200;
+    const power = Math.min(d, maxDrag) / maxDrag;
+    const lineLen = power * 220;
+    const c1 = toCanvas(cue.x, cue.y);
+    const c2 = toCanvas(cue.x + dirX * lineLen, cue.y + dirY * lineLen);
+    ctx.beginPath();
+    ctx.moveTo(c1.x, c1.y);
+    ctx.lineTo(c2.x, c2.y);
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 6]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // ghost cue ball at end of line
+    ctx.beginPath();
+    ctx.arc(c2.x, c2.y, R - 1, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // outer rail/wood
+    ctx.fillStyle = '#4e342e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // playing surface
+    ctx.fillStyle = '#1b5e20';
+    ctx.fillRect(RAIL, RAIL, W, H);
+    // subtle inner rail edge
+    ctx.strokeStyle = '#3e2723';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(RAIL, RAIL, W, H);
+    // pockets
+    for (const p of POCKETS) {
+      const c = toCanvas(p.x, p.y);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, POCKET_R, 0, Math.PI * 2);
+      ctx.fillStyle = '#111';
+      ctx.fill();
+      ctx.strokeStyle = '#555';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    // balls
+    for (let i = 0; i < balls.length; i++) {
+      if (balls[i].potted) continue;
+      drawBall(balls[i], i);
+    }
+    // aim line
+    if (input.dragging) drawAim();
+  }
+
+  // ---- animation loop ----
+  function loop(ts) {
+    if (!running) return;
+    if (!lastT) lastT = ts;
+    const dt = Math.min((ts - lastT) / 1000, 0.05);
+    lastT = ts;
+    window.sim.step(dt);
+    rafId = requestAnimationFrame(loop);
+  }
+
+  // ---- mouse / touch interaction ----
+  function startDrag(e) {
+    if (e.type === 'touchstart') e.preventDefault();
+    const p = getWorldPos(e);
+    if (cueIndex < 0) return;
+    const cue = balls[cueIndex];
+    if (cue.potted) return;
+    if (Math.hypot(p.x - cue.x, p.y - cue.y) <= R * 2.5) {
+      input.dragging = true;
+      input.x = p.x;
+      input.y = p.y;
+      render();
+    }
+  }
+
+  function moveDrag(e) {
+    if (!input.dragging) return;
+    if (e.type === 'touchmove') e.preventDefault();
+    const p = getWorldPos(e);
+    input.x = p.x;
+    input.y = p.y;
+    render();
+  }
+
+  function endDrag(e) {
+    if (!input.dragging) return;
+    input.dragging = false;
+    const cue = balls[cueIndex];
+    if (!cue || cue.potted) return;
+    const dx = cue.x - input.x;
+    const dy = cue.y - input.y;
+    const d = Math.hypot(dx, dy);
+    if (d > 2) {
+      const maxDrag = 200;
+      const maxSpeed = 2500;
+      const speed = (Math.min(d, maxDrag) / maxDrag) * maxSpeed;
+      window.sim.shoot((dx / d) * speed, (dy / d) * speed);
+    }
+    render();
+  }
+
+  canvas.addEventListener('mousedown', startDrag);
+  window.addEventListener('mousemove', moveDrag);
+  window.addEventListener('mouseup', endDrag);
+  canvas.addEventListener('touchstart', startDrag, {passive: false});
+  canvas.addEventListener('touchmove', moveDrag, {passive: false});
+  window.addEventListener('touchend', endDrag);
+
+  // ---- reset button ----
+  document.getElementById('resetBtn').addEventListener('click', function() {
+    window.sim.reset(makeRack());
+    window.sim.resume();
+  });
+
+  // ---- start ----
+  window.sim.reset(makeRack());
+  window.sim.resume();
+})();
+</script>
+</body>
+</html>

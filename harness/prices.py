@@ -1,19 +1,3 @@
-"""Refresh gateway list prices into the model yamls.
-
-A model's `pricing:` is captured when it is registered and then never moves —
-but providers change prices, and OpenRouter's promotional `:free` variants stop
-being free. A frozen snapshot quietly turns into a lie, and the reports say so
-on /info. This re-reads the live catalog and writes the current numbers back,
-stamping `pricing_asof:` so the snapshot's age is visible instead of implied.
-
-What it does NOT do: rewrite history. `cost_usd` is computed and stored per
-result at RUN time, so refreshing prices never changes an already-recorded cost
-(and for gateway models that cost was the actual billed amount anyway). New
-prices apply to future runs and to anything that displays list price.
-
-    harness prices              # dry run — show what changed
-    harness prices --apply      # write the yamls
-"""
 
 import re
 from datetime import date
@@ -26,8 +10,6 @@ CATALOG_PROVIDERS = ("openai", "anthropic")
 
 
 def _catalog_prices() -> dict[str, tuple[float, float]]:
-    """model id -> (input_per_mtok, output_per_mtok) across every configured
-    interface that publishes pricing."""
     out: dict[str, tuple[float, float]] = {}
     for iface in (load_interfaces() or []):
         try:
@@ -40,8 +22,6 @@ def _catalog_prices() -> dict[str, tuple[float, float]]:
 
 
 def _apply_to_yaml(path: Path, in_p: float, out_p: float, asof: str) -> None:
-    """Line-edit the pricing (and stamp pricing_asof). Not a yaml round-trip —
-    safe_dump would strip the comments these files carry on purpose."""
     text = path.read_text(encoding="utf-8")
     new = f"pricing: {{ input_per_mtok: {in_p}, output_per_mtok: {out_p} }}"
     if re.search(r"^pricing:.*$", text, re.M):
@@ -57,7 +37,6 @@ def _apply_to_yaml(path: Path, in_p: float, out_p: float, asof: str) -> None:
 
 
 def refresh(apply: bool = False, progress=print) -> dict:
-    """Compare each registered catalog-priced model against the live catalog."""
     from .registry import load_models
 
     live = _catalog_prices()

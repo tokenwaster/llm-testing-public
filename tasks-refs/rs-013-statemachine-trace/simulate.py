@@ -1,5 +1,3 @@
-"""Author + simulate the rs-013 stack machine. Deterministic, no underflow by
-construction. Prints the five checkpoint answers and the program listing."""
 
 
 PROG = [

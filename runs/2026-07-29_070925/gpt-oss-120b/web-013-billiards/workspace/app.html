@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Billiards Demo</title>
+<style>
+  body{margin:0;background:#222;font-family:sans-serif;color:#eee;}
+  #ui{
+    position:absolute;top:10px;left:10px;z-index:10;
+  }
+  #ui button{
+    padding:5px 10px;margin-right:10px;
+  }
+  #info{
+    position:absolute;bottom:10px;left:10px;right:10px;
+    text-align:center;font-size:14px;
+    background:rgba(0,0,0,0.5);padding:5px;border-radius:4px;
+  }
+  canvas{display:block;margin:auto;background:#006600;}
+</style>
+</head>
+<body>
+<div id="ui">
+  <button id="resetBtn">Reset / Rack</button>
+  <button id="pauseBtn">Pause</button>
+</div>
+<canvas id="c"></canvas>
+<div id="info">
+  Click &amp; drag the white cue ball backward to aim.<br>
+  Release to shoot – longer drag = more power.
+</div>
+
+<script>
+(() => {
+  /* ---------- CONFIGURATION ---------- */
+  const W = 800;               // field width
+  const H = 400;               // field height
+  const R = 12;                // ball radius
+  const BALL_MASS = 1;         // equal mass for all balls
+  const FRICTION = 300;        // pixels/sec² (linear deceleration)
+  const POCKET_R = 22;         // pocket radius
+  const MAX_SHOT_SPEED = 1200; // limit for manual shots
+  const POWER_SCALE = 6;       // mouse drag → velocity multiplier
+
+  /* ---------- GLOBAL SIM OBJECT ---------- */
+  const sim = {
+    W, H, R,
+    _balls: [],          // internal ball data
+    _running: true,
+    _lastTime: null,
+    _animationId: null,
+
+    reset(ballsSpec) {
+      this._balls = ballsSpec.map((spec, i) => ({
+        x: spec.x,
+        y: spec.y,
+        vx: spec.vx || 0,
+        vy: spec.vy || 0,
+        cue: !!spec.cue,
+        potted: false,
+        color: spec.cue ? '#fff' : BallColors[i % BallColors.length],
+        idx: i
+      }));
+      this._draw();
+    },
+
+    step(dt) {
+      if (!this._running) return;
+      const b = this._balls;
+
+      // ---- motion & friction ----
+      for (let ball of b) {
+        if (ball.potted) continue;
+        // apply linear friction
+        const speed = Math.hypot(ball.vx, ball.vy);
+        if (speed > 0) {
+          const dec = FRICTION * dt;
+          const newSpeed = Math.max(0, speed - dec);
+          if (newSpeed === 0) {
+            ball.vx = ball.vy = 0;
+          } else {
+            const scale = newSpeed / speed;
+            ball.vx *= scale;
+            ball.vy *= scale;
+          }
+        }
+
+        // integrate position
+        ball.x += ball.vx * dt;
+        ball.y += ball.vy * dt;
+      }
+
+      // ---- cushion collisions ----
+      for (let ball of b) {
+        if (ball.potted) continue;
+        if (ball.x < R) { ball.x = R; ball.vx = Math.abs(ball.vx); }
+        if (ball.x > W - R) { ball.x = W - R; ball.vx = -Math.abs(ball.vx); }
+        if (ball.y < R) { ball.y = R; ball.vy = Math.abs(ball.vy); }
+        if (ball.y > H - R) { ball.y = H - R; ball.vy = -Math.abs(ball.vy); }
+      }
+
+      // ---- pocket detection ----
+      const pockets = [
+        [0,0],[W/2,0],[W,0],
+        [0,H],[W/2,H],[W,H]
+      ];
+      for (let ball of b) {
+        if (ball.potted) continue;
+        for (let [px,py] of pockets) {
+          const d = Math.hypot(ball.x-px, ball.y-py);
+          if (d <= POCKET_R) {
+            ball.potted = true;
+            ball.vx = ball.vy = 0;
+            break;
+          }
+        }
+      }
+
+      // ---- ball‑to‑ball collisions ----
+      for (let i = 0; i < b.length; i++) {
+        const bi = b[i];
+        if (bi.potted) continue;
+        for (let j = i+1; j < b.length; j++) {
+          const bj = b[j];
+          if (bj.potted) continue;
+          const dx = bj.x - bi.x;
+          const dy = bj.y - bi.y;
+          const dist = Math.hypot(dx, dy);
+          const minDist = 2*R;
+          if (dist < minDist && dist > 0) {
+            // resolve interpenetration
+            const overlap = minDist - dist;
+            const nx = dx/dist;
+            const ny = dy/dist;
+            bi.x -= nx * overlap/2;
+            bi.y -= ny * overlap/2;
+            bj.x += nx * overlap/2;
+            bj.y += ny * overlap/2;
+
+            // relative velocity along normal
+            const rvx = bi.vx - bj.vx;
+            const rvy = bi.vy - bj.vy;
+            const rel = rvx*nx + rvy*ny;
+            if (rel > 0) continue; // separating
+
+            // impulse scalar for equal masses, perfectly elastic
+            const impulse = -(2*rel) / (BALL_MASS + BALL_MASS);
+            const ix = impulse * nx;
+            const iy = impulse * ny;
+
+            bi.vx += ix / BALL_MASS;
+            bi.vy += iy / BALL_MASS;
+            bj.vx -= ix / BALL_MASS;
+            bj.vy -= iy / BALL_MASS;
+          }
+        }
+      }
+
+      this._draw();
+    },
+
+    state() {
+      return this._balls.map(b=>({
+        x:b.x, y:b.y,
+        vx:b.vx, vy:b.vy,
+        potted:b.potted,
+        cue:b.cue
+      }));
+    },
+
+    shoot(vx,vy) {
+      const cue = this._balls.find(b=>b.cue && !b.potted);
+      if (cue) {
+        cue.vx = vx;
+        cue.vy = vy;
+      }
+    },
+
+    pause() {
+      this._running = false;
+    },
+    resume() {
+      if (!this._running) {
+        this._running = true;
+        this._lastTime = performance.now();
+        this._loop(this._lastTime);
+      }
+    },
+
+    // ----- internal drawing helpers -----
+    _initCanvas() {
+      const canvas = document.getElementById('c');
+      canvas.width = W;
+      canvas.height = H;
+      this.ctx = canvas.getContext('2d');
+
+      // mouse handling for aiming
+      this._setupMouse(canvas);
+    },
+
+    _draw() {
+      const ctx = this.ctx;
+      ctx.clearRect(0,0,W,H);
+
+      // felt
+      ctx.fillStyle = '#004400';
+      ctx.fillRect(0,0,W,H);
+
+      // rails
+      const rail = 30;
+      ctx.fillStyle = '#663300';
+      ctx.fillRect(0,0,W,rail);                 // top
+      ctx.fillRect(0,H-rail,W,rail);           // bottom
+      ctx.fillRect(0,0,rail,H);                // left
+      ctx.fillRect(W-rail,0,rail,H);           // right
+
+      // pockets
+      const pockets = [
+        [rail,rail],[W/2,rail],[W-rail,rail],
+        [rail,H-rail],[W/2,H-rail],[W-rail,H-rail]
+      ];
+      ctx.fillStyle = '#000';
+      for (let [px,py] of pockets) {
+        ctx.beginPath();ctx.arc(px,py,POCKET_R,0,2*Math.PI);ctx.fill();
+      }
+
+      // balls
+      for (let ball of this._balls) {
+        if (ball.potted) continue;
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, R, 0, 2*Math.PI);
+        ctx.fillStyle = ball.color;
+        ctx.fill();
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // aiming guide (if dragging)
+      if (this._dragging && this._aimLine) {
+        const cue = this._balls.find(b=>b.cue && !b.potted);
+        if (cue) {
+          ctx.setLineDash([5,5]);
+          ctx.strokeStyle = 'yellow';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(cue.x, cue.y);
+          ctx.lineTo(this._mousePos.x, this._mousePos.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+    },
+
+    _setupMouse(canvas) {
+      this._dragging = false;
+      this._mousePos = {x:0,y:0};
+
+      canvas.addEventListener('mousedown', e=>{
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const cue = this._balls.find(b=>b.cue && !b.potted);
+        if (!cue) return;
+        const d = Math.hypot(mx-cue.x, my-cue.y);
+        if (d <= R && Math.hypot(cue.vx,cue.vy) < 20) { // allow only when nearly stopped
+          this._dragging = true;
+          this._dragStart = {x:mx, y:my};
+        }
+      });
+
+      canvas.addEventListener('mousemove', e=>{
+        const rect = canvas.getBoundingClientRect();
+        this._mousePos.x = e.clientX - rect.left;
+        this._mousePos.y = e.clientY - rect.top;
+        if (this._dragging) this._draw();
+      });
+
+      canvas.addEventListener('mouseup', e=>{
+        if (!this._dragging) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const dx = this._dragStart.x - mx;
+        const dy = this._dragStart.y - my;
+        const vx = Math.min(MAX_SHOT_SPEED, dx * POWER_SCALE);
+        const vy = Math.min(MAX_SHOT_SPEED, dy * POWER_SCALE);
+        this.shoot(vx, vy);
+        this._dragging = false;
+        this._draw();
+      });
+    },
+
+    // ----- main loop -----
+    _loop(timestamp) {
+      if (!this._running) return;
+      if (!this._lastTime) this._lastTime = timestamp;
+      const dt = (timestamp - this._lastTime)/1000;
+      this._lastTime = timestamp;
+      this.step(dt);
+      this._animationId = requestAnimationFrame(t=>this._loop(t));
+    },
+
+    start() {
+      this._initCanvas();
+      this._lastTime = performance.now();
+      this._animationId = requestAnimationFrame(t=>this._loop(t));
+    }
+  };
+
+  // ----- ball colours (excluding cue) -----
+  const BallColors = ['#ff0000','#ffff00','#0000ff','#ff6600',
+                      '#009900','#660066','#00cccc','#ff00ff',
+                      '#ffa500','#008080','#800000','brown',
+                      '#ffd700','#a52a2a','#4682b4'];
+
+  // ----- preset rack (standard 15 balls) -----
+  function makeRack() {
+    const balls = [];
+    // cue ball
+    balls.push({x: R+60, y:H/2, cue:true});
+    // triangle centre
+    const cx = W - 150;
+    const cy = H/2;
+    const rowSpacing = Math.sqrt(3)*R; // vertical spacing
+    let count = 1;
+    for (let row=0; row<5; row++) {
+      const n = row+1;
+      const offsetX = -row*R*2;
+      const startY = cy - rowSpacing*row/2;
+      for (let i=0;i<n;i++) {
+        balls.push({x: cx+offsetX, y:startY + i*rowSpacing});
+        count++;
+      }
+    }
+    return balls;
+  }
+
+  // ----- UI wiring -----
+  document.getElementById('resetBtn').addEventListener('click',()=>{
+    sim.reset(makeRack());
+    sim.resume();
+    document.getElementById('pauseBtn').textContent='Pause';
+  });
+
+  document.getElementById('pauseBtn').addEventListener('click',()=>{
+    if (sim._running) {
+      sim.pause();
+      document.getElementById('pauseBtn').textContent='Resume';
+    } else {
+      sim.resume();
+      document.getElementById('pauseBtn').textContent='Pause';
+    }
+  });
+
+  // initialise
+  sim.start();
+  sim.reset(makeRack());
+
+  // expose globally
+  window.sim = sim;
+})();
+</script>
+</body>
+</html>

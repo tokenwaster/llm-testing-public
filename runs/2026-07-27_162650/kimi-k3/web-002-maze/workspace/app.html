@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maze Bots — 24 Trémaux Explorers</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:#0d1117;color:#e6edf3;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;
+  padding:18px 12px 30px;gap:12px;
+}
+h1{font-size:20px;letter-spacing:4px;color:#f0f6fc;font-weight:800}
+h1 b{color:#3fb950}
+.sub{font-size:12px;color:#8b949e;max-width:680px;text-align:center;line-height:1.55}
+#hud{display:flex;align-items:center;gap:16px;flex-wrap:wrap;justify-content:center;
+  background:#161b22;border:1px solid #30363d;border-radius:10px;padding:10px 18px}
+#timer{font-size:17px;font-weight:800;color:#58a6ff;min-width:250px;text-align:center;font-variant-numeric:tabular-nums}
+#timer.frozen{color:#3fb950}
+#completed{font-size:14px;font-weight:800;color:#d29922;min-width:150px;text-align:center;font-variant-numeric:tabular-nums}
+#completed.all{color:#3fb950}
+#reset{font:inherit;font-weight:800;font-size:13px;cursor:pointer;
+  background:#238636;color:#fff;border:1px solid rgba(240,246,252,.25);
+  border-radius:8px;padding:8px 16px}
+#reset:hover{background:#2ea043}
+#reset:active{transform:translateY(1px)}
+#status{min-height:17px;font-size:12.5px;font-weight:700;color:#3fb950;text-align:center}
+#maze{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:10px;
+  line-height:0;box-shadow:0 10px 34px rgba(0,0,0,.5);width:min(620px,94vw)}
+#cv{display:block;width:100%;height:auto;border-radius:6px}
+.legend{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;font-size:11px;color:#8b949e}
+.sw{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+#seedinfo{color:#6e7681}
+</style>
+</head>
+<body>
+<h1>MAZE <b>BOTS</b></h1>
+<p class="sub">A perfect 20&times;20 maze. 24 bots spawn with zero knowledge — no map, no exit location.
+Each runs its own Tr&eacute;maux depth-first search: sense the walls of the cell it stands in, dive into an
+unexplored passage (each bot has its own direction preference), mark dead ends, and backtrack —
+never crossing any passage more than twice. The timer freezes the instant the last bot discovers the exit.</p>
+<div id="hud">
+  <span id="timer">⏱ 0 ticks</span>
+  <span id="completed">✔ 0 / 24</span>
+  <button id="reset" title="Generate a new random maze">↻ New maze</button>
+</div>
+<div id="status"></div>
+<div id="maze"><canvas id="cv" width="600" height="600"></canvas></div>
+<div class="legend">
+  <span><span class="sw" style="background:#3fb950"></span>exit (unknown to bots)</span>
+  <span><span class="sw" style="background:transparent;border:2px solid #8b949e"></span>spawn</span>
+  <span><span class="sw" style="background:#ff7b72"></span>numbered bots</span>
+  <span id="seedinfo"></span>
+</div>
+<script>
+(function(){
+'use strict';
+
+/* ================= deterministic PRNG ================= */
+function mulberry32(a){
+  return function(){
+    a|=0; a=(a+0x6D2B79F5)|0;
+    var t=Math.imul(a^(a>>>15),1|a);
+    t=(t+Math.imul(t^(t>>>7),61|t))^t;
+    return ((t^(t>>>14))>>>0)/4294967296;
+  };
+}
+function shuffle(arr,rng){
+  for(var i=arr.length-1;i>0;i--){
+    var j=(rng()*(i+1))|0, t=arr[i]; arr[i]=arr[j]; arr[j]=t;
+  }
+  return arr;
+}
+
+/* ================= constants ================= */
+var ROWS=20, COLS=20, NUM_BOTS=24;
+var DIRS=[{dr:-1,dc:0,k:'n'},{dr:0,dc:1,k:'e'},{dr:1,dc:0,k:'s'},{dr:0,dc:-1,k:'w'}];
+var OPP=['s','w','n','e'];
+
+/* perfect maze via iterative recursive backtracker (seeded) */
+function generateMaze(rows,cols,rng){
+  var w=[], r, c, row;
+  for(r=0;r<rows;r++){ row=[]; for(c=0;c<cols;c++) row.push({n:true,e:true,s:true,w:true}); w.push(row); }
+  var seen=new Uint8Array(rows*cols);
+  var sr=[0], sc=[0]; seen[0]=1;
+  while(sr.length){
+    var cr=sr[sr.length-1], cc=sc[sc.length-1];
+    var opts=[];
+    for(var d=0;d<4;d++){
+      var nr=cr+DIRS[d].dr, nc=cc+DIRS[d].dc;
+      if(nr>=0&&nr<rows&&nc>=0&&nc<cols&&!seen[nr*cols+nc]) opts.push(d);
+    }
+    if(!opts.length){ sr.pop(); sc.pop(); continue; }
+    var dd=opts[(rng()*opts.length)|0];
+    var ar=cr+DIRS[dd].dr, ac=cc+DIRS[dd].dc;
+    w[cr][cc][DIRS[dd].k]=false;
+    w[ar][ac][OPP[dd]]=false;
+    seen[ar*cols+ac]=1;
+    sr.push(ar); sc.push(ac);
+  }
+  return w;
+}
+
+/* farthest cell by maze distance — used ONLY to place the exit. Bots never use this. */
+function farthestCell(w,rows,cols,sr0,sc0){
+  var dist=new Int32Array(rows*cols), i;
+  for(i=0;i<dist.length;i++) dist[i]=-1;
+  var qr=[sr0], qc=[sc0];
+  dist[sr0*cols+sc0]=0;
+  var fr=sr0, fc=sc0;
+  for(i=0;i<qr.length;i++){
+    var r=qr[i], c=qc[i], dd=dist[r*cols+c];
+    if(dd>dist[fr*cols+fc]){ fr=r; fc=c; }
+    for(var d=0;d<4;d++){
+      if(w[r][c][DIRS[d].k]) continue;
+      var nr=r+DIRS[d].dr, nc=c+DIRS[d].dc;
+      if(nr<0||nr>=rows||nc<0||nc>=cols) continue;
+      if(dist[nr*cols+nc]!==-1) continue;
+      dist[nr*cols+nc]=dd+1;
+      qr.push(nr); qc.push(nc);
+    }
+  }
+  return {r:fr,c:fc};
+}
+
+/* 24 unique direction-preference orders (all permutations of N,E,S,W), one per bot */
+function allPermutations(){
+  var a=[0,1,2,3], out=[];
+  (function perm(k){
+    if(k===4){ out.push(a.slice()); return; }
+    for(var i=k;i<4;i++){
+      var t=a[k]; a[k]=a[i]; a[i]=t;
+      perm(k+1);
+      t=a[k]; a[k]=a[i]; a[i]=t;
+    }
+  })(0);
+  return out;
+}
+var PERMS=allPermutations();
+
+/* When the scripting API (game.tick / game.reset) is driven externally we stop the
+   demo auto-advance so scripted runs stay perfectly deterministic. The on-page
+   "New maze" button re-enables it. Rendering always continues. */
+var autoRun=true;
+
+/* ================= game state + public API ================= */
+var game={
+  rows:ROWS, cols:COLS, numBots:NUM_BOTS,
+  size:{rows:ROWS,cols:COLS},
+  seed:0,
+  wallsGrid:null,
+  spawn:{r:0,c:0},
+  exit:{r:0,c:0},
+  bots:[],
+  elapsed:0,
+  completedCount:0,
+
+  _newGame:function(seed){
+    if(typeof seed!=='number'||!isFinite(seed)) seed=(Math.random()*0x7fffffff)|0;
+    this.seed=seed|0;
+    var rng=mulberry32(this.seed);
+    this.wallsGrid=generateMaze(this.rows,this.cols,rng);
+    this.spawn={r:(rng()*this.rows)|0, c:(rng()*this.cols)|0};
+    this.exit=farthestCell(this.wallsGrid,this.rows,this.cols,this.spawn.r,this.spawn.c);
+    var orders=shuffle(PERMS.slice(),rng);
+    this.bots=[];
+    for(var i=0;i<this.numBots;i++){
+      this.bots.push({
+        id:i,
+        dirOrder:orders[i],                       // private exploration preference
+        r:this.spawn.r, c:this.spawn.c,
+        fr:this.spawn.r, fc:this.spawn.c,         // render interpolation origin
+        stack:[],                                 // Trémaux/DFS return stack
+        visited:new Set([this.spawn.r*this.cols+this.spawn.c]),
+        known:new Map(),                          // walls this bot has physically sensed
+        dead:new Set(),
+        path:[{r:this.spawn.r,c:this.spawn.c}],
+        deadEnds:[],
+        finishTick:null
+      });
+    }
+    this.elapsed=0;
+    this.completedCount=0;
+  },
+
+  /* public: new maze; a numeric seed reproduces the identical maze and bot runs */
+  reset:function(seed){
+    autoRun=false;
+    this._newGame(seed);
+  },
+
+  walls:function(r,c){
+    var row=this.wallsGrid[r];
+    var cell=row&&row[c];
+    if(!cell) return null;
+    return {n:cell.n,e:cell.e,s:cell.s,w:cell.w};
+  },
+
+  /* One Trémaux step for a single bot: move into an unvisited open neighbour
+     (in its own preference order), otherwise mark this cell dead and backtrack.
+     On a perfect maze this traverses every passage at most twice. */
+  stepBot:function(b){
+    var rows=this.rows, cols=this.cols;
+    var key=b.r*cols+b.c;
+    if(!b.known.has(key)){                        // bot senses the cell it occupies
+      var w=this.wallsGrid[b.r][b.c];
+      b.known.set(key,{n:w.n,e:w.e,s:w.s,w:w.w});
+    }
+    var cw=b.known.get(key);
+    for(var i=0;i<4;i++){
+      var d=DIRS[b.dirOrder[i]];
+      if(cw[d.k]) continue;                       // wall (as the bot knows it)
+      var nr=b.r+d.dr, nc=b.c+d.dc;
+      if(nr<0||nr>=rows||nc<0||nc>=cols) continue;
+      var nk=nr*cols+nc;
+      if(b.visited.has(nk)) continue;             // already explored / backtracked
+      b.stack.push(key);
+      b.fr=b.r; b.fc=b.c;
+      b.r=nr; b.c=nc;
+      b.visited.add(nk);
+      b.path.push({r:nr,c:nc});
+      if(nr===this.exit.r&&nc===this.exit.c) b.finishTick=this.elapsed;
+      return;
+    }
+    /* dead end or fully explored branch: record as dead, backtrack */
+    if(!b.dead.has(key)){
+      b.dead.add(key);
+      b.deadEnds.push({r:b.r,c:b.c});
+    }
+    if(b.stack.length){
+      var p=b.stack.pop(), pr=(p/cols)|0, pc=p%cols;
+      b.fr=b.r; b.fc=b.c;
+      b.r=pr; b.c=pc;
+      b.path.push({r:pr,c:pc});
+    }else{
+      b.finishTick=this.elapsed; /* failsafe; unreachable in a connected maze */
+    }
+  },
+
+  _tickOnce:function(){
+    if(this.completedCount>=this.bots.length) return;
+    this.elapsed++;
+    for(var i=0;i<this.bots.length;i++){
+      var b=this.bots[i];
+      if(b.finishTick!==null) continue;
+      this.stepBot(b);
+      if(b.finishTick!==null) this.completedCount++;
+    }
+  },
+
+  /* public: advance n ticks synchronously; deterministic; frozen after last arrival */
+  tick:function(n){
+    autoRun=false;
+    if(n==null) n=1;
+    n=Math.floor(n);
+    if(!(n>0)) return this.elapsed;
+    for(var i=0;i<n;i++){
+      if(this.completedCount>=this.bots.length) break; // timer frozen: last bot arrived
+      this._tickOnce();
+    }
+    return this.elapsed;
+  },
+
+  allDone:function(){ return this.completedCount>=this.bots.length; }
+};
+window.game=game;
+
+/* ================= rendering ================= */
+var cv=document.getElementById('cv');
+var ctx=cv.getContext('2d');
+var VIEW=600;
+(function fit(){
+  var dpr=Math.min(2,window.devicePixelRatio||1);
+  cv.width=Math.round(VIEW*dpr);
+  cv.height=Math.round(VIEW*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+})();
+
+var BOT_COLORS=[];
+for(var ci=0;ci<NUM_BOTS;ci++){
+  var hue=Math.round((ci*137.508)%360);
+  BOT_COLORS.push('hsl('+hue+',82%,'+(ci%2?60:50)+'%)');
+}
+
+function render(prog){
+  var g=game;
+  var cw=VIEW/g.cols, ch=VIEW/g.rows;
+  ctx.fillStyle='#0d1117';
+  ctx.fillRect(0,0,VIEW,VIEW);
+
+  /* exit */
+  ctx.fillStyle='rgba(63,185,80,0.16)';
+  ctx.fillRect(g.exit.c*cw,g.exit.r*ch,cw,ch);
+  ctx.fillStyle='#3fb950';
+  ctx.beginPath();
+  ctx.arc((g.exit.c+0.5)*cw,(g.exit.r+0.5)*ch,cw*0.16,0,Math.PI*2);
+  ctx.fill();
+
+  /* spawn */
+  ctx.strokeStyle='rgba(230,237,243,0.55)';
+  ctx.lineWidth=1.5;
+  ctx.beginPath();
+  ctx.arc((g.spawn.c+0.5)*cw,(g.spawn.r+0.5)*ch,cw*0.32,0,Math.PI*2);
+  ctx.stroke();
+
+  /* walls */
+  ctx.strokeStyle='#c9d4e3';
+  ctx.lineWidth=2;
+  ctx.lineCap='round';
+  ctx.beginPath();
+  for(var r=0;r<g.rows;r++){
+    for(var c=0;c<g.cols;c++){
+      var cell=g.wallsGrid[r][c];
+      var x=c*cw, y=r*ch;
+      if(cell.n){ ctx.moveTo(x,y);     ctx.lineTo(x+cw,y); }
+      if(cell.w){ ctx.moveTo(x,y);     ctx.lineTo(x,y+ch); }
+      if(r===g.rows-1&&cell.s){ ctx.moveTo(x,y+ch); ctx.lineTo(x+cw,y+ch); }
+      if(c===g.cols-1&&cell.e){ ctx.moveTo(x+cw,y); ctx.lineTo(x+cw,y+ch); }
+    }
+  }
+  ctx.stroke();
+
+  /* bots — smoothly interpolated between cell centres */
+  ctx.textAlign='center';
+  ctx.textBaseline='middle';
+  var labelFont='700 '+Math.round(cw*0.34)+'px ui-monospace,Menlo,Consolas,monospace';
+  for(var i=0;i<g.bots.length;i++){
+    var b=g.bots[i];
+    var fin=b.finishTick!==null;
+    var t=fin?1:prog;
+    var rr=b.fr+(b.r-b.fr)*t;
+    var cc=b.fc+(b.c-b.fc)*t;
+    var x=(cc+0.5)*cw, y=(rr+0.5)*ch;
+    if(fin){
+      /* bloom into a sunflower cluster around the exit centre */
+      var age=(g.elapsed-b.finishTick)+((autoRun&&!g.allDone())?prog:1);
+      var s=age>=1?1:(age<=0?0:age);
+      var ang=b.id*2.399963;
+      var rad=cw*0.34*Math.sqrt((b.id+0.5)/NUM_BOTS)*s;
+      x+=Math.cos(ang)*rad;
+      y+=Math.sin(ang)*rad;
+    }
+    var R=fin?cw*0.15:cw*0.30;
+    ctx.beginPath();
+    ctx.arc(x,y,R,0,Math.PI*2);
+    ctx.fillStyle=BOT_COLORS[b.id];
+    ctx.fill();
+    ctx.lineWidth=1.2;
+    ctx.strokeStyle='rgba(0,0,0,0.6)';
+    ctx.stroke();
+    if(!fin){
+      ctx.font=labelFont;
+      ctx.fillStyle='rgba(0,0,0,0.82)';
+      ctx.fillText(String(b.id),x,y+0.5);
+    }
+  }
+}
+
+/* ================= HUD + animation loop ================= */
+var timerEl=document.getElementById('timer');
+var compEl=document.getElementById('completed');
+var statusEl=document.getElementById('status');
+var seedEl=document.getElementById('seedinfo');
+var resetBtn=document.getElementById('reset');
+
+var TICK_MS=50; /* demo animation speed: 20 ticks/second */
+var last=performance.now(), acc=0;
+
+function updateHUD(){
+  var done=game.allDone();
+  timerEl.textContent='⏱ '+game.elapsed+' ticks · '+(game.elapsed*TICK_MS/1000).toFixed(1)+'s';
+  timerEl.classList.toggle('frozen',done);
+  compEl.textContent='✔ '+game.completedCount+' / '+game.bots.length+' completed';
+  compEl.classList.toggle('all',done);
+  statusEl.textContent=done
+    ? 'All '+game.bots.length+' bots discovered the exit — timer frozen at tick '+game.elapsed+'.'
+    : '';
+  seedEl.textContent='seed: '+game.seed;
+}
+
+resetBtn.addEventListener('click',function(){
+  game._newGame();
+  autoRun=true;
+  acc=0;
+});
+
+function frame(now){
+  var dt=now-last; last=now;
+  if(autoRun&&!game.allDone()){
+    acc+=dt;
+    var guard=0;
+    while(acc>=TICK_MS&&!game.allDone()&&guard<10){
+      game._tickOnce();
+      acc-=TICK_MS;
+      guard++;
+    }
+    if(guard>=10||game.allDone()) acc=0;
+  }else{
+    acc=0;
+  }
+  var prog=(autoRun&&!game.allDone())?Math.min(1,acc/TICK_MS):1;
+  render(prog);
+  updateHUD();
+  requestAnimationFrame(frame);
+}
+
+game._newGame(); /* random seed on load */
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

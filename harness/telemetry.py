@@ -1,6 +1,3 @@
-"""GPU telemetry for local model runs: background nvidia-smi sampling while a
-model works, summarized into peak VRAM, average power, and energy used.
-Silently disabled when nvidia-smi is unavailable."""
 
 import shutil
 import subprocess

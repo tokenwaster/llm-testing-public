@@ -1,10 +1,3 @@
-"""The v0.6.13 public-capability lanes: instruction-following, hallucination,
-math, extraction, tool-use — a discriminator + a frontier task each.
-
-Guards the structure (ids resolve, categories exist, response-lane tasks carry a
-checker) and the CLI/quick-select selection. Reference verification (good->1.0,
-empty->0.0) lives in tasks-refs/_verify_response.py and _verify.py.
-"""
 from harness import config
 from harness.tasks import load_tasks
 
@@ -48,20 +41,12 @@ def test_math_tasks_are_numeric_answer_lane():
 
 
 def test_cli_new_keyword_selects_exactly_the_constant():
-    """`harness run --tasks new` must select exactly config.NEW_TASKS."""
     tasks = load_tasks()
     selected = [t.id for t in tasks if t.id in config.NEW_TASKS]
     assert sorted(selected) == sorted(config.NEW_TASKS)
 
 
 def test_new_lane_ids_all_resolve_to_live_tasks():
-    """The ✦ New quick-select is a hand-listed set, so a typo or a rename would
-    silently select nothing.
-
-    It deliberately no longer asserts "new and hardened don't overlap": hardened
-    is now DERIVED from the discrimination tiers, so a new lane legitimately
-    becomes hardened the moment it proves it separates models (if-002 already
-    does). Overlap is a result, not a mistake."""
     live = {t.id for t in load_tasks()}
     missing = [t for t in config.NEW_TASKS if t not in live]
     assert not missing, f"new-lane ids with no matching task: {missing}"

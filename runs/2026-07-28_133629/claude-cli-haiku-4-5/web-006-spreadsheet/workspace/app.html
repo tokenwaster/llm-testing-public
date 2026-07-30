@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Spreadsheet</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            margin-bottom: 20px;
+            font-size: 24px;
+        }
+        
+        .grid-container {
+            display: inline-block;
+            border: 1px solid #ddd;
+            background-color: white;
+            min-width: 600px;
+            min-height: 400px;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 40px repeat(10, 60px);
+            grid-template-rows: 30px repeat(10, 40px);
+            gap: 0;
+        }
+        
+        .grid-header, .row-header {
+            background-color: #e8e8e8;
+            border: 1px solid #ccc;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 13px;
+            user-select: none;
+        }
+        
+        .empty-corner {
+            background-color: #e8e8e8;
+            border: 1px solid #ccc;
+        }
+        
+        .grid input[type="text"] {
+            width: 100%;
+            height: 100%;
+            border: 1px solid #ccc;
+            padding: 2px 4px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .grid input[type="text"]:focus {
+            outline: none;
+            background-color: #fffacd;
+            border: 1px solid #0066cc;
+        }
+        
+        .controls {
+            margin-top: 20px;
+        }
+        
+        button {
+            padding: 8px 16px;
+            background-color: #0066cc;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background-color: #0052a3;
+        }
+        
+        textarea {
+            width: 100%;
+            height: 200px;
+            margin-top: 10px;
+            padding: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Mini Spreadsheet</h1>
+        <div class="grid-container">
+            <div class="grid" id="grid"></div>
+        </div>
+        <div class="controls">
+            <button id="export">Export CSV</button>
+            <textarea id="csv" readonly></textarea>
+        </div>
+    </div>
+
+    <script>
+        class Spreadsheet {
+            constructor() {
+                this.cells = {};
+                this.evaluating = new Set();
+                this.init();
+            }
+            
+            init() {
+                const grid = document.getElementById('grid');
+                
+                const corner = document.createElement('div');
+                corner.className = 'empty-corner';
+                grid.appendChild(corner);
+                
+                for (let col = 0; col < 10; col++) {
+                    const header = document.createElement('div');
+                    header.className = 'grid-header';
+                    header.textContent = String.fromCharCode(65 + col);
+                    grid.appendChild(header);
+                }
+                
+                for (let row = 1; row <= 10; row++) {
+                    const rowHeader = document.createElement('div');
+                    rowHeader.className = 'row-header';
+                    rowHeader.textContent = row;
+                    grid.appendChild(rowHeader);
+                    
+                    for (let col = 0; col < 10; col++) {
+                        const cellId = String.fromCharCode(65 + col) + row;
+                        
+                        const input = document.createElement('input');
+                        input.type = 'text';
+                        input.id = 'cell-' + cellId;
+                        input.value = '';
+                        
+                        input.addEventListener('focus', () => {
+                            input.value = this.raw(cellId);
+                        });
+                        
+                        input.addEventListener('blur', () => {
+                            this.set(cellId, input.value);
+                        });
+                        
+                        input.addEventListener('keydown', (e) => {
+                            if (e.key === 'Enter') {
+                                input.blur();
+                            }
+                        });
+                        
+                        grid.appendChild(input);
+                        this.cells[cellId] = '';
+                    }
+                }
+                
+                document.getElementById('export').addEventListener('click', () => {
+                    this.exportCSV();
+                });
+            }
+            
+            set(cellId, value) {
+                this.cells[cellId] = value;
+                this.updateCellAndDependents(cellId);
+            }
+            
+            updateCellAndDependents(cellId, updated = new Set()) {
+                if (updated.has(cellId)) {
+                    return;
+                }
+                updated.add(cellId);
+                
+                const computed = this.get(cellId);
+                const input = document.getElementById('cell-' + cellId);
+                input.value = computed;
+                
+                for (const otherCell in this.cells) {
+                    if (this.dependsOn(otherCell, cellId)) {
+                        this.updateCellAndDependents(otherCell, updated);
+                    }
+                }
+            }
+            
+            dependsOn(cellId, targetCell) {
+                const raw = this.cells[cellId];
+                if (!raw.startsWith('=')) return false;
+                
+                const cellRefs = this.getCellReferences(raw);
+                return cellRefs.has(targetCell);
+            }
+            
+            getCellReferences(formula) {
+                const refs = new Set();
+                const cellPattern = /[A-J]([1-9]|10)\b/g;
+                let match;
+                while ((match = cellPattern.exec(formula)) !== null) {
+                    refs.add(match[0]);
+                }
+                return refs;
+            }
+            
+            get(cellId) {
+                const raw = this.cells[cellId];
+                
+                if (!raw) return '';
+                
+                if (!raw.startsWith('=')) {
+                    return raw;
+                }
+                
+                try {
+                    this.evaluating.clear();
+                    const value = this.getCellValue(cellId);
+                    
+                    if (isNaN(value)) {
+                        return '#ERR';
+                    }
+                    
+                    return Number.isInteger(value) ? value.toString() : value.toFixed(2);
+                } catch (e) {
+                    if (e.message === 'Circular reference') {
+                        return '#CYCLE';
+                    }
+                    return '#ERR';
+                }
+            }
+            
+            raw(cellId) {
+                return this.cells[cellId] || '';
+            }
+            
+            getCellValue(cellId) {
+                if (this.evaluating.has(cellId)) {
+                    throw new Error('Circular reference');
+                }
+                
+                this.evaluating.add(cellId);
+                try {
+                    const raw = this.cells[cellId];
+                    
+                    if (!raw) return 0;
+                    
+                    if (!raw.startsWith('=')) {
+                        const num = parseFloat(raw);
+                        return isNaN(num) ? 0 : num;
+                    }
+                    
+                    const formula = raw.substring(1);
+                    const value = this.evaluateFormula(formula);
+                    return value;
+                } finally {
+                    this.evaluating.delete(cellId);
+                }
+            }
+            
+            evaluateFormula(formula) {
+                let expr = formula;
+                
+                const cellPattern = /[A-J]([1-9]|10)\b/g;
+                expr = expr.replace(cellPattern, (match) => {
+                    const val = this.getCellValue(match);
+                    return val;
+                });
+                
+                try {
+                    const result = Function('"use strict"; return (' + expr + ')')();
+                    return result;
+                } catch (e) {
+                    throw new Error('Invalid formula');
+                }
+            }
+            
+            exportCSV() {
+                const rows = [];
+                
+                for (let row = 1; row <= 10; row++) {
+                    const cells = [];
+                    for (let col = 0; col < 10; col++) {
+                        const cellId = String.fromCharCode(65 + col) + row;
+                        const value = this.get(cellId);
+                        const escaped = value.includes(',') ? '"' + value.replace(/"/g, '""') + '"' : value;
+                        cells.push(escaped);
+                    }
+                    rows.push(cells.join(','));
+                }
+                
+                document.getElementById('csv').value = rows.join('\n');
+            }
+        }
+        
+        const sheet = new Spreadsheet();
+        window.sheet = {
+            set: (cellId, value) => sheet.set(cellId, value),
+            get: (cellId) => sheet.get(cellId),
+            raw: (cellId) => sheet.raw(cellId)
+        };
+    </script>
+</body>
+</html>

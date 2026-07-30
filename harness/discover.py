@@ -1,10 +1,3 @@
-"""Model auto-registration.
-
-    python -m harness add lmstudio          # register every model LM Studio serves
-    python -m harness add claude [alias]    # register Claude via the CLI (sonnet/opus/haiku)
-
-Writes one yaml per model into models/ and never overwrites an existing file.
-"""
 
 import os
 import re
@@ -98,15 +91,11 @@ def add_lmstudio(base_url: str = LMSTUDIO_DEFAULT_URL, progress=print) -> list[P
 
 
 def probe_models(models, probe_local: bool = True) -> dict[str, dict]:
-    """Live availability per model, for the control panel. 2s timeouts, one
-    round-trip per base_url. probe_local=False touches no network — locals
-    report 'not probed'; cloud/CLI checks are instant env-var/PATH lookups."""
     import shutil
     server_cache: dict[str, list | None] = {}
     states_cache: dict[str, dict | None] = {}
 
     def server_ids(base_url: str, key_env: str | None):
-        """Returns a list of model ids, or the string 'auth'/'offline'."""
         if base_url in server_cache:
             return server_cache[base_url]
         key = os.environ.get(key_env) if key_env else None
@@ -179,10 +168,6 @@ def probe_models(models, probe_local: bool = True) -> dict[str, dict]:
 
 
 def resolve_claude_alias(alias: str, timeout_s: int = 90) -> str | None:
-    """Resolve a moving alias to the concrete id it lands on right now. `sonnet`
-    is a pointer Anthropic can repoint; recording the pointer instead of the
-    target breaks comparability over time, so we resolve once and pin the id.
-    One trivial request; None if the CLI can't tell us."""
     import json as _json
     import shutil as _sh
     import subprocess as _sp
@@ -205,9 +190,6 @@ def resolve_claude_alias(alias: str, timeout_s: int = 90) -> str | None:
 
 
 def claude_registration(alias: str) -> tuple[str, str]:
-    """(concrete_model_id, registered_name) for a Claude alias or full id.
-    Shared by add_claude and the /watch Scout button so they agree on what an
-    alias becomes."""
     alias = _slug(alias.lower())
     concrete = CLAUDE_MODEL_IDS.get(alias) or resolve_claude_alias(alias) or alias
     label = _slug(concrete[len("claude-"):] if concrete.startswith("claude-")
@@ -217,8 +199,6 @@ def claude_registration(alias: str) -> tuple[str, str]:
 
 def add_claude(alias: str = "sonnet", progress=print,
                enabled: bool = True) -> Path | None:
-    """Register a Claude model, pinned to the concrete version it resolves to,
-    so the leaderboard never says "sonnet" while running something else."""
     concrete, name = claude_registration(alias)
     if concrete != _slug(alias.lower()):
         progress(f"  '{alias}' resolves to {concrete} — pinning it")

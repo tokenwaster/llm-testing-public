@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  html, body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    background: #f0f2f5;
+    color: #1c1e21;
+  }
+  #app {
+    min-width: 600px;
+    min-height: 400px;
+    box-sizing: border-box;
+    padding: 16px;
+    display: inline-block;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  #grid {
+    display: grid;
+    grid-template-columns: 40px repeat(10, 58px);
+    grid-auto-rows: 32px;
+    gap: 1px;
+    background: #c9ccd1;
+    border: 1px solid #c9ccd1;
+    width: max-content;
+  }
+  .hdr {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #e4e6eb;
+    font-weight: 600;
+    font-size: 12px;
+    user-select: none;
+  }
+  #grid input {
+    border: none;
+    outline: none;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    padding: 0 5px;
+    font-size: 13px;
+    background: #fff;
+    font-family: inherit;
+  }
+  #grid input:focus {
+    background: #fff8dc;
+    box-shadow: inset 0 0 0 2px #1877f2;
+  }
+  .controls { margin-top: 14px; }
+  button {
+    font-size: 14px;
+    padding: 7px 14px;
+    background: #1877f2;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  button:hover { background: #166fe0; }
+  #csv {
+    display: block;
+    margin-top: 10px;
+    width: 598px;
+    height: 130px;
+    box-sizing: border-box;
+    font-family: monospace;
+    font-size: 12px;
+    padding: 6px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <div id="grid"></div>
+  <div class="controls">
+    <button id="export">Export CSV</button>
+  </div>
+  <textarea id="csv" readonly placeholder="Computed values will appear here after Export CSV."></textarea>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var COLS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+  var ROWS = 10;
+
+  // raw text per cell id, e.g. data["B2"] = "=A1*2"
+  var data = {};
+  // per-recalc caches
+  var computed = {};   // id -> {display, num, err}
+  var state = {};      // id -> 0 unvisited / 1 visiting / 2 done
+  var inputs = {};     // id -> <input>
+
+  function CycleError(target) { this.target = target; }
+
+  function isValidCell(id) {
+    var m = /^([A-J])([0-9]{1,2})$/.exec(id);
+    if (!m) return false;
+    var r = parseInt(m[2], 10);
+    return r >= 1 && r <= 10;
+  }
+
+  // ---- formula evaluation --------------------------------------------------
+
+  function tokenize(expr) {
+    var toks = [];
+    var i = 0;
+    var n = expr.length;
+    while (i < n) {
+      var c = expr[i];
+      if (c === " " || c === "\t") { i++; continue; }
+      if ((c >= "0" && c <= "9") || c === ".") {
+        var j = i;
+        while (j < n && ((expr[j] >= "0" && expr[j] <= "9") || expr[j] === ".")) j++;
+        var numStr = expr.slice(i, j);
+        var v = Number(numStr);
+        if (isNaN(v)) throw new Error("bad number");
+        toks.push({ t: "num", v: v });
+        i = j;
+      } else if ((c >= "A" && c <= "Z") || (c >= "a" && c <= "z")) {
+        var k = i;
+        while (k < n && ((expr[k] >= "A" && expr[k] <= "Z") || (expr[k] >= "a" && expr[k] <= "z"))) k++;
+        var letters = expr.slice(i, k);
+        var d = k;
+        while (d < n && expr[d] >= "0" && expr[d] <= "9") d++;
+        if (d === k) throw new Error("bad ref");
+        var digits = expr.slice(k, d);
+        var id = letters.toUpperCase() + digits;
+        if (!isValidCell(id)) throw new Error("non-cell reference");
+        toks.push({ t: "ref", v: id });
+        i = d;
+      } else if (c === "+" || c === "-" || c === "*" || c === "/" || c === "(" || c === ")") {
+        toks.push({ t: "op", v: c });
+        i++;
+      } else {
+        throw new Error("bad char");
+      }
+    }
+    return toks;
+  }
+
+  function parseExpr(expr) {
+    var toks = tokenize(expr);
+    var pos = 0;
+    function peek() { return toks[pos]; }
+    function next() { return toks[pos++]; }
+
+    function parseE() {
+      var v = parseT();
+      while (peek() && peek().t === "op" && (peek().v === "+" || peek().v === "-")) {
+        var op = next().v;
+        var r = parseT();
+        v = op === "+" ? v + r : v - r;
+      }
+      return v;
+    }
+    function parseT() {
+      var v = parseF();
+      while (peek() && peek().t === "op" && (peek().v === "*" || peek().v === "/")) {
+        var op = next().v;
+        var r = parseF();
+        v = op === "*" ? v * r : v / r;
+      }
+      return v;
+    }
+    function parseF() {
+      var tk = peek();
+      if (!tk) throw new Error("unexpected end");
+      if (tk.t === "op" && tk.v === "-") { next(); return -parseF(); }
+      if (tk.t === "op" && tk.v === "+") { next(); return parseF(); }
+      if (tk.t === "num") { next(); return tk.v; }
+      if (tk.t === "ref") {
+        next();
+        var r = compute(tk.v);   // may throw CycleError (propagates)
+        if (r.err) throw new Error("reference error");
+        return r.num;
+      }
+      if (tk.t === "op" && tk.v === "(") {
+        next();
+        var v = parseE();
+        var c = peek();
+        if (!c || c.v !== ")") throw new Error("missing paren");
+        next();
+        return v;
+      }
+      throw new Error("unexpected token");
+    }
+
+    var val = parseE();
+    if (pos !== toks.length) throw new Error("trailing tokens");
+    return val;
+  }
+
+  function fmt(num) {
+    if (!isFinite(num)) throw new Error("not finite");
+    var r = Math.round((num + (num >= 0 ? Number.EPSILON : -Number.EPSILON)) * 1e10) / 1e10;
+    if (r === 0) r = 0; // normalise -0
+    return String(r);
+  }
+
+  function evalRaw(raw) {
+    if (raw === "") return { display: "", num: 0, err: null };
+    if (raw.charAt(0) === "=") {
+      var num = parseExpr(raw.slice(1));
+      return { display: fmt(num), num: num, err: null };
+    }
+    // plain value
+    var n = Number(raw);
+    if (raw.trim() !== "" && !isNaN(n) && isFinite(n)) {
+      return { display: raw, num: n, err: null };
+    }
+    return { display: raw, num: 0, err: null }; // non-numeric text -> 0 in formulas
+  }
+
+  function compute(id) {
+    if (state[id] === 2) return computed[id];
+    if (state[id] === 1) throw new CycleError(id);
+    state[id] = 1;
+    var raw = (data[id] || "");
+    var res;
+    try {
+      res = evalRaw(raw.trim());
+    } catch (e) {
+      if (e instanceof CycleError) {
+        computed[id] = { display: "#CYCLE", num: NaN, err: "#CYCLE" };
+        state[id] = 2;
+        if (e.target === id) return computed[id]; // cycle closed here
+        throw e; // keep marking cells on the cycle path
+      }
+      computed[id] = { display: "#ERR", num: NaN, err: "#ERR" };
+      state[id] = 2;
+      return computed[id];
+    }
+    computed[id] = res;
+    state[id] = 2;
+    return res;
+  }
+
+  function recalc() {
+    computed = {};
+    state = {};
+    for (var r = 1; r <= ROWS; r++) {
+      for (var c = 0; c < COLS.length; c++) {
+        var id = COLS[c] + r;
+        if (state[id] !== 2) {
+          try { compute(id); }
+          catch (e) {
+            // any leftover cycle exception that unwound to the top
+            if (!computed[id]) {
+              computed[id] = { display: "#CYCLE", num: NaN, err: "#CYCLE" };
+              state[id] = 2;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ---- rendering -----------------------------------------------------------
+
+  function render() {
+    for (var r = 1; r <= ROWS; r++) {
+      for (var c = 0; c < COLS.length; c++) {
+        var id = COLS[c] + r;
+        var inp = inputs[id];
+        if (!inp) continue;
+        if (document.activeElement === inp) continue; // being edited -> keep raw
+        inp.value = computed[id] ? computed[id].display : "";
+      }
+    }
+  }
+
+  function refresh() {
+    recalc();
+    render();
+  }
+
+  // ---- build grid ----------------------------------------------------------
+
+  function buildGrid() {
+    var grid = document.getElementById("grid");
+
+    var corner = document.createElement("div");
+    corner.className = "hdr";
+    grid.appendChild(corner);
+
+    for (var c = 0; c < COLS.length; c++) {
+      var h = document.createElement("div");
+      h.className = "hdr";
+      h.textContent = COLS[c];
+      grid.appendChild(h);
+    }
+
+    for (var r = 1; r <= ROWS; r++) {
+      var rh = document.createElement("div");
+      rh.className = "hdr";
+      rh.textContent = r;
+      grid.appendChild(rh);
+
+      for (var cc = 0; cc < COLS.length; cc++) {
+        var id = COLS[cc] + r;
+        var inp = document.createElement("input");
+        inp.type = "text";
+        inp.id = "cell-" + id;
+        inp.setAttribute("data-cell", id);
+        inputs[id] = inp;
+        attachHandlers(inp, id);
+        grid.appendChild(inp);
+      }
+    }
+  }
+
+  function attachHandlers(inp, id) {
+    inp.addEventListener("focus", function () {
+      inp.value = data[id] || "";
+      inp.select();
+    });
+    inp.addEventListener("blur", function () {
+      data[id] = inp.value;
+      refresh();
+    });
+    inp.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        inp.blur();
+      }
+    });
+  }
+
+  // ---- CSV export ----------------------------------------------------------
+
+  function exportCsv() {
+    recalc();
+    var lines = [];
+    for (var r = 1; r <= ROWS; r++) {
+      var row = [];
+      for (var c = 0; c < COLS.length; c++) {
+        var id = COLS[c] + r;
+        row.push(computed[id] ? computed[id].display : "");
+      }
+      lines.push(row.join(","));
+    }
+    document.getElementById("csv").value = lines.join("\n");
+  }
+
+  // ---- scripting API -------------------------------------------------------
+
+  window.sheet = {
+    set: function (id, text) {
+      id = String(id).toUpperCase();
+      data[id] = String(text);
+      refresh();
+    },
+    get: function (id) {
+      id = String(id).toUpperCase();
+      recalc();
+      return computed[id] ? computed[id].display : "";
+    },
+    raw: function (id) {
+      id = String(id).toUpperCase();
+      return data[id] || "";
+    }
+  };
+
+  // ---- init ----------------------------------------------------------------
+
+  buildGrid();
+  document.getElementById("export").addEventListener("click", exportCsv);
+  refresh();
+})();
+</script>
+</body>
+</html>

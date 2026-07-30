@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Spreadsheet</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background-color: #f4f4f9;
+        }
+        .spreadsheet-container {
+            min-width: 600px;
+            min-height: 400px;
+            background: white;
+            padding: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            border-radius: 8px;
+        }
+        table {
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+        th, td {
+            border: 1px solid #ccc;
+            text-align: center;
+            width: 60px;
+            height: 30px;
+        }
+        th {
+            background-color: #eee;
+            font-weight: bold;
+            user-select: none;
+        }
+        input {
+            width: 100%;
+            height: 100%;
+            border: none;
+            text-align: center;
+            box-sizing: border-box;
+            font-size: 13px;
+            outline: none;
+        }
+        input:focus {
+            background-color: #eefaff;
+            box-shadow: inset 0 0 2px #007bff;
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 630px;
+        }
+        #csv {
+            width: 100%;
+            height: 100px;
+            font-family: monospace;
+            resize: vertical;
+        }
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="spreadsheet-container">
+        <table id="grid">
+            <thead>
+                <tr id="col-headers"></tr>
+            </thead>
+            <tbody id="row-body"></tbody>
+        </table>
+    </div>
+
+    <div class="controls">
+        <button id="export">Export CSV</button>
+        <textarea id="csv" readonly placeholder="CSV output will appear here..."></textarea>
+    </div>
+
+    <script>
+        const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+        const ROWS = Array.from({ length: 10 }, (_, i) => i + 1);
+        const rawValues = {}; // cellId -> string
+        const computedValues = {}; // cellId -> string
+        const allCellIds = [];
+
+        // Initialize Grid
+        const colHeaderRow = document.getElementById('col-headers');
+        const rowBody = document.getElementById('row-body');
+
+        // Header column (empty corner)
+        const corner = document.createElement('th');
+        corner.textContent = '';
+        colHeaderRow.appendChild(corner);
+
+        COLS.forEach(col => {
+            const th = document.createElement('th');
+            th.textContent = col;
+            colHeaderRow.appendChild(th);
+        });
+
+        ROWS.forEach(row => {
+            const tr = document.createElement('tr');
+            const rh = document.createElement('th');
+            rh.textContent = row;
+            tr.appendChild(rh);
+
+            COLS.forEach(col => {
+                const id = `${col}${row}`;
+                allCellIds.push(id);
+                rawValues[id] = '';
+                
+                const td = document.createElement('td');
+                const input = document.createElement('input');
+                input.id = `cell-${id}`;
+                
+                input.onfocus = () => {
+                    input.value = rawValues[id];
+                };
+                
+                input.onblur = () => {
+                    rawValues[id] = input.value;
+                    updateAll();
+                };
+
+                input.onkeydown = (e) => {
+                    if (e.key === 'Enter') input.blur();
+                };
+
+                td.appendChild(input);
+                tr.appendChild(td);
+            });
+            rowBody.appendChild(tr);
+        });
+
+        function canReach(start, target, adj) {
+            const queue = [...(adj[start] || [])];
+            const visited = new Set();
+            while (queue.length > 0) {
+                const curr = queue.shift();
+                if (curr === target) return true;
+                if (!visited.has(curr)) {
+                    visited.add(curr);
+                    if (adj[curr]) queue.push(...adj[curr]);
+                }
+            }
+            return false;
+        }
+
+        function evaluateCell(id, isCycleMap, memo) {
+            if (isCycleMap[id]) return '#CYCLE';
+            if (memo.has(id)) return memo.get(id);
+
+            const raw = rawValues[id] || '';
+            let result;
+
+            if (!raw.startsWith('=')) {
+                result = raw; // Plain text or empty string
+            } else {
+                try {
+                    const expr = raw.substring(1);
+                    // Replace cell references with their computed values
+                    const sanitizedExpr = expr.replace(/[A-J](?:10|[1-9])/g, (match) => {
+                        const val = evaluateCell(match, isCycleMap, memo);
+                        if (val === '#CYCLE' || val === '#ERR') throw new Error('err');
+                        if (val === '') return '0'; // Empty cells count as 0 in formulas
+                        if (isNaN(parseFloat(val))) throw new Error('err');
+                        return val;
+                    });
+
+                    // Evaluate mathematical expression
+                    result = new Function(`"use strict"; return (${sanitizedExpr})`)();
+                    if (typeof result !== 'number' || isNaN(result)) throw new Error('err');
+                    result = String(result);
+                } catch (e) {
+                    result = '#ERR';
+                }
+            }
+
+            memo.set(id, result);
+            return result;
+        }
+
+        function updateAll() {
+            const adj = {};
+            allCellIds.forEach(id => {
+                const raw = rawValues[id] || '';
+                if (raw.startsWith('=')) {
+                    adj[id] = exprMatch(raw.substring(1));
+                } else {
+                    adj[id] = [];
+                }
+            });
+
+            const isCycleMap = {};
+            allCellIds.forEach(id => {
+                if (canReach(id, id, adj)) isCycleMap[id] = true;
+            });
+
+            const memo = new Map();
+            allCellIds.forEach(id => {
+                computedValues[id] = evaluateCell(id, isCycleMap, memo);
+            });
+
+            // Update UI inputs that are not focused
+            allCellIds.forEach(id => {
+                const el = document.getElementById(`cell-${id}`);
+                if (document.activeElement !== el) {
+                    el.value = computedValues[id];
+                }
+            });
+        }
+
+        function exprMatch(expr) {
+            return expr.match(/[A-J](?:10|[1-9])/g) || [];
+        }
+
+        // API Implementation
+        window.sheet = {
+            set: (id, val) => {
+                rawValues[id] = val;
+                const el = document.getElementById(`cell-${id}`);
+                if (el && document.activeElement !== el) {
+                    updateAll(); 
+                } else if (el) {
+                    el.value = val;
+                    updateAll(); // Still need to update other dependent cells
+                    el.value = val; // Ensure active cell keeps raw value
+                } else {
+                    updateAll();
+                }
+            },
+            get: (id) => computedValues[id],
+            raw: (id) => rawValues[id]
+        };
+
+        // CSV Export
+        document.getElementById('export').onclick = () => {
+            let csvContent = "";
+            for (let r = 1; r <= 10; r++) {
+                let rowVals = [];
+                for (let c of COLS) {
+                    const id = `${c}${r}`;
+                    rowVals.push(computedValues[id] === undefined ? "" : computedValues[id]);
+                }
+                csvContent += rowVals.join(",") + (r < 10 ? "\n" : "");
+            }
+            document.getElementById('csv').value = csvContent;
+        };
+
+        // Initial calculation
+        updateAll();
+    </script>
+</body>
+</html>

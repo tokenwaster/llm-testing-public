@@ -1,10 +1,3 @@
-"""The compare page and the Atom feed build from the same aggregated data the
-leaderboard uses, and both must stay valid on a static host with no server.
-
-The feed's dates are RUN dates, not wall-clock, so a rebuild with unchanged data
-produces identical bytes — the property that lets the shipped reports/ stay
-churn-free between publishes.
-"""
 
 import xml.dom.minidom as minidom
 

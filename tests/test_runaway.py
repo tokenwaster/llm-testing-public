@@ -1,12 +1,3 @@
-"""Runaway-generation handling: a model that hits its token ceiling without
-ever producing an answer (a bad quant looping, or ruminating forever).
-
-Covers the four fixes:
-  1. the retry loop caps length-runaways at ONE retry (not task.max_retries)
-  2. results carry a `failure_mode` and reports badge it distinctly
-  3. the streaming adapter aborts a tight repetition loop mid-stream
-  4. reasoning tokens are never mistaken for the answer (fairness)
-"""
 import types
 from pathlib import Path
 
@@ -39,7 +30,6 @@ def test_loop_guard_ignores_varied_prose():
 
 
 class _FakeAdapter:
-    """Returns a fixed ChatResult every call; counts calls."""
     def __init__(self, res):
         self.res = res
         self.calls = 0
@@ -59,8 +49,6 @@ def _task(max_retries=3):
 
 
 def test_length_runaway_is_capped_at_one_retry(tmp_path):
-    """A response that hit the token CEILING and fails validation must not be
-    retried task.max_retries times — one retry, then stop (2 attempts total)."""
     res = ChatResult(text="", total_ms=1.0, ttft_ms=1.0, tokens_in=10,
                      tokens_out=32768, stop_reason="length")
     r = _runner(tmp_path, res)
@@ -76,8 +64,6 @@ def test_length_runaway_is_capped_at_one_retry(tmp_path):
 
 
 def test_plain_format_miss_still_uses_full_retries(tmp_path):
-    """A model that STOPPED normally but formatted wrong isn't a runaway — it
-    gets the full retry budget (the model might format correctly next time)."""
     res = ChatResult(text="here you go", total_ms=1.0, ttft_ms=1.0,
                      tokens_in=10, tokens_out=50, stop_reason="stop")
     r = _runner(tmp_path, res)
@@ -108,8 +94,6 @@ def test_failure_mode_none_when_last_attempt_succeeded():
 
 
 def test_report_derivation_gates_runaway_on_a_failing_score():
-    """Old runs (no error_kind='runaway'): a ceiling-hit that graded 0 is a
-    runaway; one that still scored is only truncated."""
     from harness.report import _failure_mode_of
     ran = {"attempts": [{"stop_reason": "length"}],
            "score": {"status": "scored", "score": 0.0}}
@@ -148,8 +132,6 @@ class _FakeStream:
 
 
 def test_reasoning_tokens_captured_from_usage(monkeypatch):
-    """A model that spends its budget thinking must record reasoning tokens, so a
-    'ruminated it all away' zero reads differently from an 'empty content' one."""
     import json
     from harness.registry import Model
     lines = [
@@ -169,8 +151,6 @@ def test_reasoning_tokens_captured_from_usage(monkeypatch):
 
 
 def test_reasoning_tokens_estimated_when_usage_omits_them(monkeypatch):
-    """Provider streamed a think channel but didn't count it in usage — estimate
-    from the streamed chars so the signal isn't lost."""
     import json
     from harness.registry import Model
     lines = [
@@ -188,9 +168,6 @@ def test_reasoning_tokens_estimated_when_usage_omits_them(monkeypatch):
 
 
 def test_reasoning_content_is_excluded_from_the_answer(monkeypatch):
-    """The whole fairness question behind the QAT zeros: a model that spends its
-    budget in the THINK channel and emits no answer content must yield empty
-    answer text (→ scores 0 as 'no answer'), never have its reasoning graded."""
     import json
     from harness.registry import Model
 

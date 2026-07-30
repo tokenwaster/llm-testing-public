@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Conway's Game of Life</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #10121d;
+    --panel: #191d30;
+    --ink: #eaf2ff;
+    --muted: #9eaac7;
+    --accent: #78f7bf;
+    --accent2: #72a8ff;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 28px 16px;
+    background:
+      radial-gradient(circle at 18% 12%, rgba(89, 92, 196, .22), transparent 30%),
+      radial-gradient(circle at 82% 88%, rgba(27, 189, 139, .16), transparent 30%),
+      var(--bg);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .app {
+    width: min(94vw, 690px);
+    text-align: center;
+  }
+
+  h1 {
+    margin: 0 0 5px;
+    font-size: clamp(1.7rem, 5vw, 2.5rem);
+    letter-spacing: -.05em;
+  }
+
+  .subtitle {
+    margin: 0 0 18px;
+    color: var(--muted);
+    font-size: .95rem;
+  }
+
+  .board-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1;
+    padding: 10px;
+    border-radius: 22px;
+    background: linear-gradient(135deg, rgba(120,247,191,.8), rgba(114,168,255,.8));
+    box-shadow: 0 20px 50px rgba(0,0,0,.35), 0 0 35px rgba(102,184,255,.14);
+  }
+
+  #life {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-width: 400px;
+    min-height: 400px;
+    max-width: 100%;
+    border-radius: 14px;
+    background: #0b0f1b;
+    cursor: crosshair;
+    touch-action: none;
+  }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 18px;
+  }
+
+  button {
+    border: 0;
+    border-radius: 999px;
+    padding: 11px 16px;
+    color: var(--ink);
+    background: var(--panel);
+    box-shadow: inset 0 1px rgba(255,255,255,.08), 0 5px 15px rgba(0,0,0,.22);
+    font: inherit;
+    font-weight: 750;
+    cursor: pointer;
+    transition: transform .15s ease, background .15s ease, box-shadow .15s ease;
+  }
+
+  button:hover {
+    transform: translateY(-2px);
+    background: #252b46;
+  }
+
+  button:active { transform: translateY(1px) scale(.98); }
+
+  #play {
+    background: linear-gradient(135deg, #2779cb, #8054d6);
+  }
+
+  #play.running {
+    background: linear-gradient(135deg, #d35a83, #b54668);
+  }
+
+  .status {
+    min-height: 1.5em;
+    margin: 14px 0 0;
+    color: var(--muted);
+    font-size: .9rem;
+  }
+
+  @media (max-width: 440px) {
+    #life {
+      min-width: 0;
+      min-height: 0;
+    }
+    button { padding: 10px 13px; font-size: .9rem; }
+  }
+</style>
+</head>
+<body>
+  <main class="app">
+    <h1>✨ Life Playground</h1>
+    <p class="subtitle">Click or drag to paint cells, then let the tiny universe evolve.</p>
+
+    <div class="board-wrap">
+      <canvas id="life" width="600" height="600" aria-label="Conway's Game of Life grid"></canvas>
+    </div>
+
+    <div class="controls">
+      <button id="step" type="button">⏭ Step</button>
+      <button id="play" type="button">▶ Play</button>
+      <button id="random" type="button">🎲 Random</button>
+      <button id="clear" type="button">🧹 Clear</button>
+    </div>
+    <p class="status" id="status">Generation 0 · Draw something alive!</p>
+  </main>
+
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("life");
+  const ctx = canvas.getContext("2d");
+  const stepButton = document.getElementById("step");
+  const playButton = document.getElementById("play");
+  const randomButton = document.getElementById("random");
+  const clearButton = document.getElementById("clear");
+  const status = document.getElementById("status");
+
+  const w = 60;
+  const h = 60;
+  let cells = new Uint8Array(w * h);
+  let generation = 0;
+  let playing = false;
+  let timer = null;
+  let drawing = false;
+  let paintValue = 1;
+  let lastPainted = -1;
+
+  const index = (x, y) => y * w + x;
+
+  function get(x, y) {
+    if (x < 0 || x >= w || y < 0 || y >= h) return 0;
+    return cells[index(x, y)];
+  }
+
+  function set(x, y, value) {
+    if (x < 0 || x >= w || y < 0 || y >= h) return;
+    cells[index(x, y)] = value ? 1 : 0;
+    draw();
+  }
+
+  function updateStatus() {
+    let live = 0;
+    for (let i = 0; i < cells.length; i++) live += cells[i];
+    status.textContent = `Generation ${generation} · ${live} living cell${live === 1 ? "" : "s"}`;
+  }
+
+  function draw() {
+    const cw = canvas.width / w;
+    const ch = canvas.height / h;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#0b0f1b";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.strokeStyle = "rgba(133, 157, 205, 0.16)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= w; x++) {
+      const px = Math.round(x * cw) + 0.5;
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, canvas.height);
+    }
+    for (let y = 0; y <= h; y++) {
+      const py = Math.round(y * ch) + 0.5;
+      ctx.moveTo(0, py);
+      ctx.lineTo(canvas.width, py);
+    }
+    ctx.stroke();
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!cells[index(x, y)]) continue;
+        const px = x * cw;
+        const py = y * ch;
+        const inset = Math.max(1, Math.min(cw, ch) * 0.12);
+
+        ctx.fillStyle = "rgba(80, 255, 187, 0.17)";
+        ctx.fillRect(px + 1, py + 1, cw - 2, ch - 2);
+
+        const gradient = ctx.createLinearGradient(px, py, px + cw, py + ch);
+        gradient.addColorStop(0, "#d7ffe9");
+        gradient.addColorStop(.4, "#79f7bf");
+        gradient.addColorStop(1, "#40b8e9");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(px + inset, py + inset, cw - inset * 2, ch - inset * 2);
+      }
+    }
+
+    updateStatus();
+  }
+
+  function step() {
+    const next = new Uint8Array(w * h);
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let neighbours = 0;
+
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+              neighbours += cells[index(nx, ny)];
+            }
+          }
+        }
+
+        const current = cells[index(x, y)];
+        next[index(x, y)] = current
+          ? (neighbours === 2 || neighbours === 3 ? 1 : 0)
+          : (neighbours === 3 ? 1 : 0);
+      }
+    }
+
+    cells = next;
+    generation++;
+    draw();
+  }
+
+  function clear() {
+    cells.fill(0);
+    generation = 0;
+    draw();
+  }
+
+  function randomize() {
+    for (let i = 0; i < cells.length; i++) {
+      cells[i] = Math.random() < 0.28 ? 1 : 0;
+    }
+    generation = 0;
+    draw();
+  }
+
+  function togglePlay() {
+    playing = !playing;
+    playButton.classList.toggle("running", playing);
+    playButton.textContent = playing ? "❚❚ Pause" : "▶ Play";
+
+    if (playing) {
+      timer = setInterval(step, 115);
+    } else {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  function cellFromEvent(event) {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((event.clientX - rect.left) * w / rect.width);
+    const y = Math.floor((event.clientY - rect.top) * h / rect.height);
+    return { x, y };
+  }
+
+  function paint(event) {
+    const { x, y } = cellFromEvent(event);
+    if (x < 0 || x >= w || y < 0 || y >= h) return;
+    const i = index(x, y);
+    if (i === lastPainted) return;
+    cells[i] = paintValue;
+    lastPainted = i;
+    draw();
+  }
+
+  canvas.addEventListener("pointerdown", event => {
+    event.preventDefault();
+    const { x, y } = cellFromEvent(event);
+    if (x < 0 || x >= w || y < 0 || y >= h) return;
+    drawing = true;
+    paintValue = cells[index(x, y)] ? 0 : 1;
+    lastPainted = -1;
+    canvas.setPointerCapture(event.pointerId);
+    paint(event);
+  });
+
+  canvas.addEventListener("pointermove", event => {
+    if (drawing) paint(event);
+  });
+
+  function stopDrawing() {
+    drawing = false;
+    lastPainted = -1;
+  }
+
+  canvas.addEventListener("pointerup", stopDrawing);
+  canvas.addEventListener("pointercancel", stopDrawing);
+
+  stepButton.addEventListener("click", step);
+  playButton.addEventListener("click", togglePlay);
+  randomButton.addEventListener("click", randomize);
+  clearButton.addEventListener("click", clear);
+
+  window.life = {
+    w,
+    h,
+    get,
+    set,
+    step,
+    clear
+  };
+
+  draw();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maze Explorer Bots</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 20px;
+    background: #14161c; color: #e6e8ee;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; letter-spacing: .5px; }
+  #hud {
+    display: flex; gap: 22px; align-items: center;
+    background: #1e2129; border: 1px solid #2e3340;
+    border-radius: 10px; padding: 10px 18px;
+  }
+  .stat { font-size: 15px; }
+  .stat b { font-variant-numeric: tabular-nums; color: #7fd4ff; }
+  #timer.done { color: #7dff9b; }
+  #reset {
+    background: #2f6fed; color: #fff; border: none;
+    padding: 8px 16px; border-radius: 8px; font-size: 14px;
+    cursor: pointer; font-weight: 600;
+  }
+  #reset:hover { background: #4a83f5; }
+  #maze {
+    background: #0d0f13; border: 1px solid #2e3340;
+    border-radius: 8px; padding: 8px; line-height: 0;
+  }
+  #note { font-size: 12px; color: #8a90a0; }
+</style>
+</head>
+<body>
+  <h1>Maze Explorer &mdash; 24 bots hunting the exit</h1>
+  <div id="hud">
+    <span class="stat">Completed: <b id="completed">0 / 24</b></span>
+    <span class="stat">Timer: <b id="timer">0</b></span>
+    <button id="reset">Reset</button>
+  </div>
+  <div id="maze"><canvas id="cv" width="476" height="476"></canvas></div>
+  <div id="note">Bots explore Tremaux/DFS-style with individual direction preferences. Green = exit, white ring = spawn.</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var ROWS = 17, COLS = 17, NBOTS = 24;
+  var CELL = 28, PAD = 0;
+  var TICK_MS = 110;
+
+  var DIRS = { n: [-1, 0], e: [0, 1], s: [1, 0], w: [0, -1] };
+  var DKEYS = ["n", "e", "s", "w"];
+  var OPP = { n: "s", e: "w", s: "n", w: "e" };
+
+  var canvas = document.getElementById("cv");
+  var ctx = canvas.getContext("2d");
+  var elCompleted = document.getElementById("completed");
+  var elTimer = document.getElementById("timer");
+
+  // ---- deterministic PRNG ----
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---- game state ----
+  var walls, bots, spawn, exitCell;
+  var tickCount, elapsedTicks, allDone;
+  var lastTickTime = 0;
+
+  function key(r, c) { return r * COLS + c; }
+
+  // Perfect maze via seeded recursive backtracker.
+  function genMaze(rng) {
+    var g = [];
+    for (var r = 0; r < ROWS; r++) {
+      g.push([]);
+      for (var c = 0; c < COLS; c++) g[r].push({ n: true, e: true, s: true, w: true });
+    }
+    var seen = new Uint8Array(ROWS * COLS);
+    var stack = [[0, 0]];
+    seen[0] = 1;
+    while (stack.length) {
+      var cur = stack[stack.length - 1];
+      var r0 = cur[0], c0 = cur[1];
+      var opts = [];
+      for (var i = 0; i < 4; i++) {
+        var d = DKEYS[i];
+        var nr = r0 + DIRS[d][0], nc = c0 + DIRS[d][1];
+        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && !seen[key(nr, nc)]) opts.push([d, nr, nc]);
+      }
+      if (!opts.length) { stack.pop(); continue; }
+      var pick = opts[Math.floor(rng() * opts.length)];
+      g[r0][c0][pick[0]] = false;
+      g[pick[1]][pick[2]][OPP[pick[0]]] = false;
+      seen[key(pick[1], pick[2])] = 1;
+      stack.push([pick[1], pick[2]]);
+    }
+    return g;
+  }
+
+  function shuffledDirs(rng) {
+    var a = DKEYS.slice();
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(rng() * (i + 1));
+      var t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+    return a;
+  }
+
+  function reset(seed) {
+    var s = (typeof seed === "number" && isFinite(seed)) ? (seed >>> 0) : ((Math.random() * 4294967296) >>> 0);
+    var rng = mulberry32(s);
+    walls = genMaze(rng);
+    spawn = { r: 0, c: 0 };
+    exitCell = { r: ROWS - 1, c: COLS - 1 };
+    tickCount = 0;
+    elapsedTicks = 0;
+    allDone = false;
+    bots = [];
+    for (var i = 0; i < NBOTS; i++) {
+      var brng = mulberry32((s ^ (i * 0x9E3779B9)) >>> 0);
+      var b = {
+        id: i,
+        color: "hsl(" + Math.round(i * 360 / NBOTS) + " 85% 60%)",
+        dirOrder: shuffledDirs(brng),
+        r: spawn.r, c: spawn.c,
+        pr: spawn.r, pc: spawn.c,
+        // tiny fixed in-corridor offset so overlapping bots stay visible yet centered
+        ox: (brng() - 0.5) * 8,
+        oy: (brng() - 0.5) * 8,
+        visited: new Set(),
+        deadSet: new Set(),
+        stack: [],
+        path: [{ r: spawn.r, c: spawn.c }],
+        deadEnds: [],
+        finishTick: null
+      };
+      b.visited.add(key(spawn.r, spawn.c));
+      if (spawn.r === exitCell.r && spawn.c === exitCell.c) b.finishTick = 0;
+      bots.push(b);
+    }
+    lastTickTime = performance.now();
+    updateHUD();
+  }
+
+  function moveBot(b, nr, nc) {
+    b.pr = b.r; b.pc = b.c;
+    b.r = nr; b.c = nc;
+    b.visited.add(key(nr, nc));
+    b.path.push({ r: nr, c: nc });
+    if (nr === exitCell.r && nc === exitCell.c) b.finishTick = tickCount;
+  }
+
+  // One exploration step: purely local knowledge (walls of current cell only),
+  // DFS/Tremaux — forward into unvisited passages, else mark dead + backtrack.
+  function stepBot(b) {
+    var w = walls[b.r][b.c];
+    for (var i = 0; i < 4; i++) {
+      var d = b.dirOrder[i];
+      if (w[d]) continue;
+      var nr = b.r + DIRS[d][0], nc = b.c + DIRS[d][1];
+      var k = key(nr, nc);
+      if (b.visited.has(k) || b.deadSet.has(k)) continue;
+      b.stack.push({ r: b.r, c: b.c });
+      moveBot(b, nr, nc);
+      return;
+    }
+    // Fully explored branch: mark current cell dead, backtrack one cell.
+    var ck = key(b.r, b.c);
+    if (!b.deadSet.has(ck)) {
+      b.deadSet.add(ck);
+      b.deadEnds.push({ r: b.r, c: b.c });
+    }
+    var back = b.stack.pop();
+    if (back) moveBot(b, back.r, back.c);
+    else { b.pr = b.r; b.pc = b.c; }
+  }
+
+  function checkDone() {
+    for (var i = 0; i < bots.length; i++) if (bots[i].finishTick === null) return false;
+    return true;
+  }
+
+  function tick(n) {
+    n = (typeof n === "number" && n > 0) ? Math.floor(n) : 1;
+    for (var i = 0; i < n; i++) {
+      if (allDone) break;
+      tickCount++;
+      for (var j = 0; j < bots.length; j++) {
+        var b = bots[j];
+        if (b.finishTick === null) stepBot(b);
+      }
+      elapsedTicks = tickCount;   // frozen once allDone flips
+      allDone = checkDone();
+    }
+    lastTickTime = performance.now();
+    updateHUD();
+  }
+
+  // ---- HUD / rendering ----
+  function updateHUD() {
+    var done = 0;
+    for (var i = 0; i < bots.length; i++) if (bots[i].finishTick !== null) done++;
+    elCompleted.textContent = done + " / " + NBOTS;
+    elTimer.textContent = String(elapsedTicks);
+    elTimer.className = allDone ? "done" : "";
+  }
+
+  function cx(c) { return PAD + c * CELL + CELL / 2; }
+  function cy(r) { return PAD + r * CELL + CELL / 2; }
+
+  function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#0d0f13";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // exit / spawn markers
+    ctx.fillStyle = "rgba(60,220,120,0.35)";
+    ctx.fillRect(PAD + exitCell.c * CELL + 3, PAD + exitCell.r * CELL + 3, CELL - 6, CELL - 6);
+    ctx.strokeStyle = "rgba(255,255,255,0.7)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx(spawn.c), cy(spawn.r), CELL * 0.38, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // walls
+    ctx.strokeStyle = "#8f97ab";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var w = walls[r][c];
+        var x = PAD + c * CELL, y = PAD + r * CELL;
+        if (w.n) { ctx.moveTo(x, y); ctx.lineTo(x + CELL, y); }
+        if (w.w) { ctx.moveTo(x, y); ctx.lineTo(x, y + CELL); }
+        if (r === ROWS - 1 && w.s) { ctx.moveTo(x, y + CELL); ctx.lineTo(x + CELL, y + CELL); }
+        if (c === COLS - 1 && w.e) { ctx.moveTo(x + CELL, y); ctx.lineTo(x + CELL, y + CELL); }
+      }
+    }
+    ctx.stroke();
+
+    // bots, smoothly interpolated between previous and current cell
+    var t = Math.min(1, (performance.now() - lastTickTime) / TICK_MS);
+    for (var i = 0; i < bots.length; i++) {
+      var b = bots[i];
+      var bx = cx(b.pc) + (cx(b.c) - cx(b.pc)) * t + b.ox;
+      var by = cy(b.pr) + (cy(b.r) - cy(b.pr)) * t + b.oy;
+      ctx.beginPath();
+      ctx.fillStyle = b.color;
+      ctx.arc(bx, by, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      if (b.finishTick !== null) {
+        ctx.strokeStyle = "rgba(255,255,255,0.9)";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+    }
+    requestAnimationFrame(render);
+  }
+
+  // ---- public API ----
+  window.game = {
+    tick: tick,
+    reset: reset,
+    get elapsed() { return elapsedTicks; },
+    get size() { return { rows: ROWS, cols: COLS }; },
+    get spawn() { return { r: spawn.r, c: spawn.c }; },
+    get exit() { return { r: exitCell.r, c: exitCell.c }; },
+    walls: function (r, c) {
+      var w = walls[r][c];
+      return { n: w.n, e: w.e, s: w.s, w: w.w };
+    },
+    get bots() { return bots; }
+  };
+
+  document.getElementById("reset").addEventListener("click", function () { reset(); });
+
+  reset();
+  setInterval(function () { if (!allDone) tick(1); }, TICK_MS);
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>

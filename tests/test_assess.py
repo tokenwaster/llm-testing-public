@@ -1,16 +1,3 @@
-"""Attribution must not blame us for the model's failures, or vice versa.
-
-Two real misfires, both caught on live v0.6 data:
-
-  * rs-010-ants-rod fired as `suspect-answer-key [harness]` because two strong
-    models both answered '40' - the REGISTERED TRAP. Six other models answered
-    it correctly, so the key was provably fine. The verdict is attributed to us,
-    so falling for a trap was excluded from the model's attributed score:
-    claude-cli-opus-4-8 read 0.947 raw but 0.970 attributed.
-  * adapters raise kind="rumination_spiral" for thinking with no output; assess
-    only matched "runaway", so it fell through to checker-fail - "code ran but
-    failed the checker's tests" for a model that emitted an empty workspace.
-"""
 
 from types import SimpleNamespace
 
@@ -47,7 +34,6 @@ def test_a_registered_trap_is_the_models_fault_not_ours():
 
 
 def test_suspect_key_stands_down_when_anyone_solved_it():
-    """Six models answering correctly proves the key works."""
     cfg = _cfg()
     agg = {f"weak{i}": _res("40") for i in range(3)}
     agg["strong"] = _res("61.6667", score=1.0)
@@ -57,8 +43,6 @@ def test_suspect_key_stands_down_when_anyone_solved_it():
 
 
 def test_suspect_key_still_fires_when_nobody_solved_it():
-    """The heuristic must still earn its keep: an unsolved task where strong
-    models converge on one answer is exactly what it is for."""
     cfg = _cfg(suspect_key_min_avg=0.0)
     cfg["traps"] = {}
     td = {"rs-999-x": {"agg": {f"m{i}": _res("40") for i in range(3)}}}
@@ -75,9 +59,6 @@ def test_a_trap_answer_is_never_a_suspect_key():
 
 
 def test_a_detected_repetition_loop_is_the_spiral():
-    """A REAL spiral is a detected repetition loop — a short cycle repeated
-    until aborted. That is the only spiral we can actually detect, and it is
-    the model's fault."""
     res = {"status": "error",
            "attempts": [{"error_kind": "repetition_loop", "tokens_out": None,
                          "error": "repetition loop — the model is repeating one "
@@ -92,9 +73,6 @@ def test_a_detected_repetition_loop_is_the_spiral():
 
 
 def test_silence_is_a_timeout_not_a_spiral():
-    """Silence means the model was THINKING, not looping: the claude CLI emits
-    nothing until it answers. The old no-output guard is retired, so legacy
-    rumination_spiral records read as window-limited, never as a spiral."""
     res = {"status": "error",
            "attempts": [{"error_kind": "rumination_spiral", "tokens_out": None,
                          "error": "rumination spiral: 300s of thinking with no "
@@ -109,8 +87,6 @@ def test_silence_is_a_timeout_not_a_spiral():
 
 
 def test_a_refused_request_is_ours_not_the_models():
-    """A provider 4xx means the model never saw the prompt — config, not
-    capability. It must never read as a model failure."""
     res = {"status": "error",
            "attempts": [{"error_kind": "request_rejected", "tokens_out": None,
                          "error": "HTTP 400: invalid temperature: only 1 is "

@@ -1,20 +1,3 @@
-"""Model-yaml validation: catch a setting that is declared but not delivered.
-
-Every configuration bug this suite has hit was the same shape — a value written in
-a yaml that never reached the provider. `max_tokens: 16384` on the claude models
-was never applied. `temperature: 0.2` on those same models was inert because the
-CLI takes no such flag. Sampling params set on a claude model would display and
-never transmit. Each was found by accident, one at a time, after it had already
-affected results.
-
-So the rule is not "is this value sensible" but "will this value actually be SENT,
-and does it mean what the file implies". Anything that cannot be delivered is an
-error, because a number nobody applies is worse than an absent one: it reads as a
-decision that was made.
-
-    from harness.validate import validate_models
-    problems = validate_models()      # [] when clean
-"""
 
 from . import config
 
@@ -55,7 +38,6 @@ def _check_values(where: str, vals: dict, out: list) -> None:
 
 
 def validate_models(models=None) -> list[str]:
-    """Every problem found, as human-readable strings. Empty list = clean."""
     from .registry import load_models
     models = models or load_models(include_disabled=True)
     out: list[str] = []
@@ -72,6 +54,19 @@ def validate_models(models=None) -> list[str]:
                            f"never sent.")
             if m.sampling_profiles:
                 out.append(f"{w}: sampling_profiles set but {why} — never sent.")
+        if m.effort is not None:
+            if not m.effort_settable:
+                out.append(f"{w}: effort={m.effort!r} but only the claude-cli "
+                           f"transport takes --effort; provider {m.provider} "
+                           f"would never receive it. Remove the key.")
+            elif str(m.effort) not in m.EFFORT_LEVELS:
+                out.append(f"{w}: effort={m.effort!r} is not a level the CLI "
+                           f"accepts. Valid: {', '.join(m.EFFORT_LEVELS)}")
+        if m.thinking_off_in_yaml:
+            out.append(f"{w}: thinking_off is a probe-only parameter and must "
+                       f"not appear in a model yaml — a scored run has to use "
+                       f"the model's own default, and only ~8 of the fleet can "
+                       f"honour the flag at all. Use the /special thinking probe.")
         if (m.sampling_settable_yaml is False
                 and not m.sampling_unsettable_reason.strip()
                 and not m.sampling_source.strip()):

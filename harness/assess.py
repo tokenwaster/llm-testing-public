@@ -1,15 +1,3 @@
-"""Failure & retry assessment — classifies every non-clean result into a
-category with an attribution (model | harness | infra | known-limit | clean),
-and computes an "attributed score": capability with non-model failures (our
-bugs, gateway flakiness) removed.
-
-Diagnosis only; it never changes the raw score. All thresholds live in
-directives.yaml `assess:` so the rules are tunable without code changes.
-
-Answer-lane summaries carry "expected 'X', got 'Y'", so the model's answer is
-recoverable without re-reading transcripts — that powers the cross-model
-suspect-key check.
-"""
 
 import re
 
@@ -95,13 +83,6 @@ def _norm(s: str) -> str:
 
 
 def _numeric_trap(got: str, traps, tdef) -> bool:
-    """Is `got` a registered trap answer, allowing units/prose around it?
-
-    _norm only strips whitespace, so "40 seconds" never matches the trap "40"
-    while the numeric SCORER happily parses the value out of prose. Attribution
-    has to match the scorer, or the same memorised-classic answer reads as a
-    generic wrong-answer and the task loses the exact signal it was built to
-    catch. Numeric-matched tasks only."""
     if ((getattr(tdef, "scoring", None) or {}).get("match")) != "numeric":
         return False
     from .scoring import _to_float
@@ -119,7 +100,6 @@ def _numeric_trap(got: str, traps, tdef) -> bool:
 
 
 def _model_avgs(task_data: dict) -> dict:
-    """model -> overall avg score (for the strong-model guard on suspect keys)."""
     acc: dict[str, list] = {}
     for info in task_data.values():
         for model, e in info["agg"].items():
@@ -130,17 +110,6 @@ def _model_avgs(task_data: dict) -> dict:
 
 
 def suspect_answers(task_data: dict, tdefs: dict, cfg: dict) -> dict:
-    """task_id -> {answer, models} where >= N otherwise-strong models (mean
-    score >= min_avg) all scored 0 with the SAME answer. The strong-model guard
-    separates "the key is wrong" from "weak models share a trap answer".
-
-    Two things make a task immune, because both PROVE the key is answerable:
-      * anybody scored above zero on it, and
-      * the shared answer is a registered trap.
-    Without the first, rs-010 fired as a suspect key while six models were
-    answering it correctly - and that verdict is attributed to US, so falling
-    for a trap was quietly excluded from the model's attributed score.
-    """
     out = {}
     minn = cfg["suspect_key_min_models"]
     min_avg = cfg.get("suspect_key_min_avg", 0.85)
@@ -176,8 +145,6 @@ def suspect_answers(task_data: dict, tdefs: dict, cfg: dict) -> dict:
 
 
 def classify(result: dict, tdef, cfg: dict, suspect: dict | None = None) -> dict:
-    """-> {category, attribution, detail} for one result. `detail` carries
-    dynamic specifics (tokens burned, which trap answer, model agreement)."""
     suspect = suspect or {}
     sc = result.get("score") or {}
     score = sc.get("score")
@@ -298,10 +265,6 @@ def classify(result: dict, tdef, cfg: dict, suspect: dict | None = None) -> dict
 
 def assess_model(model: str, task_data: dict, tdefs: dict,
                  cfg: dict | None = None, suspect: dict | None = None) -> dict:
-    """Per-result classifications + rollup for one model, from the
-    aggregated-per-task view. Returns {raw_score, attributed_score, n_graded,
-    n_attributed, by_attribution, retries:{recovered,fatal,by_kind},
-    flagged:[{task, category, attribution, detail, score, retries}]}."""
     cfg = cfg or load_cfg()
     if suspect is None:
         suspect = suspect_answers(task_data, tdefs, cfg)
@@ -361,8 +324,6 @@ def assess_model(model: str, task_data: dict, tdefs: dict,
 
 
 def assess_run(run: dict, tdefs: dict, cfg: dict | None = None) -> dict:
-    """Compact attribution rollup across every result in one run (for the
-    run-report header). Uses the run's own results (not the aggregate)."""
     cfg = cfg or load_cfg()
     cohort: dict = {}
     for r in run["results"]:

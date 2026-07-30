@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Billiards</title>
+<style>
+  html,body{
+    margin:0; padding:0; background:#1b2027; color:#e8e6df;
+    font-family:"Segoe UI",system-ui,sans-serif;
+    display:flex; flex-direction:column; align-items:center; min-height:100vh;
+  }
+  h1{ font-size:20px; font-weight:600; letter-spacing:.06em; margin:14px 0 6px; color:#d9c9a3;}
+  #wrap{ position:relative; }
+  canvas{ display:block; border-radius:14px; box-shadow:0 12px 40px rgba(0,0,0,.6); touch-action:none; cursor:crosshair;}
+  #bar{ margin:12px 0 4px; display:flex; gap:14px; align-items:center;}
+  button{
+    background:#3d6b3f; color:#fff; border:1px solid #2a4a2c; border-radius:8px;
+    padding:8px 18px; font-size:15px; cursor:pointer; font-weight:600;
+  }
+  button:hover{ background:#4c8450; }
+  #howto{ max-width:760px; text-align:center; font-size:14px; line-height:1.5; color:#b9beb2; margin:6px 12px 20px;}
+  #howto b{ color:#f0e9d8; }
+  #msg{ height:20px; font-size:14px; color:#f2c14e; font-weight:600;}
+</style>
+</head>
+<body>
+<h1>CANVAS BILLIARDS</h1>
+<div id="wrap"><canvas id="cv"></canvas></div>
+<div id="bar">
+  <button id="rackBtn">&#8635; Reset / Rack</button>
+  <span id="msg"></span>
+</div>
+<p id="howto"><b>How to play:</b> press the mouse on the <b>white cue ball</b>, <b>drag backwards</b>
+(away from where you want to shoot) to set direction and power, then <b>release</b> to strike.
+A longer drag hits harder. The dashed line shows where the cue ball will go.
+Sink balls in the six pockets. Press <b>Reset / Rack</b> to start over.</p>
+
+<script>
+(function(){
+"use strict";
+
+/* ---------- constants ---------- */
+var W = 860, H = 430, R = 11;         // playfield size & ball radius (sim units = px)
+var RAIL = 30;                        // decorative rail width around playfield
+var POCKET_R = 2.15 * R;              // pocket capture radius (ball centre)
+var FRICTION = 85;                    // px/s^2 rolling deceleration
+var CUSHION_E = 0.92;                 // cushion restitution
+var BALL_E = 0.98;                    // ball-ball restitution (near elastic)
+var STOP_EPS = 0.05;                  // speed below this snaps to rest
+var MAX_SHOT = 1500;                  // cap for mouse-driven shots
+
+var pockets = [[0,0],[W/2,0],[W,0],[0,H],[W/2,H],[W,H]];
+
+var cv = document.getElementById("cv");
+cv.width = W + 2*RAIL; cv.height = H + 2*RAIL;
+var ctx = cv.getContext("2d");
+var msgEl = document.getElementById("msg");
+
+var balls = [];        // {x,y,vx,vy,potted,cue,color,stripe}
+var running = false, rafId = null;
+var aiming = false, aimX = 0, aimY = 0;
+
+var PALETTE = ["#f2c500","#1c4fa0","#c8102e","#5a2d81","#ff7420",
+               "#0a6b3c","#8a3324","#141414"];
+
+/* ---------- core sim (window.sim contract) ---------- */
+function reset(list){
+  var solids = 0, stripes = 0;
+  balls = list.map(function(b){
+    var cue = !!b.cue;
+    var stripe = false, color = "#f4f1e6";
+    if(!cue){
+      var ord = solids + stripes;
+      stripe = ord >= 8;
+      color = PALETTE[ord % 8];
+      if(stripe) stripes++; else solids++;
+    }
+    return { x:+b.x, y:+b.y,
+             vx: b.vx ? +b.vx : 0, vy: b.vy ? +b.vy : 0,
+             potted:false, cue:cue, color:color, stripe:stripe };
+  });
+  aiming = false;
+  msgEl.textContent = "";
+  draw();
+}
+
+function substep(h){
+  var i, j, b, a;
+  // integrate + friction
+  for(i=0;i<balls.length;i++){
+    b = balls[i];
+    if(b.potted) continue;
+    b.x += b.vx*h; b.y += b.vy*h;
+    var s = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+    if(s > 0){
+      var ns = s - FRICTION*h;
+      if(ns <= STOP_EPS){ b.vx = 0; b.vy = 0; }
+      else { var f = ns/s; b.vx *= f; b.vy *= f; }
+    }
+  }
+  // ball-ball collisions (equal mass, impulse along centre line)
+  for(i=0;i<balls.length;i++){
+    a = balls[i]; if(a.potted) continue;
+    for(j=i+1;j<balls.length;j++){
+      b = balls[j]; if(b.potted) continue;
+      var dx = b.x-a.x, dy = b.y-a.y;
+      var d2 = dx*dx+dy*dy, min = 2*R;
+      if(d2 >= min*min || d2 === 0) continue;
+      var d = Math.sqrt(d2), nx = dx/d, ny = dy/d;
+      // positional separation (no energy added)
+      var ov = (min - d)/2;
+      a.x -= nx*ov; a.y -= ny*ov;
+      b.x += nx*ov; b.y += ny*ov;
+      // approach speed along normal
+      var rel = (a.vx-b.vx)*nx + (a.vy-b.vy)*ny;
+      if(rel > 0){
+        var p = (1+BALL_E)*rel/2;
+        a.vx -= p*nx; a.vy -= p*ny;
+        b.vx += p*nx; b.vy += p*ny;
+      }
+    }
+  }
+  // pockets, then cushions
+  for(i=0;i<balls.length;i++){
+    b = balls[i];
+    if(b.potted) continue;
+    for(j=0;j<6;j++){
+      var px = b.x-pockets[j][0], py = b.y-pockets[j][1];
+      if(px*px+py*py <= POCKET_R*POCKET_R){
+        b.potted = true; b.vx = 0; b.vy = 0;
+        if(b.cue) msgEl.textContent = "Scratch! Cue ball potted — press Reset / Rack.";
+        break;
+      }
+    }
+    if(b.potted) continue;
+    if(b.x < R){    b.x = R;    if(b.vx < 0) b.vx = -b.vx*CUSHION_E; }
+    if(b.x > W-R){  b.x = W-R;  if(b.vx > 0) b.vx = -b.vx*CUSHION_E; }
+    if(b.y < R){    b.y = R;    if(b.vy < 0) b.vy = -b.vy*CUSHION_E; }
+    if(b.y > H-R){  b.y = H-R;  if(b.vy > 0) b.vy = -b.vy*CUSHION_E; }
+  }
+}
+
+function step(dt){
+  dt = +dt;
+  if(!(dt > 0)){ draw(); return; }
+  var n = Math.ceil(dt*240);
+  if(n < 1) n = 1;
+  if(n > 2000) n = 2000;
+  var h = dt/n;
+  for(var i=0;i<n;i++) substep(h);
+  draw();
+}
+
+function state(){
+  return balls.map(function(b){
+    return { x:b.x, y:b.y, vx:b.vx, vy:b.vy, potted:b.potted, cue:!!b.cue };
+  });
+}
+
+function shoot(vx, vy){
+  for(var i=0;i<balls.length;i++){
+    if(balls[i].cue && !balls[i].potted){
+      balls[i].vx = +vx; balls[i].vy = +vy;
+      break;
+    }
+  }
+}
+
+function pause(){
+  running = false;
+  if(rafId !== null){ cancelAnimationFrame(rafId); rafId = null; }
+}
+function resume(){
+  if(running) return;
+  running = true;
+  var loop = function(){
+    if(!running) return;
+    step(1/60);
+    rafId = requestAnimationFrame(loop);
+  };
+  rafId = requestAnimationFrame(loop);
+}
+
+window.sim = { W:W, H:H, R:R, reset:reset, step:step, state:state,
+               shoot:shoot, pause:pause, resume:resume };
+
+/* ---------- rack ---------- */
+function rack(){
+  var list = [{x: W*0.25, y: H/2, cue:true}];
+  var gap = 2*R + 0.6, cos30 = Math.sqrt(3)/2;
+  var sx = W*0.66;
+  for(var row=0; row<5; row++)
+    for(var k=0; k<=row; k++)
+      list.push({ x: sx + row*gap*cos30, y: H/2 + (k - row/2)*gap });
+  reset(list);
+}
+document.getElementById("rackBtn").addEventListener("click", rack);
+
+/* ---------- mouse / pointer aiming ---------- */
+function toSim(e){
+  var r = cv.getBoundingClientRect();
+  return { x:(e.clientX - r.left)*(cv.width/r.width) - RAIL,
+           y:(e.clientY - r.top )*(cv.height/r.height) - RAIL };
+}
+function cueBall(){
+  for(var i=0;i<balls.length;i++)
+    if(balls[i].cue && !balls[i].potted) return balls[i];
+  return null;
+}
+cv.addEventListener("pointerdown", function(e){
+  var c = cueBall(); if(!c) return;
+  var p = toSim(e), dx = p.x-c.x, dy = p.y-c.y;
+  if(dx*dx+dy*dy <= (4*R)*(4*R)){
+    aiming = true; aimX = p.x; aimY = p.y;
+    cv.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    draw();
+  }
+});
+cv.addEventListener("pointermove", function(e){
+  if(!aiming) return;
+  var p = toSim(e); aimX = p.x; aimY = p.y;
+  draw();
+});
+cv.addEventListener("pointerup", function(e){
+  if(!aiming) return;
+  aiming = false;
+  var c = cueBall();
+  if(c){
+    var p = toSim(e);
+    var dx = c.x-p.x, dy = c.y-p.y;         // drag back → shoot forward
+    var d = Math.sqrt(dx*dx+dy*dy);
+    if(d > 6){
+      var pow = Math.min(d*7, MAX_SHOT);
+      shoot(dx/d*pow, dy/d*pow);
+    }
+  }
+  draw();
+});
+cv.addEventListener("pointercancel", function(){ aiming=false; draw(); });
+
+/* ---------- rendering ---------- */
+function drawBall(b){
+  var x = b.x+RAIL, y = b.y+RAIL;
+  ctx.save();
+  // shadow
+  ctx.beginPath(); ctx.arc(x+2, y+3, R, 0, 7);
+  ctx.fillStyle = "rgba(0,0,0,.30)"; ctx.fill();
+  // body
+  ctx.beginPath(); ctx.arc(x, y, R, 0, 7); ctx.clip();
+  ctx.fillStyle = b.stripe ? "#f4f1e6" : b.color;
+  ctx.fillRect(x-R, y-R, 2*R, 2*R);
+  if(b.stripe){
+    ctx.fillStyle = b.color;
+    ctx.fillRect(x-R, y-R*0.45, 2*R, R*0.9);
+  }
+  // highlight
+  var g = ctx.createRadialGradient(x-R*0.4, y-R*0.5, R*0.1, x, y, R*1.4);
+  g.addColorStop(0, "rgba(255,255,255,.85)");
+  g.addColorStop(0.25, "rgba(255,255,255,.18)");
+  g.addColorStop(1, "rgba(0,0,0,.30)");
+  ctx.fillStyle = g;
+  ctx.fillRect(x-R, y-R, 2*R, 2*R);
+  ctx.restore();
+}
+
+function draw(){
+  var i;
+  // wooden rails
+  var wg = ctx.createLinearGradient(0,0,0,cv.height);
+  wg.addColorStop(0,"#7a4a22"); wg.addColorStop(0.5,"#5d3617"); wg.addColorStop(1,"#4a2a10");
+  ctx.fillStyle = wg;
+  ctx.fillRect(0,0,cv.width,cv.height);
+  // felt
+  var fg = ctx.createRadialGradient(cv.width/2, cv.height/2, 60, cv.width/2, cv.height/2, cv.width*0.62);
+  fg.addColorStop(0,"#2f8f4e"); fg.addColorStop(1,"#186435");
+  ctx.fillStyle = fg;
+  ctx.fillRect(RAIL, RAIL, W, H);
+  // cushion inner edge
+  ctx.strokeStyle = "#0e4a26"; ctx.lineWidth = 5;
+  ctx.strokeRect(RAIL+2.5, RAIL+2.5, W-5, H-5);
+  // head string
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(RAIL+W*0.25, RAIL+4); ctx.lineTo(RAIL+W*0.25, RAIL+H-4); ctx.stroke();
+  // pockets
+  for(i=0;i<6;i++){
+    var px = pockets[i][0]+RAIL, py = pockets[i][1]+RAIL;
+    ctx.beginPath(); ctx.arc(px, py, POCKET_R+3, 0, 7);
+    ctx.fillStyle = "#3a2410"; ctx.fill();
+    ctx.beginPath(); ctx.arc(px, py, POCKET_R, 0, 7);
+    ctx.fillStyle = "#050505"; ctx.fill();
+  }
+  // balls
+  for(i=0;i<balls.length;i++) if(!balls[i].potted) drawBall(balls[i]);
+  // aim overlay
+  var c = cueBall();
+  if(aiming && c){
+    var dx = c.x-aimX, dy = c.y-aimY, d = Math.sqrt(dx*dx+dy*dy);
+    if(d > 2){
+      var ux = dx/d, uy = dy/d;
+      var pow = Math.min(d*7, MAX_SHOT)/MAX_SHOT;
+      var cx = c.x+RAIL, cy = c.y+RAIL;
+      // pull-back cue stick
+      ctx.strokeStyle = "rgba(222,184,135,.95)"; ctx.lineWidth = 5; ctx.lineCap="round";
+      ctx.beginPath();
+      ctx.moveTo(cx - ux*(R+4), cy - uy*(R+4));
+      ctx.lineTo(cx - ux*(R+4+Math.min(d,160)), cy - uy*(R+4+Math.min(d,160)));
+      ctx.stroke();
+      // dashed aim line
+      ctx.setLineDash([7,7]);
+      ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx + ux*(R+2), cy + uy*(R+2));
+      ctx.lineTo(cx + ux*(R+40+260*pow), cy + uy*(R+40+260*pow));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // power bar
+      ctx.fillStyle = "rgba(0,0,0,.45)";
+      ctx.fillRect(RAIL+10, RAIL+10, 120, 12);
+      ctx.fillStyle = pow > .75 ? "#e04a3a" : "#f2c14e";
+      ctx.fillRect(RAIL+12, RAIL+12, 116*pow, 8);
+    }
+  }
+  // hint on felt
+  ctx.fillStyle = "rgba(255,255,255,.35)";
+  ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("drag back from the cue ball \u2022 release to shoot", cv.width/2, cv.height-RAIL/2+4);
+  ctx.textAlign = "start";
+}
+
+/* ---------- go ---------- */
+rack();
+resume();
+})();
+</script>
+</body>
+</html>

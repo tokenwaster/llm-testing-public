@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Falling Sand</title>
+<style>
+    body { background-color: #1a1a1a; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .container { text-align: center; background-color: #252525; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); display:flex; flex-direction:column; align-items:center;}
+    canvas#sand { background-color: #000; cursor: crosshair; margin-bottom: 20px; max-width: 100%; image-rendering: pixelated; } 
+    .controls { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;}
+    button { padding: 8px 16px; border: none; cursor: pointer; font-weight: bold; text-transform: uppercase; color: #333; background-color: #e0e0e0; transition: all 0.2s;}
+    button.active { outline: 2px solid white; box-shadow: 0 0 10px rgba(255,255,255,0.6); transform: scale(1.05);}
+    .mat-sand { background-color: #f4a460 !important;}
+    .mat-water { background-color: #1e90ff !important; color: white !important;}
+    .mat-wall { background-color: #808080 !important;}
+    .mat-acid { background-color: #32cd32 !important; font-weight:bold; } 
+    .mat-empty { background-color: #4a4a4a !important; color:white !important; border:1px solid #666;}
+    #clear { margin-top: 15px; background-color: #ff4d4d !important; color: white !important; }
+</style>
+</head>
+<body>
+
+<div class="container">
+    <canvas id="sand" width="300" height="300"></canvas>
+    <div class="controls">
+        <button id="mat-sand" class="active mat-sand">Sand</button>
+        <button id="mat-water" class="mat-water">Water</button>
+        <button id="mat-wall" class="mat-wall">Wall</button>
+        <button id="mat-acid" class="mat-acid">Acid</button>
+        <button id="mat-empty" class="mat-empty">Eraser</button>
+    </div>
+    <button id="clear">Clear Grid</button>
+</div>
+
+<script>
+// Constants & State
+const W = 300; // Logical grid width (>=80)
+const H = 300; // Logical grid height
+    
+const CELL_EMPTY = 0;
+const CELL_SAND   = 1;
+const CELL_WATER  = 2;
+const CELL_WALL   = 3;
+const CELL_ACID   = 4;
+
+// DOM Elements
+const canvas = document.getElementById('sand');
+const ctx = canvas.getContext('2d', { alpha: false }); // optimize rendering
+const clearBtn = document.getElementById('clear');
+const matButtons = Array.from(document.querySelectorAll('[id^="mat-"]'));
+
+let currentMaterial = CELL_SAND;
+let isMouseDown = false;
+
+// Grid Data (Uint8Array) - 1D array representing W*H cells. index y*W + x.
+let grid = new Uint8Array(W * H);
+
+// Rendering Buffer: Use an offscreen canvas and ImageData for fast pixel updates without many drawRect calls.
+const offCanvas = document.createElement('canvas'); // Not in DOM, just memory buffer logic? Or reuse main context? 
+// Actually simpler: I will use `ctx` to clear rect (to black), then loop over cells and write pixels directly to an ImageData array associated with the canvas's pixel buffer via putImageData.
+let imgBuffer = ctx.createImageData(W, H); // This creates image data for WxH grid size.
+
+// Helper: Map Material ID -> RGBA [r,g,b,a] values (for 0-255).
+const COLOR_MAP = {
+    [CELL_SAND]:   [244, 164, 96], // #f4a460
+    [CELL_WATER]:  [30, 144, 255],  // DodgerBlue (approx) or Blue? Prompt says "water" -> blue. I'll use nice blue.
+    [CELL_WALL]:   [128, 128, 128], // Grey
+    [CELL_ACID]:   [32, 205, 50],   // Acid Green (approx) or Neon? Lime green safe bet for acid.
+};
+
+// Function to update the ImageData buffer from current grid state
+function updateGridToImage() {
+    const data = imgBuffer.data; // Uint8ClampedArray [R,G,B,A, R,G,B,A...]
+    
+    const fillData = (i, type) => {
+        if (type === CELL_EMPTY) return; // Leave as black
+        
+        let c = [0,0,0]; 
+        switch(type) {
+            case CELL_SAND:   c = COLOR_MAP[CELL_SAND]; break;
+            case CELL_WATER:  c = COLOR_MAP[CELL_WATER]; break;
+            case CELL_WALL:   c = COLOR_MAP[CELL_WALL]; break;
+            case CELL_ACID:   c = COLOR_MAP[CELL_ACID]; break;
+        }
+        
+        const baseIdx = i * 4;
+        data[baseIdx]     = c[0]; // R
+        data[baseIdx + 1] = c[1]; // G
+        data[baseIdx + 2] = c[2]; // B
+        data[baseIdx + 3] = 255;   // A (opaque)
+    };
+
+    for(let i=0; i < W*H; i++) {
+        fillData(i, grid[i]);
+    }
+}
+
+// Core Simulation: Tick Synchronously one step.
+function simulateStep() {
+    // Iterate Bottom-Up: y from H-1 down to 0 (starting at bottom-most movable rows). 
+    for(let y = H - 1; y >= 0; y--) {
+        for(let x = 0; x < W; x++) {
+            const idx = y * W + x;
+            const type = grid[idx];
+
+            if(type === CELL_EMPTY || type === CELL_WALL) continue;
+
+            let moved = false;
+            
+            // Movement Logic based on rules
+            
+            // Check below cell (y+1, same x). Only valid if not on bottom row.
+            // Bottom boundary: y=H-1 is solid floor? Actually "Bottom row ... act as solid boundaries". This implies cells at H-1 cannot fall out of grid. But they can hold particles. So for a particle at y=H-2, below is y+1 = H-1 (valid).
+            // However, if we are iterating bottom-up: when processing row `y`, the cell `(x,y+1)` has ALREADY been visited in this loop iteration because we start from high Y and go lower. 
+            // This means neighbor state reflects updates made earlier in THIS tick. Perfect for cascading movement (Sand falls into vacated spot below).
+            
+            if(y < H - 1) {
+                const idxBelow = (y + 1) * W + x;
+                const belowType = grid[idxBelow];
+
+                // Sand logic: falls to empty OR swaps with water/acid.
+                if(type === CELL_SAND) {
+                    if(belowType === CELL_EMPTY) {
+                        grid[idx] = CELL_EMPTY;
+                        grid[idxBelow] = type;
+                        moved = true;
+                    } else if (belowType === CELL_WATER || belowType === CELL_ACID) {
+                         // Swap: Sand moves down, liquid rises.
+                         const temp = grid[idx];
+                         grid[idx] = belowType;
+                         grid[idxBelow] = temp;
+                         moved = true;
+                    }
+                } 
+                // Water/Acid logic: Falls like sand (into empty). If blocked -> spread horizontally later in this block.
+                else {
+                     if(belowType === CELL_EMPTY) {
+                        grid[idx] = CELL_EMPTY;
+                        grid[idxBelow] = type;
+                        moved = true;
+                    }
+                }
+
+                // If blocked below, handle spreading/slide logic (only applicable for bottom rows where we cannot fall further or were blocked).
+                if(!moved && y >= 0) { 
+                     const isSand = (type === CELL_SAND);
+                     
+                     // Sand Diagonal Slide
+                     if(isSand) {
+                         let dirs = [];
+                         if(Math.random() < 0.5) { dirs.push(-1); dirs.push(1); } else { dirs.push(1); dirs.push(-1); }
+                         
+                         for(let dx of dirs) {
+                             const nx = x + dx;
+                             // Diagonal: y+1, nX. Must be within bounds (y+1<H). Since we are iterating up to H-2 usually? But if at H-1, below check failed or skipped because no below exists (but our logic checks `if(y < H - 1)` before belowType access; here `moved` is false so either y=H-1 or blocked. If y=H-1 then y+1 >= H which is invalid). So ensure validity for diagonal target: `(y+1) < H`.
+                             if(nx >= 0 && nx < W && (y+1) < H) {
+                                 const idxDiag = (y+1)*W + nx;
+                                 // Slide into EMPTY. Prompt says "slides diagonally ... Otherwise it rests." Doesn't specify liquid swap for slide, so strictly empty. 
+                                 if(grid[idxDiag] === CELL_EMPTY) {
+                                     grid[idxDiag] = type;
+                                     grid[idx] = CELL_EMPTY;
+                                     moved = true;
+                                     break;
+                                 }
+                             }
+                         }
+                     } else { // WATER or ACID spreading horizontally when blocked (or on floor). "spreads horizontally into empty cells".
+                         let dirs = [];
+                         if(Math.random() < 0.5) { dirs.push(-1); dirs.push(1); } else { dirs.push(1); dirs.push(-1); }
+                         
+                         for(let dx of dirs) {
+                             const nx = x + dx;
+                             // Horizontal spread at SAME row y? Yes, "spreads horizontally". Usually means same level. 
+                             if(nx >= 0 && nx < W) {
+                                 const idxHoriz = y * W + nx;
+                                 if(grid[idxHoriz] === CELL_EMPTY) {
+                                     grid[idxHoriz] = type;
+                                     grid[idx] = CELL_EMPTY;
+                                     moved = true;
+                                     break;
+                                 }
+                             }
+                         }
+                     }
+
+                     // ACID DISSOLVE LOGIC (Only for Acid). "dissolves sand or wall cells it touches below or beside". 
+                     if(type === CELL_ACID && !moved) {
+                         const neighborIndices = [];
+                         // Beside: Same row Y. Left/Right X-1/X+1.
+                         if(x > 0) neighborIndices.push(y * W + x - 1);
+                         if(x < W-1) neighborIndices.push(y * W + x + 1);
+                         // Below: y+1, same X (if valid). "below or beside". Usually below is directly down.
+                         if((y+1) < H) neighborIndices.push((y+1)*W + x);
+
+                         let target = null;
+                         for(let ni of neighborIndices) {
+                             const nt = grid[ni];
+                             if(nt === CELL_SAND || nt === CELL_WALL) {
+                                 target = ni;
+                                 break; 
+                             }
+                         }
+
+                         if(target !== null) {
+                             // Choice: both disappear. Acid cell and Target become empty.
+                             grid[idx] = CELL_EMPTY; // Current acid dissolves too (choice).
+                             grid[target] = CELL_EMPTY; // Target dissolved.
+                             moved = true; 
+                         }
+                     } 
+                } // End if !moved && y>=0
+                
+            } // end if y < H - 1
+
+        } // x loop
+    } // y loop
+    
+    updateGridToImage();
+}
+
+// Main Animation Loop: Run simulateStep at ~60fps and render.
+function animateLoop() {
+    simulateStep(); 
+    ctx.putImageData(imgBuffer, 0, 0); 
+    requestAnimationFrame(animateLoop);
+}
+
+window.onload = () => {
+   // Start animation loop on load? It runs in background. 
+   animateLoop();
+};
+
+// Input Handling: Mouse Painting
+canvas.addEventListener('mousedown', e => {
+    isMouseDown = true; 
+    paint(e); 
+});
+window.addEventListener('mouseup', () => isMouseDown = false);
+
+function paint(e) {
+    if(!isMouseDown && e.type !== 'mousedown') return; 
+    
+    const rect = canvas.getBoundingClientRect();
+    
+    // Scale factor: Map screen coords -> logical grid x,y. Canvas CSS size vs internal pixel dimensions (300x300).
+    const scaleX = W / rect.width;
+    const scaleY = H / rect.height;
+
+    let x = Math.floor((e.clientX - rect.left) * scaleX);
+    let y = Math.floor((e.clientY - rect.top) * scaleY);
+
+    if(x < 0 || x >= W || y < 0 || y >= H) return;
+    
+    const idx = y * W + x;
+    grid[idx] = currentMaterial;
+    
+    updateGridToImage();
+    ctx.putImageData(imgBuffer, 0, 0);
+}
+
+// Material Selection Buttons
+matButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+        matButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        
+        if (btn.id === 'mat-sand') currentMaterial = CELL_SAND;
+        else if (btn.id === 'mat-water') currentMaterial = CELL_WATER;
+        else if (btn.id === 'mat-wall') currentMaterial = CELL_WALL;
+        else if (btn.id === 'mat-acid') currentMaterial = CELL_ACID;
+        else if (btn.id === 'mat-empty') currentMaterial = CELL_EMPTY;
+    });
+});
+
+// Clear Button
+clearBtn.addEventListener('click', () => {
+   for(let i=0; i<grid.length; i++) grid[i] = CELL_EMPTY;
+   updateGridToImage();
+   ctx.putImageData(imgBuffer, 0, 0);
+});
+
+// API Implementation: Expose window.sim
+window.sim = {
+    get w() { return W; },
+    get h() { return H; },
+    
+    // Advance simulation n steps synchronously. 
+    tick(n) {
+        for(let i=0; i<n; i++) {
+            simulateStep(); // Logic only step (includes buffer update but not canvas draw to keep strictness? Prompt says "advance simulation". Buffer update is state transition, drawing is presentation. I will skip putImageData in loop to save overhead unless user explicitly asks visual check later. But for tests checking state after tick(n), they might expect grid updated. simulateStep updates `grid` and `imgBuffer`. That's enough.
+            // However, since imgBuffer update happens inside simulateStep (for rendering consistency if needed), it's fine. 
+        }
+    },
+
+    get(x,y) {
+        if (x<0||y<0||x>=W||y>=H) return "empty";
+        const idx = y * W + x;
+        switch(grid[idx]) {
+            case CELL_EMPTY: return "empty";
+            case CELL_SAND:   return "sand";
+            case CELL_WATER:  return "water";
+            case CELL_WALL:   return "wall";
+            case CELL_ACID:   return "acid";
+            default:           return "empty";
+        }
+    },
+
+    set(x,y,material) {
+         if (x<0||y<0||x>=W||y>=H) return; 
+         const idx = y * W + x;
+         
+         let typeID = CELL_EMPTY;
+         switch(material.toLowerCase()) {
+             case "sand":   typeID = CELL_SAND; break;
+             case "water":  typeID = CELL_WATER; break;
+             case "wall":   typeID = CELL_WALL; break;
+             case "acid":   typeID = CELL_ACID; break;
+             default:       typeID = CELL_EMPTY; 
+         }
+         
+         grid[idx] = typeID;
+    },
+
+    clear() {
+        for(let i=0; i<grid.length; i++) grid[i] = CELL_EMPTY;
+        updateGridToImage(); // Update buffer if needed, but not necessarily canvas draw.
+    }
+};
+
+</script>
+</body>
+</html>

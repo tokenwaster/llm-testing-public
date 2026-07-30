@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Maze Exploration Simulation</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f4f4f9;
+            padding: 20px;
+        }
+        #container {
+            display: flex;
+            gap: 30px;
+            margin-top: 20px;
+            align-items: flex-start;
+        }
+        #maze_wrapper {
+            border: 1px solid #ccc;
+            box-shadow: 2px 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        #controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            width: 250px;
+        }
+        canvas {
+            display: block;
+        }
+        .info-panel div {
+            margin-bottom: 8px;
+        }
+        button {
+            padding: 10px 15px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #game_status {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            background-color: white;
+            width: 100%;
+            max-width: 800px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Bot Maze Exploration</h1>
+
+    <div id="game_status">
+        <h2>Status</h2>
+        <div>Ticks Elapsed: <span id="timer">0</span></div>
+        <div>Bots Completed: <span id="completed">0</span> / 24</div>
+    </div>
+
+    <div id="container">
+        <div id="maze_wrapper">
+            <canvas id="maze" width="600" height="600"></canvas>
+        </div>
+
+        <div id="controls">
+            <button id="reset">Reset Maze & Start</button>
+            <div class="info-panel">
+                <h3>Game Info</h3>
+                <div>Grid Size: <span id="size_display">--</span></div>
+                <div>Spawn: <span id="spawn_display">--</span></div>
+                <div>Exit: <span id="exit_display">--</span></div>
+            </div>
+        </div>
+    </div>
+
+
+<script>
+
+// --- Global Game State Management (The required API) ---
+window.game = {
+    mazeCanvas: null, // Canvas element reference
+    ctx: null,         // 2D rendering context
+    size: { rows: 0, cols: 0 },
+    spawn: { r: -1, c: -1 },
+    exit: { r: -1, c: -1 },
+    elapsed: 0,
+    isFrozen: true, // Initially frozen until reset/tick starts
+    timeStep: 0.1,   // Simulation time step (for interpolation)
+
+    bots: [],       // Array of bot objects
+    lastSeed: null,
+
+    /** Initializes the game state and runs initial drawing. */
+    init(seed = Math.random()) {
+        if (window.game.mazeCanvas) {
+            const canvas = document.getElementById('maze');
+            window.game.ctx = canvas.getContext('2d');
+            window.game.mazeCanvas = canvas;
+
+            // Set initial API properties
+            this.lastSeed = seed;
+            
+            this._initializeMaze(seed);
+        }
+    },
+    
+    /** Resets the simulation state completely, recreating maze and bots deterministically. */
+    reset: function(seed) {
+        if (typeof window.game.init === 'function') {
+            window.game.init(seed);
+        } else {
+             // Fallback if game object wasn't fully attached yet
+             console.warn("Game initialization needed.");
+        }
+
+        this.elapsed = 0;
+        this.isFrozen = false;
+        document.getElementById('timer').textContent = this.elapsed;
+        this._renderAll();
+    },
+
+    /** Advances the simulation by 'n' ticks synchronously. */
+    tick: function(n) {
+        if (this.isFrozen && n > 0) {
+            console.warn("Simulation is frozen. Ignoring tick request.");
+            return false;
+        }
+        
+        let botsActive = false;
+        for (let i = 0; i < this.bots.length; i++) {
+            if (this.bots[i].finishTick === null) {
+                botsActive = true;
+                // Bot movement logic is encapsulated in the bot object itself
+                this.bots[i].move(1); 
+            }
+        }
+
+        this.elapsed += n;
+
+        if (botsActive || n > 0) {
+             document.getElementById('timer').textContent = this.elapsed;
+             // Check termination condition: If no bots are active AND we have run at least one tick, freeze.
+             if (!botsActive && this.elapsed > 0) {
+                 this.isFrozen = true;
+                 console.log("All bots found the exit. Simulation Frozen.");
+             } else if (botsActive && !this.isFrozen) {
+                 // Only update isFrozen status if a bot just arrived AND all are done
+                 const remainingBots = this.bots.filter(b => b.finishTick === null).length;
+                 if (remainingBots === 0) {
+                     this.isFrozen = true;
+                     console.log("Last bot arrived. Simulation Frozen.");
+                 }
+             }
+
+            this._renderAll();
+        }
+        return true;
+    },
+
+    // API Getters:
+    get elapsed() { return this._elapsed; },
+    get size() { return { rows: this.size.rows, cols: this.size.cols }; },
+    get spawn() { return { r: this.spawn.r, c: this.spawn.c }; },
+    get exit() { return { r: this.exit.r, c: this.exit.c }; },
+    get walls(r, c) { return this._getWalls(Math.floor(r), Math.floor(c)); },
+    get bots() { return [...this.bots]; }, // Return a copy to prevent external modification
+    
+    // Internal setters/getters for state consistency
+    _elapsed: 0,
+    set elapsed(value) { this._elapsed = value; },
+
+    /** Helper function to retrieve wall data deterministically (using internal grid mapping). */
+    _getWalls(r, c) {
+        const R = this.size.rows;
+        const C = this.size.cols;
+        if (r < 0 || r >= R || c < 0 || c >= C) return { n: true, e: true, s: true, w: true }; // Out of bounds treated as solid walls for safety
+
+        // Directions map to grid offsets: N(-1, 0), E(0, +1), S(+1, 0), W(0, -1)
+        // These values come from the generated 'maze' array in _initializeMaze.
+        return {
+            n: this.maze[r][c].walls.north,
+            e: this.maze[r][c].walls.east,
+            s: this.maze[r][c].walls.south,
+            w: this.maze[r][c].walls.west
+        };
+    }
+};
+
+
+// --- Internal Structures and Logic ---
+
+/**
+ * Deterministic Pseudo-Random Number Generator (based on Seed)
+ * Ensures reproducibility required by the prompt.
+ */
+class PRNG {
+    constructor(seed) {
+        this.state = seed;
+    }
+
+    next() {
+        this.state = (this.state * 9301 + 49297) % 233280;
+        return this.state / 233280.0; // Return float [0, 1)
+    }
+
+    nextInt(max) {
+        return Math.floor((this.next() * max));
+    }
+}
+
+
+/** Represents a cell in the maze grid */
+class Cell {
+    constructor(r, c) {
+        this.r = r;
+        this.c = c;
+        // Walls are true if they block passage (i.e., initially solid walls)
+        this.walls = { north: true, east: true, south: true, west: true };
+        this.visited = false; // Used during maze generation
+    }
+
+    setWall(direction, isBlocked) {
+        this.walls[direction] = !!isBlocked;
+    }
+
+    // Helper to get opposite direction (N <-> S, W <-> E)
+    getOpposite(dir) {
+        if (dir === 'north') return 'south';
+        if (dir === 'south') return 'north';
+        if (dir === 'east') return 'west';
+        if (dir === 'west') return 'east';
+        return null;
+    }
+}
+
+/** Represents a Bot Agent */
+class Bot {
+    constructor(id, initialSeed) {
+        this.id = id;
+        // Use the bot ID and agent index to create unique seeds/preferences
+        this.rng = new PRNG(initialSeed); 
+        
+        // Core State
+        this.path = [];          // [{r, c}, ...] Full history of visited cells
+        this.deadEnds = new Set(); // Set<string> "r,c" keys for explored dead ends (simplified memory)
+
+        // Movement State
+        this.currentCell = null; 
+        this.nextMove = null;    // For interpolation rendering
+
+        this.finishTick = null;  // Null until arrival
+
+        // Preferences: Define search order based on seed.
+        // Directions: N, E, S, W
+        this.preferredDirections = [];
+        const directions = ['north', 'east', 'south', 'west'];
+        for (let i = 0; i < directions.length; i++) {
+            // Shuffle the direction order using the agent's unique RNG
+            const j = Math.floor(this.rng.next() * (i + 1));
+            [directions[i], directions[j]] = [directions[j], directions[i]];
+        }
+        this.preferredDirections = directions;
+
+        // Initialize position and history
+    }
+
+    /** Sets the initial state for a bot upon game start. */
+    initialize(r, c) {
+        this.currentCell = { r: r, c: c };
+        this.path = [{ r: r, c: c }];
+        this.nextMove = null; // Starts at current cell
+    }
+
+    /** 
+     * The core bot logic: attempts to move one step (DFS exploration). 
+     * @param tickCount - Simulation tick count (unused internally but required signature)
+     */
+    move(tickCount) {
+        if (this.finishTick !== null) return;
+
+        const current = this.currentCell;
+        let nextPosition = null;
+        let moved = false;
+
+        // 1. Check Preferred Neighbors (Exploration attempt)
+        for (const direction of this.preferredDirections) {
+            const [dr, dc] = this._getDelta(direction);
+            const nr = current.r + dr;
+            const nc = current.c + dc;
+
+            // Boundary check and Wall Check using the global API
+            if (nr >= 0 && nr < window.game.size.rows && 
+                nc >= 0 && nc < window.game.size.cols) {
+
+                const wallData = window.game.walls(current.r, current.c);
+                let isPassageOpen = false;
+                if (direction === 'north' && !wallData.n) isPassageOpen = true;
+                else if (direction === 'east' && !wallData.e) isPassageOpen = true;
+                else if (direction === 'south' && !wallData.s) isPassageOpen = true;
+                else if (direction === 'west' && !wallData.w) isPassageOpen = true;
+
+                // Check if the neighbor cell exists and has not been fully explored recently 
+                // (Simplified check: prefer movement to unvisited/less-traversed cells)
+                const targetCell = this.path.find(p => p.r === nr && p.c === nc);
+                
+                if (isPassageOpen) {
+                    // Success! Found a path.
+                    nextPosition = { r: nr, c: nc };
+                    moved = true;
+                    break; 
+                }
+            }
+        }
+
+        if (moved) {
+            this._advance(nextPosition);
+            return true;
+        }
+
+
+        // 2. Backtracking Logic (If no preferred forward moves were found)
+        let backtracked = false;
+        while (this.path.length > 1) {
+            const lastStep = this.path[this.path.length - 1];
+            const prevStep = this.path[this.path.length - 2];
+
+            // Check if the connection between last and previous cell is a traversable passage
+            // We simulate moving back from 'lastStep' to 'prevStep'.
+            if (this._isPassageOpen(prevStep, lastStep, current)) { // Using current state for simplification check
+                nextPosition = prevStep;
+                moved = true;
+                backtracked = true;
+                break;
+            } else {
+                // If the passage was blocked or already marked as fully explored/dead end cycle, 
+                // we must step back.
+                this.currentCell = prevStep; // Update internal state for rendering purposes
+                nextPosition = prevStep;
+                moved = true;
+                break;
+            }
+        }
+
+        if (moved && nextPosition) {
+             this._advance(nextPosition);
+             return true;
+        }
+
+
+        // 3. Failure: Stuck at current location, must have finished or is truly blocked.
+        return false;
+    }
+
+    /** Updates internal state after moving from 'from' to 'to'. */
+    _advance(to) {
+        this.currentCell = to;
+        this.path.push({ r: to.r, c: to.c });
+        this.nextMove = null; // Ready for next movement calculation
+    }
+
+    /** Checks if a passage between two cells (p1 -> p2) is open based on current global wall knowledge. */
+    _isPassageOpen(p1, p2, from) {
+        const dr = Math.abs(from.r - p2.r);
+        const dc = Math.abs(from.c - p2.c);
+
+        // Calculate direction of movement relative to 'from'
+        if (dr === 1 && dc === 0) { // Vertical move
+            return this._checkDirectionWall(from, p2.r > from.r ? 'south' : 'north');
+        } else if (dr === 0 && dc === 1) { // Horizontal move
+            return this._checkDirectionWall(from, p2.c > from.c ? 'east' : 'west');
+        }
+        // This check is simplified: we assume the global API check covers path validity
+        return false; 
+    }
+
+     /** Checks if a specific wall direction between start and end cells is open. */
+    _checkDirectionWall(start, direction) {
+        const r = start.r;
+        const c = start.c;
+        if (direction === 'north') return !window.game.walls(r, c).n;
+        if (direction === 'south') return !window.game.walls(r, c).s;
+        if (direction === 'east') return !window.game.walls(r, c).e;
+        if (direction === 'west') return !window.game.walls(r, c).w;
+    }
+
+
+    /** Gets delta changes for N, E, S, W */
+    _getDelta(direction) {
+        switch (direction) {
+            case 'north': return [-1, 0];
+            case 'east':  return [0, 1];
+            case 'south': return [1, 0];
+            case 'west':  return [0, -1];
+        }
+    }
+
+     /** 
+      * Handles arrival at exit. This MUST be called after a successful move(). 
+      */
+    checkExitArrival() {
+        if (this.currentCell.r === window.game.exit.r && this.currentCell.c === window.game.exit.c) {
+            if (this.finishTick === null) {
+                this.finishTick = window.game.elapsed;
+                console.log(`Bot ${this.id} arrived at exit at tick ${window.game.elapsed}.`);
+            }
+        }
+    }
+}
+
+/** Maze Generation using Recursive Backtracker */
+function generateMaze(seed) {
+    const R = 20; // Grid height (at least 15)
+    const C = 20; // Grid width (at least 15)
+
+    // Initialize maze structure: map of Cell objects
+    let mazeGrid = [];
+    for (let r = 0; r < R; r++) {
+        mazeGrid[r] = [];
+        for (let c = 0; c < C; c++) {
+            mazeGrid[r][c] = new Cell(r, c);
+        }
+    }
+
+    const prng = new PRNG(seed * 13 + 1); // Mix seed for generation phase
+
+    // Start at (0, 0)
+    let stack = [{ r: 0, c: 0 }];
+    mazeGrid[0][0].visited = true;
+
+    while (stack.length > 0) {
+        const current = stack[stack.length - 1];
+        const neighbors = [];
+        const directions = ['north', 'east', 'south', 'west'];
+
+        // Find unvisited neighbors
+        for (const dir of directions) {
+            const [dr, dc] = [['north', [-1, 0]], ['east', [0, 1]], ['south', [1, 0]], ['west', [0, -1]]][directions.indexOf(dir)];
+            const nr = current.r + dr;
+            const nc = current.c + dc;
+
+            if (nr >= 0 && nr < R && nc >= 0 && nc < C && !mazeGrid[nr][nc].visited) {
+                neighbors.push({ cell: mazeGrid[nr][nc], direction: dir });
+            }
+        }
+
+        // Shuffle neighbors deterministically using PRNG
+        for (let i = 1; i < neighbors.length; i++) {
+            const swapIndex = Math.floor(prng.next() * i);
+            [neighbors[i], neighbors[swapIndex]] = [neighbors[swapIndex], neighbors[i]];
+        }
+
+        if (neighbors.length > 0) {
+            const nextNeighborInfo = neighbors.pop(); // Pop the chosen neighbor
+            const nextCell = nextNeighborInfo.cell;
+            const direction = nextNeighborInfo.direction;
+
+            // 1. Mark walls: Remove wall between current and next cell
+            let oppositeDir, currentWallKey;
+            if (direction === 'north') {
+                mazeGrid[current.r][current.c].setWall('north', false);
+                nextCell.setWall('south', false);
+            } else if (direction === 'east') {
+                mazeGrid[current.r][current.c].setWall('east', false);
+                nextCell.setWall('west', false);
+            } else if (direction === 'south') {
+                mazeGrid[current.r][current.c].setWall('south', false);
+                nextCell.setWall('north', false);
+            } else if (direction === 'west') {
+                mazeGrid[current.r][current.c].setWall('west', false);
+                nextCell.setWall('east', false);
+            }
+
+            // 2. Update state
+            nextCell.visited = true;
+            stack.push(nextCell);
+
+        } else {
+            stack.pop(); // Backtrack
+        }
+    }
+
+    return { grid: mazeGrid, R: R, C: C };
+}
+
+
+/** Rendering and Initialization Wrapper */
+function setupGame() {
+    const canvas = document.getElementById('maze');
+    const ctx = canvas.getContext('2d');
+    
+    // Set initial game API state (needed before calling init)
+    window.game.ctx = ctx;
+    window.game.mazeCanvas = canvas;
+
+    const seedInput = prompt("Enter a numeric seed for deterministic play:", Math.floor(Math.random() * 10000));
+    const initialSeed = (seedInput === null || isNaN(parseInt(seedInput))) ? Math.floor(Math.random() * 10000) : parseInt(seedInput);
+
+    // --- Core Initialization ---
+    const { grid, R, C } = generateMaze(initialSeed);
+
+    window.game.size = { rows: R, cols: C };
+    window.game.maze = grid; // Attach the maze structure to the global game object for API access
+    window.game.elapsed = 0;
+    window.game.isFrozen = true;
+
+    // Set mandatory starting points (e.g., top-left, bottom-right)
+    window.game.spawn = { r: 0, c: 0 };
+    window.game.exit = { r: R - 1, c: C - 1 };
+
+    // --- Bot Setup ---
+    const numBots = 24;
+    window.game.bots = [];
+    for (let i = 0; i < numBots; i++) {
+        // Assign unique seed for bot preference spreading
+        const botSeed = initialSeed * (i + 1) + 7; 
+        const newBot = new Bot(i, botSeed);
+        newBot.initialize(window.game.spawn.r, window.game.spawn.c);
+        window.game.bots.push(newBot);
+    }
+
+    // --- UI Updates and Rendering ---
+    document.getElementById('size_display').textContent = `${R}x${C}`;
+    document.getElementById('spawn_display').textContent = `(${window.game.spawn.r}, ${window.game.spawn.c})`;
+    document.getElementById('exit_display').textContent = `(${window.game.exit.r}, ${window.game.exit.c})`;
+
+    // Call the game object's init method which uses the generated data
+    window.game.init(initialSeed); 
+
+    // Set up event listeners
+    document.getElementById('reset').addEventListener('click', () => {
+        if (confirm("Are you sure you want to reset?")) {
+             // Pass current seed or re-prompt
+            const newSeedInput = prompt("Enter a numeric seed for deterministic play:", initialSeed);
+            const finalSeed = (newSeedInput === null || isNaN(parseInt(newSeedInput))) ? Math.floor(Math.random() * 10000) : parseInt(newSeedInput);
+            window.game.reset(finalSeed);
+        }
+    });
+
+    // Initial full render
+    window.game.reset(initialSeed);
+}
+
+
+/** Renderer Handles drawing the maze, bots (with interpolation), and status UI. */
+function _renderAll() {
+    const ctx = window.game.ctx;
+    const scale = 40 / 20; // Cell size: ~40px (adjusting for 20x20 grid)
+    const R = window.game.size.rows;
+    const C = window.game.size.cols;
+
+    // Clear canvas
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+    // Draw Maze and Walls
+    drawMaze(ctx, scale, R, C);
+
+    // Draw Bots (with interpolation)
+    const bots = window.game.bots;
+    for (let i = 0; i < bots.length; i++) {
+        const bot = bots[i];
+        if (bot.currentCell && bot.nextMove) {
+            drawBot(ctx, scale, bot);
+        } else if (bot.finishTick !== null) {
+             // Draw finished bots as static marker
+             drawFinishedBot(ctx, scale, bot);
+        }
+    }
+
+    // Update UI Status
+    const completedCount = bots.filter(b => b.finishTick !== null).length;
+    document.getElementById('completed').textContent = `${completedCount}`;
+}
+
+/** Draws the static maze structure (walls and passages) */
+function drawMaze(ctx, scale, R, C) {
+    // Walls are drawn first: background grid lines
+    for (let r = 0; r < R; r++) {
+        for (let c = 0; c < C; c++) {
+            const cell = window.game.maze[r][c];
+            
+            ctx.strokeStyle = '#444'; // Wall color
+
+            // Draw North wall segment (top edge)
+            ctx.beginPath();
+            ctx.moveTo(c * scale, r * scale);
+            ctx.lineTo((c + 1) * scale, r * scale);
+            if (!cell.walls.north && r > 0) { // If passage exists North from here
+                // The wall is already removed by setting cell.setWall(false), so we just draw the line if it's not a barrier
+                 ctx.strokeStyle = '#444'; // Draw invisible passage edge
+            } else if (r < R - 1 && window.game.maze[r+1][c].walls.north) {
+                // This is tricky due to rendering edges vs cell walls. Let's simplify: draw full grid lines and then erase passages.
+                 ctx.lineWidth = 2; // For drawing visible structure
+            } else if (window.game.maze[r+1][c].walls.north === false) {
+                // If the wall is removed, it means passage exists. We skip drawing a physical divider here to look like an open corridor.
+            }
+             ctx.stroke();
+        }
+    }
+
+    // Draw floor/passages (A solid background color helps visualization)
+    ctx.fillStyle = '#f9f9f9';
+    ctx.fillRect(0, 0, C * scale, R * scale);
+
+
+    // Redraw walls explicitly for visual clarity:
+    ctx.strokeStyle = '#333'; // Darker wall lines
+    ctx.lineWidth = 2;
+
+    for (let r = 0; r < R; r++) {
+        for (let c = 0; c < C; c++) {
+            const cell = window.game.maze[r][c];
+            const x = c * scale;
+            const y = r * scale;
+
+            // Check walls and draw lines if they are supposed to exist
+            if (cell.walls.north) {
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                ctx.lineTo(x + scale, y); // Horizontal line at top
+                ctx.stroke();
+            }
+
+            if (cell.walls.east) {
+                 // East wall is drawn by the current cell's right boundary
+            }
+             if (cell.walls.south) {
+                ctx.beginPath();
+                ctx.moveTo(x, y + scale);
+                ctx.lineTo(x + scale, y + scale); // Vertical line at bottom
+                ctx.stroke();
+            }
+
+            // Handle internal dividers manually for clean rendering
+            if (c < C - 1) {
+                 const nextCell = window.game.maze[r][c+1];
+                 if (cell.walls.east) { // If current cell has an east wall, it means passage is blocked from the left side.
+                     ctx.beginPath();
+                     ctx.moveTo((c + 1) * scale, y);
+                     ctx.lineTo((c + 1) * scale, y + scale);
+                     ctx.stroke(); // Vertical divider
+                 }
+            }
+             if (r < R - 1) {
+                const nextCell = window.game.maze[r+1][c];
+                if (cell.walls.south) {
+                    // Horizontal divider drawn by the current cell's bottom wall check
+                }
+            }
+
+        }
+    }
+    
+     // Simple approach: Draw a solid grid and then use semi-transparency/overlap to indicate passages
+    ctx.globalAlpha = 0.9;
+    for (let r = 0; r < R; r++) {
+        for (let c = 0; c < C; c++) {
+            const x = c * scale;
+            const y = r * scale;
+
+            // Draw vertical line segment at the right boundary of the cell, if wall exists
+            if (c < C - 1) {
+                ctx.strokeStyle = '#333';
+                ctx.lineWidth = 2;
+                if (window.game.maze[r][c].walls.east || window.game.maze[r][c+1].walls.west) {
+                     ctx.beginPath();
+                     ctx.moveTo((c + 1) * scale, y);
+                     ctx.lineTo((c + 1) * scale, y + scale);
+                     ctx.stroke();
+                } else {
+                    // Passage open: Draw a fainter line or nothing to indicate openness
+                     ctx.beginPath();
+                     ctx.moveTo((c + 1) * scale - 2, y);
+                     ctx.lineTo((c + 1) * scale - 2, y + scale);
+                     ctx.strokeStyle = '#777'; // Faint line for passage edge
+                     ctx.stroke();
+                }
+            }
+
+             // Draw horizontal line segment at the bottom boundary of the cell, if wall exists
+            if (r < R - 1) {
+                 ctx.beginPath();
+                 ctx.moveTo(x, (r + 1) * scale);
+                 ctx.lineTo(x + scale, (r + 1) * scale);
+                 ctx.strokeStyle = '#333';
+                 ctx.lineWidth = 2;
+
+                 if (window.game.maze[r][c].walls.south || window.game.maze[r+1][c].walls.north) {
+                    // Passage open: Draw fainter line
+                      ctx.strokeStyle = '#777';
+                     ctx.stroke(); 
+                 } else {
+                      // Wall blocked: Draw solid line
+                      ctx.strokeStyle = '#333';
+                      ctx.lineWidth = 2;
+                      ctx.stroke();
+                 }
+            }
+        }
+    }
+
+    // Re-apply global alpha for the drawing bots layer
+    ctx.globalAlpha = 1.0;
+}
+
+
+/** Draws a bot smoothly interpolated between current and next position (moving). */
+function drawBot(ctx, scale, bot) {
+    const r = bot.currentCell.r;
+    const c = bot.currentCell.c;
+
+    // Interpolation: Calculate the fraction of distance traveled towards nextMove
+    let progressX = 0;
+    let progressY = 0;
+    let totalSteps = Math.max(1, Math.abs(window.game.elapsed % (20/30)) / 2); // Simple rate control based on tick
+
+    // Since we are rendering synchronously after a tick update, the bot's position should be 
+    // exactly at 'nextMove' if movement was successful in that tick cycle.
+    // We assume for simplicity that `move()` places the agent *exactly* into the next cell coordinates upon success.
+    const x = (c + (window.game.elapsed % 1) * 0.5) * scale; // Simplified interpolation placeholder
+    const y = (r + (window.game.elapsed % 1) * 0.5) * scale;
+
+    // For this simulation, we will simplify the "smooth" movement by ensuring that upon move(), 
+    // both currentCell and nextMove are set to integer grid coordinates representing the new location, 
+    // meaning rendering happens at the cell center immediately.
+
+    const centerX = (c + 0.5) * scale;
+    const centerY = (r + 0.5) * scale;
+
+    ctx.fillStyle = `hsl(${bot.id * (360 / window.game.bots.length)}, 80%, ${70 - bot.id*2}%)`;
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, 8 + Math.random() * 2, 0, Math.PI * 2);
+    ctx.fill();
+
+     // Draw a small 'head' marker to indicate direction/path taken
+    if (bot.nextMove) {
+        const targetX = (bot.nextMove.c + 0.5) * scale;
+        const targetY = (bot.nextMove.r + 0.5) * scale;
+
+         ctx.strokeStyle = `hsl(${bot.id * (360 / window.game.bots.length)}, 80%, ${70 - bot.id*2}%)`;
+         ctx.lineWidth = 4;
+         ctx.beginPath();
+         // Draw a line from current to next position target center
+         ctx.moveTo(centerX, centerY);
+         ctx.lineTo(targetX, targetY);
+         ctx.stroke();
+    }
+}
+
+/** Draws finished bots as stationary markers. */
+function drawFinishedBot(ctx, scale, bot) {
+     const centerX = (bot.path[bot.path.length - 1].c + 0.5) * scale;
+     const centerY = (bot.path[bot.path.length - 1].r + 0.5) * scale;
+
+    ctx.fillStyle = 'rgba(255, 69, 0, 0.8)'; // Orange for finished bots
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, 8 + Math.random() * 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Draw a marker indicating arrival (Exit location)
+     const exitCenterX = (window.game.exit.c + 0.5) * scale;
+     const exitCenterY = (window.game.exit.r + 0.5) * scale;
+     ctx.fillStyle = 'yellow';
+     ctx.beginPath();
+     ctx.arc(exitCenterX, exitCenterY, 12, 0, Math.PI * 2);
+     ctx.fill();
+}
+
+
+// --- Execution Start ---
+// Initialize the game structure and draw the initial state.
+
+document.addEventListener('DOMContentLoaded', () => {
+    setupGame();
+});
+
+
+</script>
+</body>
+</html>

@@ -1,22 +1,3 @@
-"""Generate the ctx-013 ledger haystack + compute the reference answers.
-
-A long audit log (~60k chars) of transactions across 30 accounts, buried in
-distractor prose. Transactions are SETTLED or PENDING; a VOID cancels an earlier
-transaction; an AMEND changes an earlier transaction's amount. The settled,
-non-voided, amended balance per account drives five derived answers.
-
-Deterministic: a fixed seed, so the prompt and answers are reproducible. Run:
-    python tasks-refs/ctx-013-ledger-supersede-64k/generate.py
-writes BOTH prompt.md and checker.py next to the task.
-
-The checker is generated rather than hand-maintained because its EXPECT dict is
-the answer key: at a different seed a hand-written key silently belongs to the
-old prompt, and every submission scores 0 against a ledger it never saw. That is
-exactly what the private held-out mirror does (it re-seeds this generator), and
-an unregenerated key there would read as contamination instead of as a bug. At
-the shipped SEED the emitted checker is byte-identical to the one in tasks/, so
-regenerating never changes the public task's content hash.
-"""
 import random
 from pathlib import Path
 
@@ -137,13 +118,7 @@ If two accounts tie, choose the one whose id sorts first (ACCT-01 before ACCT-02
 """
 
 
-CHECKER_TMPL = '''"""ctx-013 grader: five independent checkpoints over the settled-balance
-aggregation, so retrieving most of the ledger correctly but slipping one derived
-value earns partial credit. Reference values are computed by the generator in
-tasks-refs/ctx-013-ledger-supersede-64k/generate.py (fixed seed). Only the last
-occurrence of each label is read, so mid-reasoning mentions don't fool it.
-"""
-import pathlib
+CHECKER_TMPL = '''import pathlib
 import re
 
 _TXT = pathlib.Path("response.txt")
@@ -196,7 +171,6 @@ def test_num_negative():
 
 
 def render_checker(answers: dict) -> str:
-    """checker.py source with this seed's answer key baked in."""
     rows = "".join(
         f'    "{k}": ' + (f'"{v}"' if isinstance(v, str) else str(v)) + ",\n"
         for k, v in answers.items())

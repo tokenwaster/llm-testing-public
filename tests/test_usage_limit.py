@@ -1,11 +1,3 @@
-"""Claude subscription usage-limit handling.
-
-When the 5-hour / daily / weekly cap is hit, the CLI adapter must flag it as a
-distinct non-retryable `usage_limit` error, and the runner must abandon the
-current task UNSCORED and raise UsageLimitReached (so run_model can pause the
-run cleanly and a re-run after the reset fills the gap) — never retry the wall
-or write a fake zero.
-"""
 import json
 from types import SimpleNamespace
 
@@ -133,7 +125,6 @@ def test_chat_with_retries_still_retries_transient(tmp_path):
 
 
 class _SucceedThenLimit:
-    """Succeeds on the first `succeed` calls, then hits the subscription cap."""
     def __init__(self, reset_at, succeed=1):
         self.reset_at = reset_at
         self.succeed = succeed
@@ -151,9 +142,6 @@ class _SucceedThenLimit:
 
 
 def test_run_model_drops_task_preserves_completed_and_annotates(tmp_path, monkeypatch):
-    """A claude run whose 2nd task hits the cap: task 1 completes and is saved,
-    task 2 leaves NO score.json, task 3 never starts, and the run manifest
-    records the pause + reset time."""
     from harness import runner as R
     from harness.util import write_json, read_json
 
@@ -210,7 +198,6 @@ def test_single_entry_and_empty():
 
 
 def test_spiral_aborts_when_no_text_is_ever_emitted(monkeypatch):
-    """Only thinking events, never an assistant message -> stop at the cutoff."""
     import harness.adapters as A
 
     class _FakeProc:
@@ -244,8 +231,6 @@ def test_spiral_aborts_when_no_text_is_ever_emitted(monkeypatch):
 
 
 def test_stream_cmd_switches_to_stream_json():
-    """The runner passes --output-format json; streaming needs stream-json +
-    --verbose, or the CLI stays silent until it exits and we're blind again."""
     import subprocess as _sp
     captured = {}
 
@@ -276,10 +261,6 @@ def test_stream_cmd_switches_to_stream_json():
 
 
 def test_terminate_tree_kills_spinning_grandchild():
-    """The 'fan keeps roaring after the run' bug: `claude` spawns a tree of
-    workers, and a plain proc.kill() (TerminateProcess on Windows) reaps ONLY
-    the top process — a busy-looping grandchild survives and pegs a core.
-    _terminate_tree must take out the whole subtree."""
     import ctypes
     import subprocess
     import sys

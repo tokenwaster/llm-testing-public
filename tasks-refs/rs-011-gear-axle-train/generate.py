@@ -1,11 +1,3 @@
-"""Generator + reference for rs-011-gear-axle-train (v0.6 reasoning trap).
-
-The trap: a chain of gears, but only some pairs MESH (ratio applies, direction
-flips). Others share an AXLE with the previous gear (same rpm, same direction —
-NO ratio). The obvious move is to apply a ratio at every step; that is wrong.
-Final rpm is computed exactly by construction, so the key can't be wrong. A
-model that treats an axle as a mesh (or vice versa) lands far from the answer.
-"""
 
 import random
 from fractions import Fraction

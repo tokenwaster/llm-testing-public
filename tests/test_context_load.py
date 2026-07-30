@@ -1,13 +1,3 @@
-"""Local models must load with full GPU offload and a batch-sized context.
-
-Two bugs made gemma-4-31b crawl at 8 tok/s on a 32GB card with VRAM to spare:
-  1. `lms load` defaulted to "auto" GPU offload, which left layers on the CPU
-     even with GBs free — 17% GPU util. Forcing "--gpu max" -> 82% util, 57 tok/s.
-  2. One 128k-context task made the whole run load a 205k window (37GB), so even
-     "--gpu max" couldn't fit it and it spilled. Grouping tasks by the context
-     they need keeps the short ones in a window that fits, so only the genuine
-     long-context tasks pay the cost.
-"""
 
 from harness import lmstudio
 from harness.runner import (_bucket_offload, context_buckets, _ctx_bucket,

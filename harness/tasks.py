@@ -1,14 +1,3 @@
-"""Task loading. A task is a folder: tasks/<category>/<task-id>/
-
-    prompt.md    — the prompt sent to the model
-    meta.yaml    — id, tier, scoring config, timeouts
-    checker.py   — (pytest scoring) test file run against the workspace
-    setup/       — (tier 2) files copied into the workspace before the run
-
-Every task is content-hashed; the hash is stored in each result so that
-edited tasks visibly break longitudinal trend lines instead of silently
-corrupting them.
-"""
 
 from dataclasses import dataclass, field
 from pathlib import Path

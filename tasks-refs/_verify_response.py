@@ -1,11 +1,3 @@
-"""Reference-verify response-lane tasks: the known-good reply must score 1.0 and
-an empty reply must score 0.0 (rule #5). Also reports the trap (bad.txt) score —
-a plausible-but-wrong reply — as a discrimination sanity check; it is not gated,
-since a partly-right answer legitimately earns partial credit.
-
-Usage:  python tasks-refs/_verify_response.py [task-id ...]
-        (no args = every tasks-refs/<id> that has a good.txt)
-"""
 import sys
 import tempfile
 from pathlib import Path

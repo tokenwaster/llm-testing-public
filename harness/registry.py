@@ -1,8 +1,3 @@
-"""Model registry: one YAML file per model under models/.
-
-Files starting with '_' are templates and are skipped. A model can also be
-disabled with `enabled: false`.
-"""
 
 import os
 from dataclasses import dataclass, field
@@ -32,6 +27,9 @@ class Model:
     sampling_source: str = ""
     sampling_settable_yaml: bool | None = None
     sampling_unsettable_reason: str = ""
+    effort: str | None = None
+    thinking_off: bool = False
+    thinking_off_in_yaml: bool = False
     extra: dict = field(default_factory=dict)
     enabled: bool = True
     color: str = ""
@@ -41,8 +39,6 @@ class Model:
 
     @property
     def family_name(self) -> str:
-        """Grouping/colour family. Explicit yaml `family:` wins; `none` pins to
-        No-family; empty infers from name/id."""
         fam = (self.family or "").strip()
         if fam.lower() == NO_FAMILY:
             return ""
@@ -60,29 +56,38 @@ class Model:
 
     @property
     def sampling_settable(self) -> bool:
-        """Can sampling actually reach this model?
-
-        Two ways it cannot, and both must read the same to the UI:
-
-        * the TRANSPORT has no flags — `claude -p` exposes none, so a value set on
-          a claude-cli model is displayed and never sent;
-        * the MODEL accepts none — the OpenAI reasoning models take no temperature
-          or top_p, and top_k/min_p are not OpenAI parameters at all. A strict
-          endpoint 4xxs (loud, and RequestRejected handles it); a forgiving gateway
-          DROPS them silently, which is worse: the run looks fine and the model
-          page reports a setting that never applied.
-
-        The yaml override wins where set, because only the model's own docs know
-        the second case — nothing in the transport reveals it, and for a gateway
-        model there is no request log to verify against.
-        """
         if self.sampling_settable_yaml is not None:
             return bool(self.sampling_settable_yaml)
         return self.provider != "claude-cli"
 
+    EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+    @property
+    def effort_settable(self) -> bool:
+        return self.provider == "claude-cli"
+
+    @property
+    def effort_as_tested(self) -> str:
+        if not self.effort_settable:
+            return ""
+        return self.effort or "inherited"
+
+    @property
+    def thinking_toggle_settable(self) -> bool:
+        return self.provider == "openai" and not self.local
+
+    @property
+    def thinking_unsettable_reason(self) -> str:
+        if self.thinking_toggle_settable:
+            return ""
+        if self.local:
+            return ("LM Studio accepts the parameter and ignores it — measured: "
+                    "enable_thinking=false left reasoning tokens unchanged, and "
+                    "the endpoint returns 200 for a parameter that does not exist")
+        return f"the {self.provider} transport has no reasoning toggle"
+
     @property
     def unsettable_reason(self) -> str:
-        """One line explaining why sampling cannot be sent, for the model page."""
         if self.sampling_settable:
             return ""
         if self.sampling_unsettable_reason.strip():
@@ -93,40 +98,12 @@ class Model:
         return "this model does not accept sampling parameters"
 
     def resolved_sampling(self, category: str = "") -> tuple[dict, str]:
-        """(params, profile_name) for a task in `category`.
-
-        Base `sampling` is overlaid with the profile that category maps to, so a
-        model can follow its creator's per-use-case recommendation (code cooler
-        than prose) without us inventing a value for a use case the creator did
-        not cover. Returns the profile name for the record, '' when none applied.
-        """
         prof = config.sampling_profile_for(category)
         over = (self.sampling_profiles or {}).get(prof) or {}
         merged = {**(self.sampling or {}), **over}
         return merged, (prof if over else "")
 
     def sampling_payload(self, category: str = "") -> dict:
-        """The sampling params to put in a request — explicitly set ones only.
-
-        temperature is included when set; None means "do not send", which is how
-        a provider that fixes it server-side (Moonshot's kimi-k3) or exposes no
-        knob at all (the claude CLI) is represented honestly. Omitting beats
-        sending a default, because an unsupported parameter can be rejected and a
-        rejection skips the model.
-
-        Anything NOT set here is left to the provider's own default — which is
-        not a single well-defined state: llama.cpp behind LM Studio ships
-        opinionated defaults (a top_k and a repeat penalty) while a gateway
-        typically disables those. So "unset" means "whatever this provider does",
-        and the model page says so rather than implying we chose it.
-
-        A model that cannot RECEIVE sampling gets an empty payload whatever its
-        yaml holds. validate_models refuses such a config before a run, so this is
-        defence in depth — but it belongs here: this function decides what goes on
-        the wire AND what `sampling_used` records, so if it can emit an
-        undeliverable value then the recorded evidence of what was sent is wrong
-        too, and that record is what the confirmed-received check compares against.
-        """
         if not self.sampling_settable:
             return {}
         merged, _ = self.resolved_sampling(category)
@@ -181,7 +158,6 @@ NO_FAMILY = "none"
 
 
 def load_families() -> dict:
-    """{family_name: {"color": "#hex" | None}} from families.yaml. Missing = {}."""
     try:
         data = yaml.safe_load(FAMILIES_FILE.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
@@ -194,7 +170,6 @@ def load_families() -> dict:
 
 
 def save_families(families: dict) -> None:
-    """Persist {family: {color}}. Machine-managed, so a plain dump is fine."""
     clean = {str(k): {"color": (v or {}).get("color") or None}
              for k, v in families.items() if str(k).strip()}
     FAMILIES_FILE.write_text(yaml.safe_dump(clean, sort_keys=True, allow_unicode=True),
@@ -213,8 +188,6 @@ def _model_yaml(name: str, models_dir: Path) -> Path | None:
 
 def set_model_family(name: str, family: str,
                      models_dir: Path = config.MODELS_DIR) -> None:
-    """Write a model's `family:` into its yaml. '' reverts to name-inference;
-    the sentinel `none` pins it to No-family. Raises KeyError if not found."""
     f = _model_yaml(name, models_dir)
     if not f:
         raise KeyError(f"model '{name}' not found in {models_dir}")
@@ -223,8 +196,6 @@ def set_model_family(name: str, family: str,
 
 def set_model_color(name: str, color: str,
                     models_dir: Path = config.MODELS_DIR) -> None:
-    """Write a model's `color:` (chart colour) into its yaml. '' clears it so the
-    family colour (or auto palette) governs."""
     f = _model_yaml(name, models_dir)
     if not f:
         raise KeyError(f"model '{name}' not found in {models_dir}")
@@ -232,8 +203,6 @@ def set_model_color(name: str, color: str,
 
 
 def infer_family(name: str, model_id: str = "") -> str:
-    """Best-effort family from the name/id. Unrecognised => its own family (the
-    name), so it still shows; it just won't cluster until a `family:` is set."""
     import re
     s = f"{name} {model_id}".lower()
     for fam, pat in _FAMILY_PATTERNS:
@@ -251,6 +220,8 @@ def load_models(models_dir: Path = config.MODELS_DIR,
         raw = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
         if "sampling_settable" in raw:
             raw["sampling_settable_yaml"] = raw.pop("sampling_settable")
+        if raw.pop("thinking_off", None) is not None:
+            raw["thinking_off_in_yaml"] = True
         known = {k: v for k, v in raw.items() if k in Model.__dataclass_fields__}
         m = Model(**known)
         m.source_file = f.name
@@ -264,8 +235,6 @@ def load_models(models_dir: Path = config.MODELS_DIR,
 
 
 def set_yaml_key(path: Path, key: str, value: str) -> None:
-    """Set a top-level scalar in a model yaml by line edit — preserves the
-    file's comments (unlike a parse/re-dump round trip)."""
     import re
     text = path.read_text(encoding="utf-8")
     if value == "":
@@ -292,9 +261,6 @@ def get_model(name: str, models_dir: Path = config.MODELS_DIR) -> Model:
 
 
 def set_enabled(name: str, value: bool) -> bool:
-    """Flip a model's `enabled:` flag in its yaml; True if found. Scans
-    config.MODELS_DIR live (not load_models, whose dir default is baked at
-    import) and line-edits so comments survive."""
     import re
     for p in sorted(config.MODELS_DIR.glob("*.yaml")):
         if p.name.startswith("_"):

@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conway's Game of Life</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #141a24;
+    --edge: #232c3b;
+    --ink: #e6edf7;
+    --muted: #8b97ad;
+    --accent: #4ade80;
+    --accent2: #38bdf8;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: radial-gradient(1200px 700px at 50% -10%, #16202e 0%, var(--bg) 60%);
+    color: var(--ink);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+    min-height: 100%;
+  }
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 28px 16px 48px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 20px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  h1 span { color: var(--accent); }
+  .sub {
+    margin: -10px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+  }
+  .stage {
+    padding: 10px;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 14px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.03);
+  }
+  #life {
+    display: block;
+    width: 600px;
+    height: 600px;
+    max-width: 82vw;
+    max-height: 82vw;
+    min-width: 400px;
+    min-height: 400px;
+    border-radius: 8px;
+    background: #0d1117;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+  }
+  button {
+    font: inherit;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink);
+    background: #1b2331;
+    border: 1px solid var(--edge);
+    border-radius: 10px;
+    padding: 10px 18px;
+    cursor: pointer;
+    transition: transform .08s ease, background .15s ease, border-color .15s ease, color .15s ease;
+  }
+  button:hover { background: #222c3d; border-color: #33415a; }
+  button:active { transform: translateY(1px) scale(.99); }
+  #play.on {
+    background: rgba(74,222,128,.14);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .meta {
+    display: flex;
+    gap: 22px;
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+  }
+  .meta b { color: var(--accent2); font-weight: 600; }
+  .speed {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+  }
+  input[type=range] { accent-color: var(--accent); width: 160px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Game of <span>Life</span></h1>
+  <p class="sub">B3/S23 &middot; dead edges &middot; click or drag to paint</p>
+
+  <div class="stage">
+    <canvas id="life" width="600" height="600"></canvas>
+  </div>
+
+  <div class="controls">
+    <button id="step">Step</button>
+    <button id="play">Play</button>
+    <button id="random">Random</button>
+    <button id="clear">Clear</button>
+  </div>
+
+  <div class="speed">
+    <label for="speed">Speed</label>
+    <input id="speed" type="range" min="1" max="30" value="10">
+    <span id="fps">10 gen/s</span>
+  </div>
+
+  <div class="meta">
+    <div>Gen <b id="gen">0</b></div>
+    <div>Alive <b id="alive">0</b></div>
+    <div>Grid <b id="dims">60 &times; 60</b></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var W = 60, H = 60;                 // cells (>= 40 each)
+  var canvas = document.getElementById('life');
+  var ctx = canvas.getContext('2d');
+
+  var cur = new Uint8Array(W * H);
+  var nxt = new Uint8Array(W * H);
+  var age = new Uint8Array(W * H);    // purely cosmetic: newborns glow brighter
+  var generation = 0;
+
+  var genEl = document.getElementById('gen');
+  var aliveEl = document.getElementById('alive');
+  document.getElementById('dims').innerHTML = W + ' &times; ' + H;
+
+  // ---- canvas sizing (CSS pixels >= 400, backing store scaled for DPR) ----
+  var cssSize = 600;
+  function resize() {
+    var rect = canvas.getBoundingClientRect();
+    cssSize = Math.max(400, Math.round(rect.width) || 600);
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(cssSize * dpr);
+    canvas.height = Math.round(cssSize * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function idx(x, y) { return y * W + x; }
+
+  function get(x, y) {
+    x = x | 0; y = y | 0;
+    if (x < 0 || y < 0 || x >= W || y >= H) return 0;   // edges are dead
+    return cur[idx(x, y)];
+  }
+
+  function set(x, y, v) {
+    x = x | 0; y = y | 0;
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    var i = idx(x, y);
+    var val = v ? 1 : 0;
+    if (cur[i] !== val) age[i] = 0;
+    cur[i] = val;
+    draw();
+  }
+
+  function countAlive() {
+    var n = 0;
+    for (var i = 0; i < cur.length; i++) n += cur[i];
+    return n;
+  }
+
+  // ---- simultaneous update: read from `cur`, write to `nxt`, then swap ----
+  function step() {
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        var n = 0;
+        for (var dy = -1; dy <= 1; dy++) {
+          var yy = y + dy;
+          if (yy < 0 || yy >= H) continue;
+          for (var dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            var xx = x + dx;
+            if (xx < 0 || xx >= W) continue;
+            n += cur[yy * W + xx];
+          }
+        }
+        var i = y * W + x;
+        var a = cur[i];
+        nxt[i] = (a ? (n === 2 || n === 3) : (n === 3)) ? 1 : 0;
+      }
+    }
+    for (var k = 0; k < cur.length; k++) {
+      if (nxt[k]) age[k] = cur[k] ? Math.min(255, age[k] + 1) : 0;
+      else age[k] = 0;
+    }
+    var tmp = cur; cur = nxt; nxt = tmp;
+    generation++;
+    draw();
+  }
+
+  function clear() {
+    cur.fill(0);
+    nxt.fill(0);
+    age.fill(0);
+    generation = 0;
+    draw();
+  }
+
+  function randomize(p) {
+    p = (typeof p === 'number') ? p : 0.28;
+    for (var i = 0; i < cur.length; i++) {
+      cur[i] = Math.random() < p ? 1 : 0;
+      age[i] = 0;
+    }
+    generation = 0;
+    draw();
+  }
+
+  // ---- rendering ----
+  function draw() {
+    var size = cssSize / W;          // square-ish cells (W === H here)
+    var sizeY = cssSize / H;
+    ctx.clearRect(0, 0, cssSize, cssSize);
+
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, cssSize, cssSize);
+
+    // faint grid lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.035)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var gx = 0; gx <= W; gx++) {
+      var px = Math.round(gx * size) + 0.5;
+      ctx.moveTo(px, 0); ctx.lineTo(px, cssSize);
+    }
+    for (var gy = 0; gy <= H; gy++) {
+      var py = Math.round(gy * sizeY) + 0.5;
+      ctx.moveTo(0, py); ctx.lineTo(cssSize, py);
+    }
+    ctx.stroke();
+
+    // live cells
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        var i = y * W + x;
+        if (!cur[i]) continue;
+        var a = age[i];
+        // newborn = cyan-white, settled = green
+        var t = Math.min(1, a / 8);
+        var r = Math.round(160 - 86 * t);
+        var g = Math.round(240 - 18 * t);
+        var b = Math.round(255 - 127 * t);
+        ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+        ctx.fillRect(x * size + 0.5, y * sizeY + 0.5, size - 1, sizeY - 1);
+      }
+    }
+
+    genEl.textContent = generation;
+    aliveEl.textContent = countAlive();
+  }
+
+  // ---- painting ----
+  var painting = false;
+  var paintValue = 1;
+  var lastCell = -1;
+
+  function cellFromEvent(e) {
+    var rect = canvas.getBoundingClientRect();
+    var x = Math.floor((e.clientX - rect.left) / (rect.width / W));
+    var y = Math.floor((e.clientY - rect.top) / (rect.height / H));
+    if (x < 0 || y < 0 || x >= W || y >= H) return null;
+    return { x: x, y: y };
+  }
+
+  canvas.addEventListener('pointerdown', function (e) {
+    var c = cellFromEvent(e);
+    if (!c) return;
+    e.preventDefault();
+    if (canvas.setPointerCapture) { try { canvas.setPointerCapture(e.pointerId); } catch (err) {} }
+    painting = true;
+    paintValue = get(c.x, c.y) ? 0 : 1;   // toggle from whatever we grabbed
+    lastCell = idx(c.x, c.y);
+    set(c.x, c.y, paintValue);
+  });
+
+  canvas.addEventListener('pointermove', function (e) {
+    if (!painting) return;
+    var c = cellFromEvent(e);
+    if (!c) return;
+    var i = idx(c.x, c.y);
+    if (i === lastCell) return;
+    lastCell = i;
+    set(c.x, c.y, paintValue);
+  });
+
+  function endPaint() { painting = false; lastCell = -1; }
+  window.addEventListener('pointerup', endPaint);
+  window.addEventListener('pointercancel', endPaint);
+
+  // ---- controls ----
+  var playBtn = document.getElementById('play');
+  var speedEl = document.getElementById('speed');
+  var fpsEl = document.getElementById('fps');
+  var timer = null;
+
+  function running() { return timer !== null; }
+
+  function startLoop() {
+    stopLoop();
+    var hz = parseInt(speedEl.value, 10) || 10;
+    timer = setInterval(step, 1000 / hz);
+    playBtn.textContent = 'Pause';
+    playBtn.classList.add('on');
+  }
+  function stopLoop() {
+    if (timer !== null) clearInterval(timer);
+    timer = null;
+    playBtn.textContent = 'Play';
+    playBtn.classList.remove('on');
+  }
+
+  document.getElementById('step').addEventListener('click', function () {
+    stopLoop();
+    step();
+  });
+  playBtn.addEventListener('click', function () {
+    if (running()) stopLoop(); else startLoop();
+  });
+  document.getElementById('random').addEventListener('click', function () {
+    randomize(0.28);
+  });
+  document.getElementById('clear').addEventListener('click', function () {
+    stopLoop();
+    clear();
+  });
+  speedEl.addEventListener('input', function () {
+    fpsEl.textContent = speedEl.value + ' gen/s';
+    if (running()) startLoop();
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === ' ') { e.preventDefault(); playBtn.click(); }
+    else if (e.key === 's' || e.key === 'ArrowRight') { document.getElementById('step').click(); }
+    else if (e.key === 'r') { document.getElementById('random').click(); }
+    else if (e.key === 'c') { document.getElementById('clear').click(); }
+  });
+
+  window.addEventListener('resize', resize);
+
+  // ---- public API ----
+  window.life = {
+    w: W,
+    h: H,
+    get: get,
+    set: set,
+    step: step,
+    clear: clear,
+    draw: draw,
+    randomize: randomize,
+    get generation() { return generation; }
+  };
+
+  // ---- boot: a glider gently cruising a random field ----
+  resize();
+  randomize(0.22);
+  var g = [[1, 0], [2, 1], [0, 2], [1, 2], [2, 2]];
+  for (var q = 0; q < g.length; q++) set(g[q][0] + 2, g[q][1] + 2, 1);
+  draw();
+})();
+</script>
+</body>
+</html>

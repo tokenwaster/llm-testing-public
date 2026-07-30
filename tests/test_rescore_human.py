@@ -1,9 +1,3 @@
-"""A rescore must never eat a human's grade.
-
-_rescore writes the whole score record, so without a guard it silently replaces
-a verdict formed by watching a render with the checker's number. Clearing the
-review on /review is the only way back to the machine's number.
-"""
 
 import json
 
@@ -24,7 +18,6 @@ def _result(tmp_path, task_id, score_json):
 
 
 def _run(tmp_path, monkeypatch, task_id="web-012-coin"):
-    """Drive _rescore with a checker that always says 0.123."""
     from harness.tasks import Task
     task = Task(id=task_id, category="one-shot-apps", tier=1, title="t",
                 path=tmp_path, prompt="p", scoring={"type": "webapp"},
@@ -61,13 +54,6 @@ def test_a_machine_score_is_still_rescored(tmp_path, monkeypatch):
 
 
 def test_over_budget_overrides_even_a_human_grade(tmp_path, monkeypatch):
-    """An over-budget result is void regardless of who graded it.
-
-    The human reviewed craft on an app the model was never allowed to produce:
-    under the cap its closing </html> is truncated, so there is no working app
-    to review. Craft cannot rescue a submission the budget forbade — so this
-    check runs BEFORE the human guard that otherwise protects a by-eye verdict.
-    """
     from harness import config, rescore
     from harness.util import read_json, write_json
 

@@ -1,14 +1,3 @@
-"""What we SENT is not the same claim as what the provider RECEIVED.
-
-`sampling_used` records the harness's intent. Every configuration bug this suite
-has shipped lived in the gap between intent and delivery — a value written in a
-yaml that never reached the model. LM Studio logs each request's full body, so the
-gap is closable from the server's own account.
-
-A checker that can only say "fine" is worth nothing (the same free-credit failure
-these tests exist to prevent in task checkers), so most of this file is about
-proving the detector FIRES.
-"""
 import textwrap
 
 from harness import config, lmstudio
@@ -64,8 +53,6 @@ def test_days_filter_limits_which_logs_are_read(tmp_path, monkeypatch):
 
 
 def test_an_interrupted_block_is_dropped_not_guessed(tmp_path, monkeypatch):
-    """A body cut off by the next log line is unparseable; inventing one would
-    manufacture a confirmation."""
     cut = LOG.split('  "max_tokens"')[0] + "[2026-07-26 12:00:02][INFO] boom\n"
     _log(tmp_path, monkeypatch, cut)
     assert lmstudio.received_requests() == []
@@ -79,7 +66,6 @@ def test_a_log_over_the_size_cap_is_skipped(tmp_path, monkeypatch):
 
 
 def test_json_ints_and_floats_compare_equal():
-    """JSON renders 1.0 as 1; a type difference is not a delivery failure."""
     assert lmstudio._match({"repetition_penalty": 1.0}, {"repetition_penalty": 1}) == []
     assert lmstudio._match({"min_p": 0.0}, {"min_p": 0}) == []
 
@@ -95,7 +81,6 @@ def test_a_value_that_never_arrived_is_reported():
 
 
 def test_a_value_we_never_sent_is_reported():
-    """An app-side preset injecting a knob would change results invisibly."""
     diffs = lmstudio._match({"temperature": 0.85},
                             {"temperature": 0.85, "top_k": 40})
     assert diffs and "never sent" in diffs[0]
@@ -140,8 +125,6 @@ def test_a_matching_request_confirms_the_cell(tmp_path, monkeypatch):
 
 
 def test_a_value_the_server_did_not_get_is_a_mismatch(tmp_path, monkeypatch):
-    """The finding this exists for: we believe we sent presence_penalty, the
-    server's own log says it never arrived."""
     res = _run(tmp_path, monkeypatch, used={**SENT, "presence_penalty": 1.1})
     assert res["m1"]["mismatched"] == 1 and res["m1"]["confirmed"] == 0
     task, diffs = res["m1"]["details"][0]
@@ -155,14 +138,11 @@ def test_a_differing_value_is_a_mismatch(tmp_path, monkeypatch):
 
 
 def test_a_budget_that_did_not_arrive_is_a_mismatch(tmp_path, monkeypatch):
-    """max_tokens is the runaway backstop; silently unapplied is how the claude
-    models ran uncapped for a whole dataset."""
     res = _run(tmp_path, monkeypatch, max_tokens=65536)
     assert res["m1"]["mismatched"] == 1
 
 
 def test_a_cell_with_no_logged_request_is_unlogged_not_failed(tmp_path, monkeypatch):
-    """Logs rotate and predate this check; absence of a record is not a finding."""
     res = _run(tmp_path, monkeypatch, t_start="2026-07-20T17:00:00+00:00")
     assert res["m1"]["unlogged"] == 1 and res["m1"]["mismatched"] == 0
 
@@ -173,7 +153,5 @@ def test_cells_predating_the_sampling_record_are_skipped(tmp_path, monkeypatch):
 
 
 def test_cloud_models_are_not_checked(tmp_path, monkeypatch):
-    """There is no LM Studio log for a gateway model; claiming otherwise would be
-    a confirmation nobody earned."""
     res = _run(tmp_path, monkeypatch, models=[_M("m1", "m-local", local=False)])
     assert res == {}

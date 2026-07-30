@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conway's Game of Life</title>
+<style>
+  :root {
+    --bg-color: #121212;
+    --panel-bg: #1e1e1e;
+    --text-main: #e0e0e0;
+    --accent: #7c4dff;
+    --accent-hover: #651fff;
+    --cell-dead: #2a2a2a;
+    --cell-alive: #4caf50; /* Classic green, or we could use red */
+    --cell-active: #ff9800;
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    height: 100vh;
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  h1 { margin: 0 0 10px 0; font-weight: 300; font-size: 1.2rem; text-transform: uppercase; letter-spacing: 2px; }
+
+  /* Controls */
+  .controls {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+    background: var(--panel-bg);
+    padding: 10px 20px;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+  }
+
+  button {
+    background-color: #333;
+    color: var(--text-main);
+    border: 1px solid #444;
+    padding: 8px 16px;
+    font-size: 0.9rem;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-transform: uppercase;
+    font-weight: bold;
+    min-width: 80px;
+  }
+
+  button:hover { background-color: #444; border-color: #666; }
+  button.active { background-color: var(--accent); border-color: var(--accent); box-shadow: 0 0 10px rgba(124, 77, 255, 0.4); }
+
+  /* Grid Container */
+  #life {
+    position: relative;
+    background-color: var(--cell-dead);
+    border: 2px solid #333;
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
+    /* Fixed size for rendering simplicity */
+    width: 416px; 
+    height: 416px;
+    user-select: none; /* Prevent text selection while drawing */
+    touch-action: none;
+  }
+
+  /* Individual Cell */
+  .cell {
+    position: absolute;
+    background-color: var(--cell-dead);
+    transition: background-color 0.2s, box-shadow 0.2s;
+    cursor: pointer;
+  }
+  
+  .cell.alive {
+    background-color: var(--cell-alive);
+    transform: scale(1.1); /* Slight pop effect */
+    z-index: 2;
+  }
+
+  /* Grid lines (optional, looks better with subtle lines) */
+  #life::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background-image: 
+      linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    background-size: 8px 8px; /* Will be overridden by JS sizing */
+    pointer-events: none;
+  }
+
+  .instructions {
+    margin-top: 10px;
+    font-size: 0.8rem;
+    color: #777;
+    text-align: center;
+    max-width: 450px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Conway's Game of Life</h1>
+
+<div class="controls">
+  <button id="step" aria-label="Advance One Generation">Step</button>
+  <button id="play" aria-label="Toggle Autoplay">Play</button>
+  <button id="random" aria-label="Seed Random Cells">Random</button>
+  <button id="clear" aria-label="Clear Grid">Clear</button>
+</div>
+
+<div id="life">
+  <!-- Cells will be generated here -->
+</div>
+
+<div class="instructions">
+  Click or drag to paint. Observe the evolution of patterns.
+</div>
+
+<script>
+(function() {
+  // --- Configuration ---
+  const CELL_SIZE = 8; // pixels per cell
+  const TOTAL_SIZE = 400 + (CELL_SIZE * 2); // Padding around 400px
+  
+  // Calculate grid dimensions based on pixel requirements
+  // We want at least 40x40. 
+  // Let's use a standard square-ish ratio for fun.
+  const GRID_SIZE = 50; // 50x50 is a nice size for oscillators/glider loops
+  
+  // Internal State
+  let width = GRID_SIZE;
+  let height = GRID_SIZE;
+  let grid = new Array(height).fill(0).map(() => new Array(width).fill(0));
+  
+  // Rendering State
+  let cellElements = []; // Store DOM elements by coordinate for updates
+  
+  // --- Elements ---
+  const container = document.getElementById('life');
+  const btnStep = document.getElementById('step');
+  const btnPlay = document.getElementById('play');
+  const btnRandom = document.getElementById('random');
+  const btnClear = document.getElementById('clear');
+
+  // --- Initialization ---
+  
+  function init() {
+    setupInteractions();
+    
+    // Set container size explicitly to meet layout requirements (400px+)
+    container.style.width = `${width * CELL_SIZE}px`;
+    container.style.height = `${height * CELL_SIZE}px`;
+    
+    createGridDOM();
+    draw(); // Initial render
+    
+    // Expose API
+    window.life = {
+      w: width,
+      h: height,
+      get(x, y) { 
+        if (x < 0 || x >= width || y < 0 || y >= height) return 0;
+        return grid[y][x]; 
+      },
+      set(x, y, v) { 
+        if (x < 0 || x >= width || y < 0 || y >= height) return false; // Ignore out of bounds
+        grid[y][x] = v ? 1 : 0;
+        updateCellVisuals(x, y, v);
+      },
+      step() { simulateGeneration(); draw(); },
+      clear() { 
+        for(let y=0; y<height; y++) {
+            for(let x=0; x<width; x++) grid[y][x] = 0;
+        }
+        // Bulk update visuals
+        container.querySelectorAll('.cell').forEach((el) => {
+            el.classList.remove('alive');
+        });
+      },
+      random() { 
+          // Seed roughly 20% cells
+          for(let y=0; y<height; y++) {
+              for(let x=0; x<width; x++) {
+                  grid[y][x] = Math.random() > 0.8 ? 1 : 0;
+                  updateCellVisuals(x, y, grid[y][x]);
+              }
+          }
+      }
+    };
+    
+    // Hook up API buttons to functions (if external calls them) but also bind local UI
+    btnRandom.onclick = () => window.life.random();
+    btnClear.onclick = () => window.life.clear();
+    btnStep.onclick = () => { if(!isPlaying) simulateGeneration(); };
+  }
+
+  function createGridDOM() {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const div = document.createElement('div');
+        div.className = 'cell';
+        // Absolute positioning to grid coordinates
+        div.style.left = `${x * CELL_SIZE}px`;
+        div.style.top = `${y * CELL_SIZE}px`;
+        div.style.width = `${CELL_SIZE}px`;
+        div.style.height = `${CELL_SIZE}px`;
+        
+        container.appendChild(div);
+        cellElements.push({x, y, el: div});
+      }
+    }
+  }
+
+  function draw() {
+    // In a simple app like this, updating DOM directly is fine. 
+    // Using the cellElements array to toggle classes efficiently.
+    // Note: Grid state 'grid' is the source of truth.
+    
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const el = cellElements[y * width + x].el; // Or use map lookup, but index calc is fast enough
+        if (grid[y][x] === 1) {
+          el.classList.add('alive');
+        } else {
+          el.classList.remove('alive');
+        }
+      }
+    }
+  }
+
+  function updateCellVisuals(x, y, state) {
+    const el = cellElements[y * width + x].el; // Linear mapping
+    if (state === 1) el.classList.add('alive');
+    else el.classList.remove('alive');
+  }
+
+  function simulateGeneration() {
+    // Create a deep copy or use two buffers. 
+    // Using 'nextGrid' buffer is safer and cleaner than mutating grid in place while reading neighbors.
+    
+    const nextGrid = new Array(height).fill(0).map(() => new Array(width).fill(0));
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let liveNeighbors = countLiveNeighbors(x, y);
+        
+        // B3/S23 Rules
+        if (grid[y][x] === 1) {
+          // Live cell: survives with 2 or 3 neighbors
+          if (liveNeighbors === 2 || liveNeighbors === 3) {
+            nextGrid[y][x] = 1;
+          } else {
+            nextGrid[y][x] = 0; // Dies
+          }
+        } else {
+          // Dead cell: becomes alive with exactly 3 neighbors
+          if (liveNeighbors === 3) {
+            nextGrid[y][x] = 1;
+          }
+        }
+      }
+    }
+    
+    grid = nextGrid; // Simultaneous update logic
+  }
+
+  function countLiveNeighbors(x, y) {
+    let sum = 0;
+    for (let i = -1; i < 2; i++) {
+      for (let j = -1; j < 2; j++) {
+        if (i === 0 && j === 0) continue; // Skip self
+        
+        const col = x + i;
+        const row = y + j;
+
+        // Edges are dead logic: check bounds
+        if (col >= 0 && col < width && row >= 0 && row < height) {
+          sum += grid[row][col];
+        }
+      }
+    }
+    return sum;
+  }
+
+  function setupInteractions() {
+    // Click / Drag Logic
+    let isDragging = false;
+    
+    container.addEventListener('mousedown', (e) => {
+      const rect = container.getBoundingClientRect();
+      // Calculate relative coordinates
+      const xPx = e.clientX - rect.left;
+      const yPx = e.clientY - rect.top;
+      
+      // Snap to grid center for responsiveness
+      const cellCenterX = Math.floor((xPx + CELL_SIZE/2) / CELL_SIZE);
+      const cellCenterY = Math.floor((yPx + CELL_SIZE/2) / CELL_SIZE);
+
+      if (cellCenterX >= 0 && cellCenterX < width && 
+          cellCenterY >= 0 && cellCenterY < height) {
+          
+        isDragging = true;
+        toggleCell(cellCenterX, cellCenterY);
+        
+        // If dragging, we handle events continuously via mousemove
+        if(e.buttons === 1) startDrag(cellCenterX, cellCenterY); 
+      }
+    });
+
+    window.addEventListener('mouseup', () => {
+      isDragging = false;
+      stopDrag();
+    });
+
+    container.addEventListener('mouseleave', () => {
+       // Optional: Clear drag if mouse leaves container
+       // We handle dragging in a loop, leaving the container stops adding to history but we need to stop updating grid continuously
+       // But standard behavior is toggle-on-move. 
+       // However, for GL, usually click once = one gen. Dragging usually implies "fill" mode.
+       // Let's stick to "Click toggles". Dragging fills cells under cursor.
+    });
+
+    container.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      
+      const rect = container.getBoundingClientRect();
+      const xPx = e.clientX - rect.left;
+      const yPx = e.clientY - rect.top;
+      
+      const cellCenterX = Math.floor((xPx + CELL_SIZE/2) / CELL_SIZE);
+      const cellCenterY = Math.floor((yPx + CELL_SIZE/2) / CELL_SIZE);
+
+      if (cellCenterX >= 0 && cellCenterX < width && 
+          cellCenterY >= 0 && cellCenterY < height) {
+          
+        toggleCell(cellCenterX, cellCenterY);
+      }
+    });
+  }
+
+  function toggleCell(x, y) {
+    // Toggle state: if currently alive -> die. If dead -> live.
+    const current = grid[y][x];
+    const newState = current === 1 ? 0 : 1;
+    
+    // Update internal state immediately
+    grid[y][x] = newState;
+    updateCellVisuals(x, y, newState);
+  }
+
+  function startDrag(startX, startY) {
+      // Just toggles immediate mouse move. 
+      // For GL specifically, you often want to draw shapes.
+  }
+
+  function stopDrag() {}
+
+  // Play Loop
+  let isPlaying = false;
+  let playInterval = null;
+
+  btnPlay.addEventListener('click', () => {
+    if (isPlaying) {
+      isPlaying = false;
+      clearInterval(playInterval);
+      btnPlay.classList.remove('active');
+    } else {
+      isPlaying = true;
+      btnPlay.classList.add('active');
+      // Run one immediately to avoid delay on load
+      window.life.step(); 
+      playInterval = setInterval(() => {
+          if(!isPlaying) return;
+          window.life.step();
+      }, 200); // Speed of evolution
+    }
+  });
+
+  // Start Game
+  init();
+
+})();
+</script>
+</body>
+</html>

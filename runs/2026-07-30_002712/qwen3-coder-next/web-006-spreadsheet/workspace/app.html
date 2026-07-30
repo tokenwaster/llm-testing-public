@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Spreadsheet</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: sans-serif;
+            background-color: #f5f5f5;
+        }
+        .app-container {
+            min-width: 600px;
+            min-height: 400px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            padding: 15px 20px;
+            background-color: #e8e8e8;
+            border-bottom: 1px solid #ddd;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            color: #333;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-left: auto;
+        }
+        button#export {
+            padding: 8px 16px;
+            background-color: #4a90d9;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button#export:hover {
+            background-color: #357abd;
+        }
+        .spreadsheet {
+            display: grid;
+            grid-template-columns: 40px repeat(10, 80px);
+            border-collapse: collapse;
+        }
+        .header-cell {
+            background-color: #e8e8e8;
+            border-bottom: 1px solid #ddd;
+            border-right: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+            font-weight: bold;
+            color: #555;
+        }
+        .row-header {
+            background-color: #e8e8e8;
+            border-bottom: 1px solid #ddd;
+            border-right: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+            font-weight: bold;
+            color: #555;
+        }
+        .cell {
+            width: 80px;
+            height: 24px;
+            border-bottom: 1px solid #ddd;
+            border-right: 1px solid #ddd;
+            padding: 3px 6px;
+            font-size: 14px;
+        }
+        .cell:focus {
+            outline: none;
+            border-color: #4a90d9;
+            background-color: #f8fcff;
+            box-shadow: inset 0 0 2px rgba(74, 144, 217, 0.5);
+        }
+        .textarea-container {
+            margin-top: 20px;
+            padding: 20px;
+            background-color: #e8e8e8;
+            border-radius: 8px 8px 0 0;
+        }
+        textarea#csv {
+            width: 100%;
+            height: 150px;
+            padding: 10px;
+            font-family: monospace;
+            resize: vertical;
+            border: none;
+            border-top: 3px solid #ddd;
+            background-color: white;
+            border-radius: 0 0 8px 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <div class="header">
+            <h1>Mini Spreadsheet</h1>
+            <div class="controls">
+                <button id="export">Export CSV</button>
+            </div>
+        </div>
+        
+        <div class="spreadsheet" id="grid">
+            <!-- Headers -->
+            <div></div> <!-- Corner cell -->
+            <!-- Column headers (A-J) -->
+            <div class="header-cell">A</div><div class="header-cell">B</div><div class="header-cell">C</div>
+            <div class="header-cell">D</div><div class="header-cell">E</div><div class="header-cell">F</div>
+            <div class="header-cell">G</div><div class="header-cell">H</div><div class="header-cell">I</div>
+            <div class="header-cell">J</div>
+
+            <!-- Rows 1-10 -->
+        </div>
+
+        <div class="textarea-container">
+            <label for="csv"><strong>CSV Output:</strong></label>
+            <textarea id="csv"></textarea>
+        </div>
+    </div>
+
+    <script>
+        // Spreadsheet implementation
+        const ROWS = 10;
+        const COLS = 10;
+        const COL_NAMES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+        
+        // Cell state storage
+        const rawValues = {};    // Store raw text entered by user (formulas or values)
+        const computedValues = {}; // Store computed display values
+        
+        // Dependencies tracking for recalculation
+        const dependents = {};   // cellId -> set of cells that depend on it
+        
+        // Grid container
+        const grid = document.getElementById('grid');
+        
+        // Initialize the spreadsheet UI and data structures
+        function initSpreadsheet() {
+            // Create all 10x10 cells
+            for (let r = 1; r <= ROWS; r++) {
+                // Row header
+                const rowHeader = document.createElement('div');
+                rowHeader.className = 'row-header';
+                rowHeader.textContent = r;
+                grid.appendChild(rowHeader);
+                
+                // Cells in the row
+                for (let c = 0; c < COLS; c++) {
+                    const cellId = `cell-${COL_NAMES[c]}${r}`;
+                    
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'cell';
+                    input.id = cellId;
+                    input.dataset.cellId = cellId;
+                    
+                    // Initial empty state
+                    rawValues[cellId] = '';
+                    computedValues[cellId] = '';
+                    
+                    // Event listeners for editing
+                    input.addEventListener('focus', function() {
+                        this.value = rawValues[this.dataset.cellId];
+                    });
+                    
+                    input.addEventListener('blur', function() {
+                        commitValue(this);
+                    });
+                    
+                    input.addEventListener('keydown', function(e) {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            commitValue(this);
+                            this.blur();
+                        }
+                    });
+                    
+                    grid.appendChild(input);
+                }
+            }
+            
+            // Create Export CSV functionality
+            document.getElementById('export').addEventListener('click', exportCSV);
+        }
+
+        // Parse cell ID to row/col indices
+        function parseCellId(cellId) {
+            const match = cellId.match(/^cell-([A-J])([1-9]|10)$/);
+            if (!match) return null;
+            
+            const colChar = match[1];
+            const row = parseInt(match[2], 10);
+            const col = COL_NAMES.indexOf(colChar);
+            
+            return { row, col, colName: colChar };
+        }
+
+        // Generate cell ID from row and column indices
+        function getCellId(row, col) {
+            if (row < 1 || row > ROWS || col < 0 || col >= COLS) return null;
+            return `cell-${COL_NAMES[col]}${row}`;
+        }
+
+        // Commit a value to a cell
+        function commitValue(inputElement) {
+            const cellId = inputElement.dataset.cellId;
+            rawValues[cellId] = inputElement.value.trim();
+            
+            // Recalculate this cell and all dependent cells
+            recalculate(cellId);
+            
+            // Update display with computed value
+            updateCellDisplay(cellId);
+        }
+
+        // Update the display of a single cell
+        function updateCellDisplay(cellId) {
+            const element = document.getElementById(cellId);
+            if (element) {
+                element.value = computedValues[cellId] !== undefined ? computedValues[cellId] : '';
+            }
+        }
+
+        // Recursive dependency resolution with cycle detection
+        function recalculate(cellId, visited = new Set()) {
+            // Handle empty cell
+            const raw = rawValues[cellId];
+            
+            if (raw === '' || raw === undefined) {
+                computedValues[cellId] = 0;
+                updateCellDisplay(cellId);
+                
+                // Propagate to dependents if needed
+                if (dependents[cellId]) {
+                    for (const dep of dependents[cellId]) {
+                        recalculate(dep, visited);
+                    }
+                }
+                return;
+            }
+
+            // Check for formula
+            let value;
+            
+            if (raw.startsWith('=')) {
+                // Try to evaluate the formula
+                try {
+                    value = evaluateFormula(cellId, raw.slice(1), new Set([cellId]));
+                    
+                    // If we got here without a cycle, store and propagate
+                    computedValues[cellId] = formatValue(value);
+                    
+                    // Update dependents
+                    if (dependents[cellId]) {
+                        for (const dep of dependents[cellId]) {
+                            recalculate(dep, visited);
+                        }
+                    }
+                } catch (e) {
+                    // Handle circular reference or error
+                    computedValues[cellId] = e.message === 'CYCLE' ? '#CYCLE' : '#ERR';
+                    
+                    if (dependents[cellId]) {
+                        for (const dep of dependents[cellId]) {
+                            recalculate(dep, visited);
+                        }
+                    }
+                }
+            } else {
+                // Plain value - try to parse as number
+                const num = parseFloat(raw);
+                computedValues[cellId] = isNaN(num) ? raw : num;
+            }
+            
+            updateCellDisplay(cellId);
+        }
+
+        // Evaluate a formula with cycle detection
+        function evaluateFormula(currentCell, expr, visiting) {
+            // Remove whitespace for easier parsing but be careful about spaces in cell references
+            expr = expr.replace(/\s+/g, '');
+            if (!expr) return 0;
+            
+            try {
+                return parseExpression(expr, visiting);
+            } catch (e) {
+                throw e;
+            }
+        }
+
+        // Tokenize expression into numbers, cell refs, operators and parentheses
+        function tokenize(expr) {
+            const tokens = [];
+            let i = 0;
+            
+            while (i < expr.length) {
+                const ch = expr[i];
+                
+                if ('()'.includes(ch)) {
+                    tokens.push({ type: 'op', value: ch });
+                    i++;
+                } else if ('+-*/'.includes(ch)) {
+                    // Check for unary minus/plus at start or after operator/opening paren
+                    let isUnary = false;
+                    
+                    if ((tokens.length === 0 || 
+                         (tokens[tokens.length-1].type === 'op' && ['(', '+', '-', '*', '/'].includes(tokens[tokens.length-1].value)) ||
+                         tokens[tokens.length-1].type === 'cell')) {
+                        // Check if this is unary minus/plus
+                        const lookahead = i + 1;
+                        if (lookahead < expr.length) {
+                            const nextCh = expr[lookahead];
+                            
+                            // If it's a digit or dot, not unary but negative number
+                            if ((nextCh >= '0' && nextCh <= '9') || nextCh === '.') {
+                                // Regular negative number
+                                let numStr = ch;
+                                i++;
+                                while (i < expr.length && 
+                                      ((expr[i] >= '0' && expr[i] <= '9') || expr[i] === '.')) {
+                                    numStr += expr[i];
+                                    i++;
+                                }
+                                tokens.push({ type: 'number', value: parseFloat(numStr) });
+                                continue;
+                            } else if (nextCh === '(' || nextCh === '[' || /[A-J]/.test(nextCh)) {
+                                // Unary minus/plus for expression
+                                isUnary = true;
+                                // Continue with the unary handling below
+                            }
+                        }
+                    }
+                    
+                    if (!isUnary) {
+                        tokens.push({ type: 'op', value: ch });
+                        i++;
+                    } else {
+                        // This is actually a negative number or unary operation on cell ref
+                        let j = i + 1;
+                        while (j < expr.length && 
+                              ((expr[j] >= '0' && expr[j] <= '9') || expr[j] === '.')) {
+                            j++;
+                        }
+                        
+                        if (j > i + 1) { // We have digits after the minus
+                            tokens.push({ type: 'number', value: parseFloat(expr.slice(i, j)) });
+                            i = j;
+                        } else {
+                            // Unary minus for expression
+                            tokens.push({ type: 'op', value: ch });
+                            i++;
+                        }
+                    }
+                } else if (ch >= '0' && ch <= '9') {
+                    let numStr = '';
+                    while (i < expr.length && 
+                          ((expr[i] >= '0' && expr[i] <= '9') || expr[i] === '.')) {
+                        numStr += expr[i];
+                        i++;
+                    }
+                    tokens.push({ type: 'number', value: parseFloat(numStr) });
+                } else if (/^[A-J]$/.test(ch)) {
+                    // Cell reference
+                    const col = ch;
+                    let rowStr = '';
+                    while (i < expr.length && 
+                          ((expr[i] >= '0' && expr[i] <= '9'))) {
+                        rowStr += expr[i];
+                        i++;
+                    }
+                    
+                    const fullRef = col + rowStr;
+                    tokens.push({ type: 'cell', value: fullRef });
+                } else if (ch === '(') {
+                    tokens.push({ type: 'op', value: ch });
+                    i++;
+                } else if (ch === ')') {
+                    tokens.push({ type: 'op', value: ch });
+                    i++;
+                } else {
+                    // Invalid character
+                    throw new Error('ERR');
+                }
+            }
+            
+            return tokens;
+        }
+
+        // Parse expression with precedence: + and - have lower precedence than * and /
+        function parseExpression(expr, visiting) {
+            const tokens = tokenize(expr);
+            let pos = 0;
+            
+            function peek() {
+                return pos < tokens.length ? tokens[pos] : null;
+            }
+            
+            function consume() {
+                return tokens[pos++];
+            }
+            
+            // Expression: Term { (+|-) Term }
+            function parseExpr() {
+                let left = parseTerm();
+                
+                while (true) {
+                    const token = peek();
+                    if (!token || token.type !== 'op' || !['+', '-'].includes(token.value)) break;
+                    
+                    consume();
+                    const right = parseTerm();
+                    
+                    if (left === '#CYCLE' || right === '#CYCLE') left = '#CYCLE';
+                    else if (left === '#ERR' || right === '#ERR') left = '#ERR';
+                    else {
+                        if (token.value === '+') left += right;
+                        else left -= right;
+                    }
+                }
+                
+                return left;
+            }
+            
+            // Term: Factor { (*|/) Factor }
+            function parseTerm() {
+                let left = parseFactor();
+                
+                while (true) {
+                    const token = peek();
+                    if (!token || token.type !== 'op' || !['*', '/'].includes(token.value)) break;
+                    
+                    consume();
+                    const right = parseFactor();
+                    
+                    if (left === '#CYCLE' || right === '#CYCLE') left = '#CYCLE';
+                    else if (left === '#ERR' || right === '#ERR') left = '#ERR';
+                    else {
+                        if (token.value === '*') left *= right;
+                        else {
+                            if (right === 0) throw new Error('ERR');
+                            left /= right;
+                        }
+                    }
+                }
+                
+                return left;
+            }
+            
+            // Factor: Number | CellRef | '(' Expr ')'
+            function parseFactor() {
+                const token = peek();
+                
+                if (!token) throw new Error('ERR');
+                
+                if (token.type === 'number') {
+                    consume();
+                    return token.value;
+                } else if (token.type === 'cell') {
+                    consume();
+                    
+                    // Check for circular reference
+                    if (visiting.has(token.value)) {
+                        throw { message: 'CYCLE' };
+                    }
+                    
+                    const cellId = `cell-${token.value}`;
+                    
+                    // Get raw value of referenced cell
+                    const rawVal = rawValues[cellId] || '';
+                    
+                    // If the cell contains a formula, we need to evaluate it recursively
+                    if (rawVal.startsWith('=')) {
+                        visiting.add(token.value);
+                        
+                        try {
+                            const result = parseExpression(rawVal.slice(1), visiting);
+                            
+                            // Check for cycle in subexpression
+                            if (result === '#CYCLE') throw { message: 'CYCLE' };
+                            
+                            return result;
+                        } catch (e) {
+                            if (e.message === 'CYCLE') throw e;
+                            return '#ERR';
+                        } finally {
+                            visiting.delete(token.value);
+                        }
+                    } else if (rawVal === '') {
+                        return 0;
+                    } else {
+                        const num = parseFloat(rawVal);
+                        return isNaN(num) ? '#ERR' : num;
+                    }
+                } else if (token.type === 'op' && token.value === '(') {
+                    consume(); // consume (
+                    
+                    const result = parseExpr();
+                    
+                    const closing = peek();
+                    if (!closing || closing.type !== 'op' || closing.value !== ')') {
+                        throw new Error('ERR');
+                    }
+                    consume(); // consume )
+                    
+                    return result;
+                } else {
+                    throw new Error('ERR');
+                }
+            }
+            
+            const result = parseExpr();
+            
+            // If there are leftover tokens, expression is invalid
+            if (pos < tokens.length) {
+                throw new Error('ERR');
+            }
+            
+            return result;
+        }
+
+        // Format a value for display
+        function formatValue(val) {
+            if (val === '#CYCLE' || val === '#ERR') return val;
+            
+            // If it's an integer, display as such; otherwise show decimal if needed
+            if (typeof val === 'number') {
+                // Use toPrecision to avoid long decimals
+                const str = String(val);
+                
+                // Check if it's effectively an integer
+                if (Math.abs(val - Math.round(val)) < 1e-10) {
+                    return String(Math.round(val));
+                }
+                
+                // Format with reasonable precision
+                return parseFloat(val.toFixed(6)).toString();
+            }
+            
+            return String(val);
+        }
+
+        // Export current computed values as CSV
+        function exportCSV() {
+            const lines = [];
+            
+            for (let r = 1; r <= ROWS; r++) {
+                const rowValues = [];
+                
+                for (let c = 0; c < COLS; c++) {
+                    const cellId = `cell-${COL_NAMES[c]}${r}`;
+                    
+                    // Get the computed value
+                    let val = computedValues[cellId];
+                    
+                    // Handle special values
+                    if (val === undefined) val = '';
+                    else if (typeof val !== 'string') val = String(val);
+                    
+                    rowValues.push(escapeCSV(val));
+                }
+                
+                lines.push(rowValues.join(','));
+            }
+            
+            document.getElementById('csv').value = lines.join('\n');
+        }
+
+        // Escape a value for CSV output
+        function escapeCSV(val) {
+            if (val === '') return '';
+            if (String(val).includes(',') || String(val).includes('"') || String(val).includes('\n')) {
+                return `"${String(val).replace(/"/g, '""')}"`;
+            }
+            return val;
+        }
+
+        // Public API for window.sheet
+        window.sheet = {
+            set: function(cellId, value) {
+                const cellElement = document.getElementById(`cell-${cellId}`);
+                if (cellElement) {
+                    rawValues[`cell-${cellId}`] = value;
+                    
+                    recalculate(`cell-${cellId}`);
+                    updateCellDisplay(`cell-${cellId}`);
+                }
+            },
+            
+            get: function(cellId) {
+                return computedValues[`cell-${cellId}`] !== undefined ? 
+                       String(computedValues[`cell-${cellId}`]) : '';
+            },
+            
+            raw: function(cellId) {
+                return rawValues[`cell-${cellId}`] || '';
+            }
+        };
+
+        // Initialize the spreadsheet when DOM is ready
+        initSpreadsheet();
+    </script>
+</body>
+</html>

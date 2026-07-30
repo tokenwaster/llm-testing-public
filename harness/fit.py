@@ -1,7 +1,3 @@
-"""Task-fit classification — which model for which job.
-
-Driven by directives.yaml (thresholds + value-pick rules) so the
-classification adapts after every run without code changes."""
 
 import yaml
 
@@ -43,20 +39,22 @@ def _classify(score: float, th: dict) -> str:
     return "avoid"
 
 
-def task_fit(by_model: dict[str, list[dict]], categories: list[str]) -> dict:
-    """by_model: model -> latest-result entries (each with category, score
-    dict, gen_tokens_per_sec). Returns {directives, rows: [{category,
-    top: [(model, score)], value: [(model, score, tps)], classes:
-    {model: (class, score)}}]}."""
+def task_fit(by_model: dict[str, list[dict]], categories: list[str],
+             cat_task_counts: dict[str, int] | None = None) -> dict:
     d = load_directives()
     th, vp = d["thresholds"], d["value_pick"]
     rows = []
+    skipped: dict[str, list[str]] = {}
     for cat in categories:
+        need = (cat_task_counts or {}).get(cat)
         stats = {}
         for m, entries in by_model.items():
             es = [e for e in entries if e["category"] == cat
                   and e["score"].get("status") == "scored"]
             if not es:
+                continue
+            if need and len(es) < need:
+                skipped.setdefault(cat, []).append(m)
                 continue
             score = sum(e["score"]["score"] for e in es) / len(es)
             tpss = [e.get("gen_tokens_per_sec") for e in es
@@ -79,16 +77,12 @@ def task_fit(by_model: dict[str, list[dict]], categories: list[str]) -> dict:
             "value": value[:2],
             "classes": {m: (_classify(s["score"], th), s["score"])
                         for m, s in sorted(stats.items())},
+            "n_partial_excluded": len(skipped.get(cat, [])),
         })
-    return {"directives": d, "rows": rows}
+    return {"directives": d, "rows": rows, "partial_excluded": skipped}
 
 
 def timeout_risks(tasks, threshold: float = 0.75) -> dict[str, list[str]]:
-    """Which model·task pairs are near or past their enforced time budget.
-    Since v0.5.10 the total-duration deadline binds every model (not just
-    claude-cli), so slowness is now a way to score zero. Grounded in the model's
-    OWN slowest observed attempt — not a tok/s extrapolation, which over-predicts
-    badly (it put gemma-4-31b at 1850s on web-003, which ran well inside budget)."""
     from . import report
 
     by_id = {t.id: t for t in tasks}
@@ -119,9 +113,6 @@ def timeout_risks(tasks, threshold: float = 0.75) -> dict[str, list[str]]:
 
 
 def set_power_rate(cost_per_kwh: float, currency: str = "$") -> dict:
-    """Write the electricity rate into directives.yaml. Line edits, NOT a yaml
-    round-trip — safe_dump would strip the file's comments, and directives.yaml
-    is heavily commented on purpose."""
     import re
 
     rate = float(cost_per_kwh)

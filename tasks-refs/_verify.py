@@ -1,8 +1,3 @@
-"""Reference-verify staged ANSWER tasks: correct answer must score 1.0, and
-empty / wrong / no-ANSWER-line must score 0.0. Usage:
-
-    python tasks-refs/_verify.py <staged-task-dir> [<staged-task-dir> ...]
-"""
 import sys
 from pathlib import Path
 

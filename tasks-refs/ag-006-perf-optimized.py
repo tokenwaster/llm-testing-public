@@ -1,4 +1,3 @@
-"""Reference optimized perf.py (v0.5 ag-006)."""
 
 
 def common_elements(a, b):

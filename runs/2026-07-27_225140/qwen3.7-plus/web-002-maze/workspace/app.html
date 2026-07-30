@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Maze Explorer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;color:#eee;font-family:monospace;display:flex;flex-direction:column;align-items:center;padding:15px;min-height:100vh}
+#controls{margin-bottom:10px;display:flex;gap:20px;align-items:center;font-size:16px}
+#maze{border:2px solid #444;line-height:0}
+canvas{display:block}
+button{background:#222;color:#eee;border:1px solid #555;padding:6px 14px;cursor:pointer;font-family:monospace;font-size:14px;border-radius:3px}
+button:hover{background:#333}
+</style>
+</head>
+<body>
+<div id="controls">
+<span>Time: <span id="timer">0</span></span>
+<span>Completed: <span id="completed">0</span>/24</span>
+<button id="reset">Reset</button>
+</div>
+<div id="maze">
+<canvas id="canvas"></canvas>
+</div>
+<script>
+(function(){
+'use strict';
+
+var ROWS=21,COLS=21,CELL=24,CSIZE=ROWS*CELL,NBOTS=24,TICKMS=20;
+var canvas=document.getElementById('canvas');
+var ctx=canvas.getContext('2d');
+canvas.width=CSIZE;canvas.height=CSIZE;
+
+function mulberry32(a){
+  return function(){
+    a|=0;a=a+0x6D2B79F5|0;
+    var t=Math.imul(a^a>>>15,1|a);
+    t=t+Math.imul(t^t>>>7,61|t)^t;
+    return((t^t>>>14)>>>0)/4294967296;
+  };
+}
+
+function genMaze(rows,cols,rng){
+  var w=[];
+  for(var r=0;r<rows;r++){
+    w[r]=[];
+    for(var c=0;c<cols;c++) w[r][c]={n:true,e:true,s:true,w:true};
+  }
+  var vis=[];
+  for(var r=0;r<rows;r++){vis[r]=[];for(var c=0;c<cols;c++)vis[r][c]=false;}
+  var dirs=[{dr:-1,dc:0,w:'n',o:'s'},{dr:0,dc:1,w:'e',o:'w'},{dr:1,dc:0,w:'s',o:'n'},{dr:0,dc:-1,w:'w',o:'e'}];
+  var stack=[{r:0,c:0}];vis[0][0]=true;
+  while(stack.length>0){
+    var cur=stack[stack.length-1];
+    var nb=[];
+    for(var i=0;i<4;i++){
+      var d=dirs[i],nr=cur.r+d.dr,nc=cur.c+d.dc;
+      if(nr>=0&&nr<rows&&nc>=0&&nc<cols&&!vis[nr][nc]) nb.push({r:nr,c:nc,d:d});
+    }
+    if(nb.length>0){
+      var idx=Math.floor(rng()*nb.length);
+      var next=nb[idx];
+      w[cur.r][cur.c][next.d.w]=false;
+      w[next.r][next.c][next.d.o]=false;
+      vis[next.r][next.c]=true;
+      stack.push({r:next.r,c:next.c});
+    } else {
+      stack.pop();
+    }
+  }
+  return w;
+}
+
+function pk(r1,c1,r2,c2){
+  if(r1<r2||(r1===r2&&c1<c2)) return r1+','+c1+','+r2+','+c2;
+  return r2+','+c2+','+r1+','+c1;
+}
+
+var DI=[{dr:-1,dc:0,w:'n'},{dr:0,dc:1,w:'e'},{dr:1,dc:0,w:'s'},{dr:0,dc:-1,w:'w'}];
+
+var mw=null,bots=[],spR=0,spC=0,exR=ROWS-1,exC=COLS-1;
+var curTick=0,frozen=false,curSeed=0,rngFn=null;
+
+function mkBots(rng){
+  var res=[];
+  for(var i=0;i<NBOTS;i++){
+    var p=[0,1,2,3];
+    for(var j=3;j>0;j--){
+      var k=Math.floor(rng()*(j+1));
+      var tmp=p[j];p[j]=p[k];p[k]=tmp;
+    }
+    var hue=Math.round((i*137.508)%360);
+    res.push({
+      id:i,
+      pos:{r:spR,c:spC},
+      prevPos:{r:spR,c:spC},
+      path:[{r:spR,c:spC}],
+      known:{},
+      passages:{},
+      deadEnds:[],
+      deadSet:{},
+      finishTick:null,
+      dirPref:p,
+      color:'hsl('+hue+',80%,60%)'
+    });
+  }
+  return res;
+}
+
+function botStep(bot,tick){
+  if(bot.finishTick!==null) return;
+  var r=bot.pos.r,c=bot.pos.c;
+
+  var key=r+','+c;
+  if(!bot.known[key]){
+    bot.known[key]={n:mw[r][c].n,e:mw[r][c].e,s:mw[r][c].s,w:mw[r][c].w};
+  }
+  var walls=bot.known[key];
+
+  var avail=[];
+  for(var i=0;i<4;i++){
+    var d=bot.dirPref[i];
+    var info=DI[d];
+    if(walls[info.w]) continue;
+    var nr=r+info.dr,nc=c+info.dc;
+    var k=pk(r,c,nr,nc);
+    var cnt=bot.passages[k]||0;
+    if(cnt<2) avail.push({nr:nr,nc:nc,k:k,cnt:cnt});
+  }
+
+  if(avail.length===0) return;
+
+  var unexp=[];
+  for(var i=0;i<avail.length;i++){
+    if(avail[i].cnt===0) unexp.push(avail[i]);
+  }
+
+  var choice,back=false;
+  if(unexp.length>0){
+    choice=unexp[0];
+  } else {
+    choice=avail[0];
+    back=true;
+  }
+
+  if(back){
+    var dk=r+','+c;
+    if(!bot.deadSet[dk]){
+      bot.deadSet[dk]=true;
+      bot.deadEnds.push({r:r,c:c});
+    }
+  }
+
+  bot.prevPos={r:bot.pos.r,c:bot.pos.c};
+  bot.passages[choice.k]=(bot.passages[choice.k]||0)+1;
+  bot.pos={r:choice.nr,c:choice.nc};
+  bot.path.push({r:choice.nr,c:choice.nc});
+
+  if(choice.nr===exR&&choice.nc===exC){
+    bot.finishTick=tick;
+  }
+}
+
+function doInit(seed){
+  curSeed=(seed!==undefined&&seed!==null)?Number(seed):Math.floor(Math.random()*2147483647);
+  rngFn=mulberry32(curSeed);
+  mw=genMaze(ROWS,COLS,rngFn);
+  exR=ROWS-1;exC=COLS-1;
+  bots=mkBots(rngFn);
+  curTick=0;frozen=false;
+
+  for(var i=0;i<bots.length;i++){
+    if(bots[i].pos.r===exR&&bots[i].pos.c===exC) bots[i].finishTick=0;
+  }
+  var allDone=true;
+  for(var i=0;i<bots.length;i++){
+    if(bots[i].finishTick===null){allDone=false;break;}
+  }
+  if(allDone) frozen=true;
+
+  buildMazeImg();
+  updateUI();
+}
+
+function doTick(n){
+  for(var i=0;i<n;i++){
+    if(frozen) break;
+    curTick++;
+    for(var j=0;j<bots.length;j++) botStep(bots[j],curTick);
+    var allDone=true;
+    for(var j=0;j<bots.length;j++){
+      if(bots[j].finishTick===null){allDone=false;break;}
+    }
+    if(allDone){frozen=true;break;}
+  }
+  updateUI();
+}
+
+function updateUI(){
+  document.getElementById('timer').textContent=curTick;
+  var comp=0;
+  for(var i=0;i<bots.length;i++){
+    if(bots[i].finishTick!==null) comp++;
+  }
+  document.getElementById('completed').textContent=comp;
+}
+
+var mazeImg=null;
+function buildMazeImg(){
+  var oc=document.createElement('canvas');
+  oc.width=CSIZE;oc.height=CSIZE;
+  var ox=oc.getContext('2d');
+
+  ox.fillStyle='#1a1a2e';
+  ox.fillRect(0,0,CSIZE,CSIZE);
+
+  ox.fillStyle='rgba(0,255,100,0.18)';
+  ox.fillRect(exC*CELL,exR*CELL,CELL,CELL);
+
+  ox.fillStyle='rgba(255,255,0,0.12)';
+  ox.fillRect(spC*CELL,spR*CELL,CELL,CELL);
+
+  ox.strokeStyle='#778';
+  ox.lineWidth=2;
+  ox.lineCap='square';
+
+  for(var r=0;r<ROWS;r++){
+    for(var c=0;c<COLS;c++){
+      var x=c*CELL,y=r*CELL,ww=mw[r][c];
+      ox.beginPath();
+      if(ww.n){ox.moveTo(x,y);ox.lineTo(x+CELL,y);}
+      if(ww.e){ox.moveTo(x+CELL,y);ox.lineTo(x+CELL,y+CELL);}
+      if(ww.s){ox.moveTo(x,y+CELL);ox.lineTo(x+CELL,y+CELL);}
+      if(ww.w){ox.moveTo(x,y);ox.lineTo(x,y+CELL);}
+      ox.stroke();
+    }
+  }
+
+  ox.fillStyle='#0f8';
+  ox.font='bold 9px monospace';
+  ox.textAlign='center';
+  ox.textBaseline='middle';
+  ox.fillText('EXIT',exC*CELL+CELL/2,exR*CELL+CELL/2);
+
+  mazeImg=oc;
+}
+
+function lerp(a,b,t){return a+(b-a)*t;}
+
+function render(prog){
+  if(!mazeImg) return;
+  ctx.drawImage(mazeImg,0,0);
+
+  var br=Math.max(3,CELL/5);
+  for(var i=0;i<bots.length;i++){
+    var bot=bots[i];
+    var x=lerp(bot.prevPos.c,bot.pos.c,prog)*CELL+CELL/2;
+    var y=lerp(bot.prevPos.r,bot.pos.r,prog)*CELL+CELL/2;
+
+    ctx.globalAlpha=0.9;
+    ctx.fillStyle=bot.color;
+    ctx.beginPath();
+    ctx.arc(x,y,br,0,Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha=1.0;
+
+    if(bot.finishTick!==null){
+      ctx.strokeStyle='#fff';
+      ctx.lineWidth=1.5;
+      ctx.stroke();
+    }
+  }
+}
+
+var lastT=0;
+function animate(now){
+  if(lastT===0){lastT=now;render(1);requestAnimationFrame(animate);return;}
+
+  var prog;
+  if(!frozen){
+    var el=now-lastT;
+    if(el>=TICKMS){
+      doTick(1);
+      lastT=now;
+      prog=0;
+    } else {
+      prog=el/TICKMS;
+    }
+  } else {
+    prog=1;
+  }
+
+  render(Math.min(prog,1));
+  requestAnimationFrame(animate);
+}
+
+document.getElementById('reset').addEventListener('click',function(){
+  doInit();
+  lastT=0;
+  for(var i=0;i<bots.length;i++){
+    bots[i].prevPos={r:bots[i].pos.r,c:bots[i].pos.c};
+  }
+});
+
+window.game={
+  tick:function(n){
+    doTick(n);
+    lastT=performance.now();
+    for(var i=0;i<bots.length;i++){
+      bots[i].prevPos={r:bots[i].pos.r,c:bots[i].pos.c};
+    }
+  },
+  reset:function(seed){
+    doInit(seed);
+    lastT=0;
+    for(var i=0;i<bots.length;i++){
+      bots[i].prevPos={r:bots[i].pos.r,c:bots[i].pos.c};
+    }
+  },
+  get elapsed(){return curTick;},
+  get size(){return{rows:ROWS,cols:COLS};},
+  get spawn(){return{r:spR,c:spC};},
+  get exit(){return{r:exR,c:exC};},
+  walls:function(r,c){
+    return{n:mw[r][c].n,e:mw[r][c].e,s:mw[r][c].s,w:mw[r][c].w};
+  },
+  get bots(){return bots;}
+};
+
+doInit();
+requestAnimationFrame(animate);
+
+})();
+</script>
+</body>
+</html>

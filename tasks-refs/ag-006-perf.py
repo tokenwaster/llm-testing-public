@@ -1,4 +1,3 @@
-"""Reference optimized implementations (all within the 2s budget)."""
 from collections import Counter
 
 

@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: sans-serif; padding: 16px; min-width: 600px; min-height: 400px; }
+h2 { margin-bottom: 8px; }
+#toolbar { margin-bottom: 8px; }
+#toolbar button { padding: 6px 14px; cursor: pointer; }
+#grid-container { overflow: auto; max-height: 70vh; }
+table { border-collapse: collapse; }
+th, td { border: 1px solid #999; padding: 0; text-align: center; }
+th { background: #e8e8e8; font-size: 13px; min-width: 60px; height: 24px; padding: 2px 4px; }
+th.corner { background: #d0d0d0; min-width: 36px; }
+td.row-header { background: #e8e8e8; font-size: 13px; min-width: 36px; padding: 2px 4px; }
+td.cell-td { padding: 0; }
+td.cell-td input {
+  width: 72px; height: 26px; border: none; outline: none;
+  padding: 2px 4px; font-size: 13px; text-align: left;
+  background: transparent;
+}
+td.cell-td input:focus { background: #fffbe6; }
+#csv { width: 100%; height: 120px; margin-top: 8px; font-family: monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<h2>Mini Spreadsheet</h2>
+<div id="toolbar">
+  <button id="export">Export CSV</button>
+</div>
+<div id="grid-container">
+  <table id="grid"></table>
+</div>
+<textarea id="csv" readonly placeholder="CSV output appears here after clicking Export CSV"></textarea>
+
+<script>
+(function() {
+  const COLS = 10;
+  const ROWS = 10;
+  const colLetters = [];
+  for (let i = 0; i < COLS; i++) colLetters.push(String.fromCharCode(65 + i));
+
+  // Storage: raw values keyed by "A1" etc.
+  const rawData = {};
+
+  function cellId(col, row) { return colLetters[col] + (row + 1); }
+  function parseCellRef(ref) {
+    const m = ref.match(/^([A-J])(\d+)$/);
+    if (!m) return null;
+    const c = m[1].charCodeAt(0) - 65;
+    const r = parseInt(m[2], 10) - 1;
+    if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return null;
+    return { col: c, row: r, id: m[1] + m[2] };
+  }
+
+  // ---- Formula Parser ----
+  function tokenize(expr) {
+    const tokens = [];
+    let i = 0;
+    while (i < expr.length) {
+      if (expr[i] === ' ' || expr[i] === '\t') { i++; continue; }
+      if ('+-*/()'.includes(expr[i])) { tokens.push({ type: 'op', value: expr[i] }); i++; continue; }
+      if (expr[i] === '(' || expr[i] === ')') { tokens.push({ type: 'paren', value: expr[i] }); i++; continue; }
+      // Number
+      if (/[0-9.]/.test(expr[i])) {
+        let num = '';
+        while (i < expr.length && /[0-9.]/.test(expr[i])) { num += expr[i]; i++; }
+        tokens.push({ type: 'num', value: parseFloat(num) });
+        continue;
+      }
+      // Cell reference
+      if (/[A-J]/.test(expr[i])) {
+        let ref = '';
+        while (i < expr.length && /[A-Za-z0-9]/.test(expr[i])) { ref += expr[i]; i++; }
+        tokens.push({ type: 'ref', value: ref.toUpperCase() });
+        continue;
+      }
+      // Unknown character -> invalid
+      return null;
+    }
+    return tokens;
+  }
+
+  // Recursive descent parser
+  // Returns { value, deps, error }
+  function parseFormula(text) {
+    const expr = text.slice(1); // remove leading '='
+    const tokens = tokenize(expr);
+    if (!tokens || tokens.length === 0) return { error: true, deps: [] };
+
+    let pos = 0;
+    const deps = [];
+    let error = false;
+
+    function peek() { return pos < tokens.length ? tokens[pos] : null; }
+    function consume() { return tokens[pos++]; }
+
+    function parseExpr() {
+      let left = parseTerm();
+      if (error) return 0;
+      while (peek() && peek().type === 'op' && (peek().value === '+' || peek().value === '-')) {
+        const op = consume().value;
+        const right = parseTerm();
+        if (error) return 0;
+        left = op === '+' ? left + right : left - right;
+      }
+      return left;
+    }
+
+    function parseTerm() {
+      let left = parseFactor();
+      if (error) return 0;
+      while (peek() && peek().type === 'op' && (peek().value === '*' || peek().value === '/')) {
+        const op = consume().value;
+        const right = parseFactor();
+        if (error) return 0;
+        if (op === '*') left = left * right;
+        else {
+          if (right === 0) { error = true; return 0; }
+          left = left / right;
+        }
+      }
+      return left;
+    }
+
+    function parseFactor() {
+      const t = peek();
+      if (!t) { error = true; return 0; }
+      if (t.type === 'num') { consume(); return t.value; }
+      if (t.type === 'ref') {
+        consume();
+        const parsed = parseCellRef(t.value);
+        if (!parsed) { error = true; return 0; }
+        deps.push(parsed.id);
+        return 0; // placeholder, resolved later
+      }
+      if (t.type === 'op' && t.value === '(') {
+        consume();
+        const val = parseExpr();
+        if (error) return 0;
+        const closing = peek();
+        if (!closing || closing.value !== ')') { error = true; return 0; }
+        consume();
+        return val;
+      }
+      // Unary minus
+      if (t.type === 'op' && t.value === '-') {
+        consume();
+        return -parseFactor();
+      }
+      // Unary plus
+      if (t.type === 'op' && t.value === '+') {
+        consume();
+        return parseFactor();
+      }
+      error = true;
+      return 0;
+    }
+
+    const val = parseExpr();
+    if (error || pos < tokens.length) return { error: true, deps: [] };
+    return { value: val, deps: deps, error: false };
+  }
+
+  // ---- Dependency Graph & Evaluation ----
+  function getDeps(id) {
+    const raw = rawData[id];
+    if (!raw || raw[0] !== '=') return [];
+    const parsed = parseFormula(raw);
+    if (parsed.error) return [];
+    return parsed.deps;
+  }
+
+  // Find all cells involved in cycles using DFS
+  function findCycleCells() {
+    const allIds = [];
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        allIds.push(cellId(c, r));
+
+    // Build adjacency
+    const adj = {};
+    for (const id of allIds) {
+      adj[id] = getDeps(id);
+    }
+
+    // Find SCCs using iterative Tarjan's
+    let index = 0;
+    const stack = [];
+    const indices = {};
+    const lowlinks = {};
+    const onStack = {};
+    const sccs = [];
+
+    // Iterative Tarjan's
+    const unvisited = new Set(allIds);
+    
+    function strongconnect(startNode) {
+      // Use explicit call stack
+      const callStack = [{ node: startNode, depIdx: 0, phase: 'init' }];
+      
+      while (callStack.length > 0) {
+        const frame = callStack[callStack.length - 1];
+        const v = frame.node;
+        
+        if (frame.phase === 'init') {
+          indices[v] = index;
+          lowlinks[v] = index;
+          index++;
+          stack.push(v);
+          onStack[v] = true;
+          unvisited.delete(v);
+          frame.phase = 'loop';
+          frame.depIdx = 0;
+        }
+        
+        if (frame.phase === 'loop') {
+          const deps = adj[v] || [];
+          let foundRecurse = false;
+          while (frame.depIdx < deps.length) {
+            const w = deps[frame.depIdx];
+            frame.depIdx++;
+            if (!(w in indices)) {
+              // Recurse on w
+              callStack.push({ node: w, depIdx: 0, phase: 'init' });
+              foundRecurse = true;
+              break;
+            } else if (onStack[w]) {
+              lowlinks[v] = Math.min(lowlinks[v], indices[w]);
+            }
+          }
+          if (foundRecurse) continue;
+          
+          // All deps processed
+          if (lowlinks[v] === indices[v]) {
+            const scc = [];
+            let w;
+            do {
+              w = stack.pop();
+              onStack[w] = false;
+              scc.push(w);
+            } while (w !== v);
+            sccs.push(scc);
+          }
+          
+          callStack.pop();
+          if (callStack.length > 0) {
+            const parent = callStack[callStack.length - 1];
+            lowlinks[parent.node] = Math.min(lowlinks[parent.node], lowlinks[v]);
+          }
+        }
+      }
+    }
+
+    while (unvisited.size > 0) {
+      const node = unvisited.values().next().value;
+      strongconnect(node);
+    }
+
+    const cycleCells = new Set();
+    for (const scc of sccs) {
+      if (scc.length > 1) {
+        for (const id of scc) cycleCells.add(id);
+      } else if (scc.length === 1) {
+        const id = scc[0];
+        // Check self-loop
+        if ((adj[id] || []).includes(id)) cycleCells.add(id);
+      }
+    }
+    return cycleCells;
+  }
+
+  // Evaluate a single cell (non-formula or formula with resolved deps)
+  function evaluateCell(id, computed, visiting) {
+    if (computed.hasOwnProperty(id)) return computed[id];
+    if (visiting.has(id)) return { cycle: true };
+
+    const raw = rawData[id];
+    if (raw === undefined || raw === '') {
+      computed[id] = { numeric: true, value: 0, display: '' };
+      return computed[id];
+    }
+
+    if (raw[0] !== '=') {
+      // Plain value
+      const num = Number(raw);
+      if (!isNaN(num) && raw.trim() !== '') {
+        computed[id] = { numeric: true, value: num, display: raw };
+      } else {
+        computed[id] = { numeric: false, value: raw, display: raw };
+      }
+      return computed[id];
+    }
+
+    // Formula
+    const parsed = parseFormula(raw);
+    if (parsed.error) {
+      computed[id] = { error: true, display: '#ERR' };
+      return computed[id];
+    }
+
+    visiting.add(id);
+    let result = 0;
+    let hasError = false;
+    let hasCycle = false;
+
+    // Re-evaluate the formula with actual cell values
+    const expr = raw.slice(1);
+    const tokens = tokenize(expr);
+    if (!tokens) {
+      computed[id] = { error: true, display: '#ERR' };
+      visiting.delete(id);
+      return computed[id];
+    }
+
+    // We need to re-parse and evaluate with resolved deps
+    let pos = 0;
+    function peek() { return pos < tokens.length ? tokens[pos] : null; }
+    function consume() { return tokens[pos++]; }
+
+    function evalExpr() {
+      let left = evalTerm();
+      if (hasError || hasCycle) return 0;
+      while (peek() && peek().type === 'op' && (peek().value === '+' || peek().value === '-')) {
+        const op = consume().value;
+        const right = evalTerm();
+        if (hasError || hasCycle) return 0;
+        left = op === '+' ? left + right : left - right;
+      }
+      return left;
+    }
+
+    function evalTerm() {
+      let left = evalFactor();
+      if (hasError || hasCycle) return 0;
+      while (peek() && peek().type === 'op' && (peek().value === '*' || peek().value === '/')) {
+        const op = consume().value;
+        const right = evalFactor();
+        if (hasError || hasCycle) return 0;
+        if (op === '*') left = left * right;
+        else {
+          if (right === 0) { hasError = true; return 0; }
+          left = left / right;
+        }
+      }
+      return left;
+    }
+
+    function evalFactor() {
+      const t = peek();
+      if (!t) { hasError = true; return 0; }
+      if (t.type === 'num') { consume(); return t.value; }
+      if (t.type === 'ref') {
+        consume();
+        const refId = t.value;
+        const depResult = evaluateCell(refId, computed, visiting);
+        if (depResult.cycle) { hasCycle = true; return 0; }
+        if (depResult.error) { hasError = true; return 0; }
+        if (!depResult.numeric) { hasError = true; return 0; }
+        return depResult.value;
+      }
+      if (t.type === 'op' && t.value === '(') {
+        consume();
+        const val = evalExpr();
+        if (hasError || hasCycle) return 0;
+        const closing = peek();
+        if (!closing || closing.value !== ')') { hasError = true; return 0; }
+        consume();
+        return val;
+      }
+      if (t.type === 'op' && t.value === '-') {
+        consume();
+        return -evalFactor();
+      }
+      if (t.type === 'op' && t.value === '+') {
+        consume();
+        return evalFactor();
+      }
+      hasError = true;
+      return 0;
+    }
+
+    result = evalExpr();
+    visiting.delete(id);
+
+    if (hasCycle) {
+      computed[id] = { cycle: true, display: '#CYCLE' };
+    } else if (hasError || pos < tokens.length) {
+      computed[id] = { error: true, display: '#ERR' };
+    } else {
+      // Format number nicely
+      let display;
+      if (Number.isInteger(result)) {
+        display = String(result);
+      } else {
+        display = String(parseFloat(result.toPrecision(12)));
+      }
+      computed[id] = { numeric: true, value: result, display: display };
+    }
+    return computed[id];
+  }
+
+  function computeAll() {
+    const cycleCells = findCycleCells();
+    const computed = {};
+
+    // Mark cycle cells first
+    for (const id of cycleCells) {
+      computed[id] = { cycle: true, display: '#CYCLE' };
+    }
+
+    // Compute all cells
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const id = cellId(c, r);
+        if (!computed.hasOwnProperty(id)) {
+          evaluateCell(id, computed, new Set());
+        }
+      }
+    }
+
+    // Now check: any cell that depends (transitively) on a cycle cell should also be #CYCLE
+    // Actually, re-evaluate: if during evaluation we hit a cycle cell, mark as cycle
+    // Let's redo: compute in proper order
+    const computed2 = {};
+    const visiting = new Set();
+
+    for (const id of cycleCells) {
+      computed2[id] = { cycle: true, display: '#CYCLE' };
+    }
+
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const id = cellId(c, r);
+        if (!computed2.hasOwnProperty(id)) {
+          evaluateCell(id, computed2, new Set(cycleCells));
+        }
+      }
+    }
+
+    return computed2;
+  }
+
+  // ---- Build UI ----
+  const table = document.getElementById('grid');
+
+  // Header row
+  const headerRow = document.createElement('tr');
+  const corner = document.createElement('th');
+  corner.className = 'corner';
+  corner.textContent = '';
+  headerRow.appendChild(corner);
+  for (let c = 0; c < COLS; c++) {
+    const th = document.createElement('th');
+    th.textContent = colLetters[c];
+    headerRow.appendChild(th);
+  }
+  table.appendChild(headerRow);
+
+  // Data rows
+  const inputs = {};
+  for (let r = 0; r < ROWS; r++) {
+    const tr = document.createElement('tr');
+    const rh = document.createElement('td');
+    rh.className = 'row-header';
+    rh.textContent = r + 1;
+    tr.appendChild(rh);
+    for (let c = 0; c < COLS; c++) {
+      const td = document.createElement('td');
+      td.className = 'cell-td';
+      const input = document.createElement('input');
+      const id = cellId(c, r);
+      input.id = 'cell-' + id;
+      input.dataset.cellId = id;
+      input.setAttribute('autocomplete', 'off');
+      inputs[id] = input;
+
+      input.addEventListener('focus', function() {
+        const cid = this.dataset.cellId;
+        const raw = rawData[cid] || '';
+        this.value = raw;
+      });
+
+      input.addEventListener('blur', function() {
+        commitCell(this);
+      });
+
+      input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          commitCell(this);
+          this.blur();
+        }
+      });
+
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+
+  function commitCell(input) {
+    const id = input.dataset.cellId;
+    const val = input.value;
+    if (val === (rawData[id] || '')) {
+      // No change, just refresh display
+      refreshDisplay();
+      return;
+    }
+    if (val === '') {
+      delete rawData[id];
+    } else {
+      rawData[id] = val;
+    }
+    refreshDisplay();
+  }
+
+  function refreshDisplay() {
+    const computed = computeAll();
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const id = cellId(c, r);
+        const input = inputs[id];
+        if (document.activeElement === input) continue;
+        const result = computed[id];
+        if (result) {
+          input.value = result.display;
+        } else {
+          input.value = '';
+        }
+      }
+    }
+  }
+
+  // Export CSV
+  document.getElementById('export').addEventListener('click', function() {
+    const computed = computeAll();
+    const lines = [];
+    for (let r = 0; r < ROWS; r++) {
+      const row = [];
+      for (let c = 0; c < COLS; c++) {
+        const id = cellId(c, r);
+        const result = computed[id];
+        let val = '';
+        if (result) val = result.display;
+        // Escape CSV: if contains comma, quote, or newline, wrap in quotes
+        if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+          val = '"' + val.replace(/"/g, '""') + '"';
+        }
+        row.push(val);
+      }
+      lines.push(row.join(','));
+    }
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  // ---- Scripting API ----
+  window.sheet = {
+    set: function(ref, value) {
+      const parsed = parseCellRef(ref.toUpperCase());
+      if (!parsed) return;
+      const id = parsed.id;
+      if (value === '' || value === null || value === undefined) {
+        delete rawData[id];
+      } else {
+        rawData[id] = String(value);
+      }
+      refreshDisplay();
+    },
+    get: function(ref) {
+      const parsed = parseCellRef(ref.toUpperCase());
+      if (!parsed) return '';
+      const id = parsed.id;
+      const computed = computeAll();
+      const result = computed[id];
+      return result ? result.display : '';
+    },
+    raw: function(ref) {
+      const parsed = parseCellRef(ref.toUpperCase());
+      if (!parsed) return '';
+      const id = parsed.id;
+      return rawData[id] || '';
+    }
+  };
+
+  // Initial display
+  refreshDisplay();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f4f5f7;
+    margin: 0;
+    padding: 20px;
+  }
+  #app {
+    display: inline-block;
+    min-width: 600px;
+    min-height: 400px;
+    background: #fff;
+    padding: 16px;
+    border: 1px solid #ccc;
+    box-sizing: border-box;
+  }
+  #toolbar {
+    margin-bottom: 10px;
+  }
+  #export {
+    padding: 6px 14px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  #grid {
+    display: grid;
+    grid-template-columns: 40px repeat(10, 60px);
+    grid-template-rows: 28px repeat(10, 28px);
+    gap: 2px;
+  }
+  .header {
+    background: #e0e0e0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 12px;
+    box-sizing: border-box;
+  }
+  .cell-input {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    text-align: right;
+    font-size: 12px;
+    border: 1px solid #ccc;
+    padding: 2px 4px;
+  }
+  .cell-input:focus {
+    outline: 2px solid #4a90d9;
+    text-align: left;
+  }
+  #csvArea {
+    margin-top: 14px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  #csv {
+    width: 100%;
+    height: 100px;
+    box-sizing: border-box;
+    font-family: monospace;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <button id="export">Export CSV</button>
+  </div>
+  <div id="grid"></div>
+  <div id="csvArea">
+    <textarea id="csv" readonly></textarea>
+  </div>
+</div>
+
+<script>
+(function(){
+  var COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  var ROWS = [1,2,3,4,5,6,7,8,9,10];
+
+  var raw = {};      // id -> raw text
+  var computed = {}; // id -> {display, num}
+  var inputs = {};   // id -> input element
+
+  function cellId(col, row){ return col + row; }
+
+  // ---------- Formula tokenizer / parser ----------
+  function tokenize(str){
+    var tokens = [];
+    var i = 0;
+    var n = str.length;
+    while(i < n){
+      var ch = str[i];
+      if(ch === ' ' || ch === '\t'){ i++; continue; }
+      if(ch === '+' || ch === '-' || ch === '*' || ch === '/'){
+        tokens.push({type:'op', val: ch}); i++; continue;
+      }
+      if(ch === '('){ tokens.push({type:'lparen'}); i++; continue; }
+      if(ch === ')'){ tokens.push({type:'rparen'}); i++; continue; }
+      if(/[0-9.]/.test(ch)){
+        var j = i;
+        while(j < n && /[0-9.]/.test(str[j])) j++;
+        var numStr = str.slice(i, j);
+        if(!/^\d+(\.\d+)?$/.test(numStr)) throw new Error('ERR');
+        tokens.push({type:'num', val: parseFloat(numStr)});
+        i = j; continue;
+      }
+      if(/[A-Za-z]/.test(ch)){
+        var j = i;
+        while(j < n && /[A-Za-z]/.test(str[j])) j++;
+        var letters = str.slice(i, j);
+        var k = j;
+        while(k < n && /[0-9]/.test(str[k])) k++;
+        var digits = str.slice(j, k);
+        if(letters.length !== 1 || digits.length === 0) throw new Error('ERR');
+        var col = letters.toUpperCase();
+        var rowNum = parseInt(digits, 10);
+        if(COLS.indexOf(col) === -1 || rowNum < 1 || rowNum > 10) throw new Error('ERR');
+        tokens.push({type:'ref', val: col + rowNum});
+        i = k; continue;
+      }
+      throw new Error('ERR');
+    }
+    return tokens;
+  }
+
+  function evalExpr(str, state, stack){
+    var tokens = tokenize(str);
+    var pos = 0;
+    function peek(){ return tokens[pos]; }
+    function nextTok(){ return tokens[pos++]; }
+
+    function parseExpr(){
+      var v = parseTerm();
+      while(peek() && peek().type === 'op' && (peek().val === '+' || peek().val === '-')){
+        var op = nextTok().val;
+        var rhs = parseTerm();
+        v = (op === '+') ? (v + rhs) : (v - rhs);
+      }
+      return v;
+    }
+    function parseTerm(){
+      var v = parseFactor();
+      while(peek() && peek().type === 'op' && (peek().val === '*' || peek().val === '/')){
+        var op = nextTok().val;
+        var rhs = parseFactor();
+        v = (op === '*') ? (v * rhs) : (v / rhs);
+      }
+      return v;
+    }
+    function parseFactor(){
+      var t = peek();
+      if(!t) throw new Error('ERR');
+      if(t.type === 'op' && (t.val === '+' || t.val === '-')){
+        nextTok();
+        var v = parseFactor();
+        return (t.val === '-') ? -v : v;
+      }
+      if(t.type === 'lparen'){
+        nextTok();
+        var v = parseExpr();
+        if(!peek() || peek().type !== 'rparen') throw new Error('ERR');
+        nextTok();
+        return v;
+      }
+      if(t.type === 'num'){ nextTok(); return t.val; }
+      if(t.type === 'ref'){
+        nextTok();
+        var cellObj = evalCell(t.val, state, stack);
+        if(isNaN(cellObj.num)) throw new Error('ERR');
+        return cellObj.num;
+      }
+      throw new Error('ERR');
+    }
+
+    if(tokens.length === 0) throw new Error('ERR');
+    var result = parseExpr();
+    if(pos !== tokens.length) throw new Error('ERR');
+    if(typeof result !== 'number' || !isFinite(result)) throw new Error('ERR');
+    return result;
+  }
+
+  function formatNum(n){
+    if(Object.is(n, -0)) n = 0;
+    var s = n.toFixed(10);
+    s = s.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+    if(s === '' || s === '-0') s = '0';
+    return s;
+  }
+
+  // ---------- Recalculation engine ----------
+  function evalCell(id, state, stack){
+    if(computed.hasOwnProperty(id)) return computed[id];
+
+    if(state[id] === 'visiting'){
+      var idx = stack.indexOf(id);
+      var cyc = stack.slice(idx);
+      cyc.forEach(function(n){
+        computed[n] = {display: '#CYCLE', num: NaN};
+      });
+      return computed[id];
+    }
+
+    state[id] = 'visiting';
+    stack.push(id);
+
+    var r = (raw[id] || '').trim();
+    var out;
+    if(r.charAt(0) === '='){
+      try{
+        var num = evalExpr(r.slice(1), state, stack);
+        out = {display: formatNum(num), num: num};
+      }catch(e){
+        out = {display: '#ERR', num: NaN};
+      }
+    } else if(r === ''){
+      out = {display: '', num: 0};
+    } else if(!isNaN(Number(r))){
+      out = {display: formatNum(Number(r)), num: Number(r)};
+    } else {
+      out = {display: r, num: 0};
+    }
+
+    stack.pop();
+    state[id] = 'done';
+    if(!computed.hasOwnProperty(id)) computed[id] = out;
+    return computed[id];
+  }
+
+  function recomputeAll(){
+    computed = {};
+    var state = {};
+    for(var c = 0; c < COLS.length; c++){
+      for(var ri = 0; ri < ROWS.length; ri++){
+        var id = cellId(COLS[c], ROWS[ri]);
+        if(!computed.hasOwnProperty(id)){
+          evalCell(id, state, []);
+        }
+      }
+    }
+  }
+
+  function refreshDisplay(){
+    for(var c = 0; c < COLS.length; c++){
+      for(var ri = 0; ri < ROWS.length; ri++){
+        var id = cellId(COLS[c], ROWS[ri]);
+        var el = inputs[id];
+        if(el !== document.activeElement){
+          el.value = computed[id] ? computed[id].display : '';
+        }
+      }
+    }
+  }
+
+  function commit(id, value){
+    raw[id] = value;
+    recomputeAll();
+    refreshDisplay();
+  }
+
+  // ---------- Build grid UI ----------
+  var grid = document.getElementById('grid');
+
+  var corner = document.createElement('div');
+  corner.className = 'header';
+  grid.appendChild(corner);
+
+  COLS.forEach(function(col){
+    var h = document.createElement('div');
+    h.className = 'header';
+    h.textContent = col;
+    grid.appendChild(h);
+  });
+
+  ROWS.forEach(function(row){
+    var rh = document.createElement('div');
+    rh.className = 'header';
+    rh.textContent = row;
+    grid.appendChild(rh);
+
+    COLS.forEach(function(col){
+      var id = cellId(col, row);
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.id = 'cell-' + id;
+      input.className = 'cell-input';
+      raw[id] = '';
+
+      input.addEventListener('focus', function(){
+        var thisId = this.id.replace('cell-', '');
+        this.value = raw[thisId] || '';
+      });
+
+      input.addEventListener('blur', function(){
+        var thisId = this.id.replace('cell-', '');
+        commit(thisId, this.value);
+      });
+
+      input.addEventListener('keydown', function(e){
+        if(e.key === 'Enter'){
+          e.preventDefault();
+          this.blur();
+        }
+      });
+
+      inputs[id] = input;
+      grid.appendChild(input);
+    });
+  });
+
+  recomputeAll();
+  refreshDisplay();
+
+  // ---------- Export CSV ----------
+  function csvEscape(v){
+    if(/[",\n]/.test(v)){
+      return '"' + v.replace(/"/g, '""') + '"';
+    }
+    return v;
+  }
+
+  document.getElementById('export').addEventListener('click', function(){
+    var lines = [];
+    ROWS.forEach(function(row){
+      var vals = COLS.map(function(col){
+        var id = cellId(col, row);
+        var d = computed[id] ? computed[id].display : '';
+        return csvEscape(d);
+      });
+      lines.push(vals.join(','));
+    });
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  // ---------- Scripting API ----------
+  window.sheet = {
+    set: function(id, value){
+      commit(id, value);
+    },
+    get: function(id){
+      return computed[id] ? computed[id].display : '';
+    },
+    raw: function(id){
+      return raw[id] || '';
+    }
+  };
+})();
+</script>
+</body>
+</html>

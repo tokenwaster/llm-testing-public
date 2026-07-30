@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Billiards</title>
+<style>
+  body {
+    margin: 0;
+    background: #1a1a1a;
+    color: #eee;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  #game-container {
+    position: relative;
+    box-shadow: 0 15px 40px rgba(0,0,0,0.8);
+    border-radius: 10px;
+    overflow: hidden;
+    background: #3a2314;
+  }
+  canvas {
+    display: block;
+    cursor: crosshair;
+  }
+  #controls {
+    margin-top: 20px;
+    display: flex;
+    gap: 20px;
+    align-items: center;
+  }
+  button {
+    padding: 10px 20px;
+    font-size: 16px;
+    font-weight: bold;
+    background: #2e7d32;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  button:hover {
+    background: #388e3c;
+  }
+  #status {
+    font-size: 16px;
+    color: #aaa;
+  }
+  #instructions {
+    max-width: 800px;
+    text-align: center;
+    margin-top: 15px;
+    color: #ccc;
+    line-height: 1.6;
+    background: #2a2a2a;
+    padding: 15px 20px;
+    border-radius: 8px;
+  }
+  b { color: #fff; }
+</style>
+</head>
+<body>
+
+  <div id="game-container">
+    <canvas id="table" width="840" height="440"></canvas>
+  </div>
+  
+  <div id="controls">
+    <button id="reset-btn">Reset / Rack</button>
+    <div id="status">Ready to play</div>
+  </div>
+  
+  <div id="instructions">
+    <b>How to play:</b> Click and drag <i>backwards</i> from the white cue ball to aim and set power (a longer drag means a harder shot). Release the mouse to strike! Pot all the colored balls into the pockets.
+  </div>
+
+<script>
+(function() {
+    const canvas = document.getElementById('table');
+    const ctx = canvas.getContext('2d');
+    
+    // Simulation parameters
+    const W = 800;
+    const H = 400;
+    const R = 12;
+    const POCKET_R = 30; // capture radius
+    const FRICTION = 120; // px/s^2
+    
+    function getDefaultRack() {
+        let balls = [];
+        balls.push({x: 200, y: 200, vx: 0, vy: 0, cue: true});
+        let startX = 550;
+        let startY = 200;
+        for (let row = 0; row < 5; row++) {
+            for (let col = 0; col <= row; col++) {
+                let x = startX + row * (R * 2 * 0.866025);
+                let y = startY - row * R + col * (R * 2);
+                balls.push({x: x, y: y, vx: 0, vy: 0, cue: false});
+            }
+        }
+        return balls;
+    }
+    
+    window.sim = {
+        W: W,
+        H: H,
+        R: R,
+        balls: [],
+        running: false,
+        isDragging: false,
+        cueBall: null,
+        dragCurrent: {x: 0, y: 0},
+        
+        reset: function(ballsData) {
+            const colors = ['#ffffff', '#ffcc00', '#0000ff', '#ff0000', '#800080', '#ff8800', '#00aa00', '#aa0000', '#333333', '#ff00ff', '#00ffff', '#ffff00', '#888888', '#ff8888', '#88ff88', '#444444'];
+            this.balls = ballsData.map((b, i) => ({
+                x: b.x, y: b.y,
+                vx: b.vx || 0, vy: b.vy || 0,
+                cue: !!b.cue,
+                potted: false,
+                color: b.cue ? '#ffffff' : colors[i % colors.length]
+            }));
+            this.isDragging = false;
+            this.cueBall = this.balls.find(b => b.cue);
+            this.draw();
+        },
+        
+        state: function() {
+            return this.balls.map(b => ({
+                x: b.x, y: b.y, vx: b.vx, vy: b.vy, potted: b.potted, cue: b.cue
+            }));
+        },
+        
+        shoot: function(vx, vy) {
+            let cue = this.balls.find(b => b.cue);
+            if (cue && !cue.potted) {
+                cue.vx = vx;
+                cue.vy = vy;
+            }
+        },
+        
+        physics: function(dt) {
+            // 1. Move and friction
+            for (let i = 0; i < this.balls.length; i++) {
+                let b = this.balls[i];
+                if (b.potted) continue;
+                let speed = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+                if (speed > 0) {
+                    let newSpeed = speed - FRICTION * dt;
+                    if (newSpeed < 0) newSpeed = 0;
+                    if (newSpeed > 0) {
+                        b.vx = (b.vx / speed) * newSpeed;
+                        b.vy = (b.vy / speed) * newSpeed;
+                    } else {
+                        b.vx = 0; b.vy = 0;
+                    }
+                }
+                b.x += b.vx * dt;
+                b.y += b.vy * dt;
+            }
+            
+            // 2. Ball-Ball collisions
+            for (let i = 0; i < this.balls.length; i++) {
+                for (let j = i + 1; j < this.balls.length; j++) {
+                    let b1 = this.balls[i];
+                    let b2 = this.balls[j];
+                    if (b1.potted || b2.potted) continue;
+                    let dx = b2.x - b1.x;
+                    let dy = b2.y - b1.y;
+                    let dist2 = dx*dx + dy*dy;
+                    let minDist = 2 * R;
+                    if (dist2 < minDist * minDist) {
+                        if (dist2 === 0) {
+                            dx = 1; dy = 0; dist2 = 1;
+                            b1.x -= R; b2.x += R;
+                        }
+                        let dist = Math.sqrt(dist2);
+                        let nx = dx / dist;
+                        let ny = dy / dist;
+                        let overlap = minDist - dist;
+                        b1.x -= nx * overlap / 2;
+                        b1.y -= ny * overlap / 2;
+                        b2.x += nx * overlap / 2;
+                        b2.y += ny * overlap / 2;
+                        
+                        let dvx = b1.vx - b2.vx;
+                        let dvy = b1.vy - b2.vy;
+                        let vn = dvx * nx + dvy * ny;
+                        if (vn > 0) {
+                            b1.vx -= vn * nx;
+                            b1.vy -= vn * ny;
+                            b2.vx += vn * nx;
+                            b2.vy += vn * ny;
+                        }
+                    }
+                }
+            }
+            
+            // 3. Walls
+            for (let i = 0; i < this.balls.length; i++) {
+                let b = this.balls[i];
+                if (b.potted) continue;
+                let inTopGap = (b.x < POCKET_R) || (b.x > W - POCKET_R) || (Math.abs(b.x - W/2) < POCKET_R);
+                let inSideGap = (b.y < POCKET_R) || (b.y > H - POCKET_R);
+                
+                if (b.y < R && !inTopGap) { b.y = R; b.vy = Math.abs(b.vy); }
+                if (b.y > H - R && !inTopGap) { b.y = H - R; b.vy = -Math.abs(b.vy); }
+                if (b.x < R && !inSideGap) { b.x = R; b.vx = Math.abs(b.vx); }
+                if (b.x > W - R && !inSideGap) { b.x = W - R; b.vx = -Math.abs(b.vx); }
+            }
+            
+            // 4. Pockets
+            let pockets = [
+                {x: 0, y: 0}, {x: W, y: 0},
+                {x: 0, y: H}, {x: W, y: H},
+                {x: W/2, y: 0}, {x: W/2, y: H}
+            ];
+            for (let i = 0; i < this.balls.length; i++) {
+                let b = this.balls[i];
+                if (b.potted) continue;
+                let potted = false;
+                for (let p of pockets) {
+                    if (Math.sqrt((b.x - p.x)**2 + (b.y - p.y)**2) < POCKET_R) {
+                        potted = true; break;
+                    }
+                }
+                if (b.x < R || b.x > W - R || b.y < R || b.y > H - R) {
+                    potted = true;
+                }
+                if (potted) {
+                    b.potted = true;
+                    b.vx = 0; b.vy = 0;
+                }
+            }
+        },
+        
+        step: function(dt) {
+            let maxV = 0;
+            for (let b of this.balls) {
+                if (b.potted) continue;
+                let v = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+                if (v > maxV) maxV = v;
+            }
+            let substeps = Math.ceil((maxV * dt) / 6);
+            if (substeps < 1) substeps = 1;
+            if (substeps > 1000) substeps = 1000;
+            let sdt = dt / substeps;
+            for (let s = 0; s < substeps; s++) {
+                this.physics(sdt);
+            }
+            this.draw();
+        },
+        
+        draw: function() {
+            // Rails
+            ctx.fillStyle = '#3a2314';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Felt
+            ctx.fillStyle = '#0b6b3a';
+            ctx.fillRect(20, 20, W, H);
+            
+            // Pockets (visual)
+            ctx.fillStyle = '#000';
+            let pockets = [
+                {x: 0, y: 0}, {x: W, y: 0},
+                {x: 0, y: H}, {x: W, y: H},
+                {x: W/2, y: 0}, {x: W/2, y: H}
+            ];
+            for (let p of pockets) {
+                ctx.beginPath();
+                ctx.arc(20 + p.x, 20 + p.y, 22, 0, Math.PI*2);
+                ctx.fill();
+            }
+            
+            // Aim line
+            if (this.isDragging && this.cueBall && !this.cueBall.potted) {
+                let dx = this.cueBall.x - this.dragCurrent.x;
+                let dy = this.cueBall.y - this.dragCurrent.y;
+                let dist = Math.sqrt(dx*dx + dy*dy);
+                if (dist > 0) {
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(20 + this.dragCurrent.x, 20 + this.dragCurrent.y);
+                    ctx.lineTo(20 + this.cueBall.x, 20 + this.cueBall.y);
+                    ctx.stroke();
+                    
+                    let nx = dx / dist;
+                    let ny = dy / dist;
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+                    ctx.setLineDash([5, 5]);
+                    ctx.beginPath();
+                    ctx.moveTo(20 + this.cueBall.x, 20 + this.cueBall.y);
+                    ctx.lineTo(20 + this.cueBall.x + nx * 300, 20 + this.cueBall.y + ny * 300);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+            }
+            
+            // Balls
+            for (let i = 0; i < this.balls.length; i++) {
+                let b = this.balls[i];
+                if (b.potted) continue;
+                ctx.beginPath();
+                ctx.arc(20 + b.x, 20 + b.y, R, 0, Math.PI*2);
+                ctx.fillStyle = b.color || '#ffffff';
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                
+                // Highlight
+                ctx.beginPath();
+                ctx.arc(20 + b.x - R*0.3, 20 + b.y - R*0.3, R*0.3, 0, Math.PI*2);
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.fill();
+            }
+        },
+        
+        pause: function() {
+            this.running = false;
+        },
+        
+        resume: function() {
+            if (!this.running) {
+                this.running = true;
+                this.lastTime = performance.now();
+                requestAnimationFrame(this.loop.bind(this));
+            }
+        },
+        
+        loop: function(time) {
+            if (!this.running) return;
+            let dt = (time - this.lastTime) / 1000;
+            this.lastTime = time;
+            if (dt > 0.05) dt = 0.05;
+            this.step(dt);
+            requestAnimationFrame(this.loop.bind(this));
+        }
+    };
+    
+    // Mouse interaction
+    function getSimPos(e) {
+        let rect = canvas.getBoundingClientRect();
+        let scaleX = canvas.width / rect.width;
+        let scaleY = canvas.height / rect.height;
+        return {
+            x: (e.clientX - rect.left) * scaleX - 20,
+            y: (e.clientY - rect.top) * scaleY - 20
+        };
+    }
+    
+    let dragStart = {x: 0, y: 0};
+    let dragCurrent = {x: 0, y: 0};
+    let isDragging = false;
+    
+    canvas.addEventListener('mousedown', (e) => {
+        let pos = getSimPos(e);
+        let cue = sim.balls.find(b => b.cue);
+        if (cue && !cue.potted) {
+            let dist = Math.sqrt((pos.x - cue.x)**2 + (pos.y - cue.y)**2);
+            if (dist < sim.R * 3) {
+                isDragging = true;
+                dragStart = {x: cue.x, y: cue.y};
+                dragCurrent = pos;
+                sim.isDragging = true;
+                sim.cueBall = cue;
+                sim.dragCurrent = dragCurrent;
+                sim.draw();
+            }
+        }
+    });
+    
+    window.addEventListener('mousemove', (e) => {
+        if (isDragging) {
+            dragCurrent = getSimPos(e);
+            sim.dragCurrent = dragCurrent;
+            sim.draw();
+        }
+    });
+    
+    window.addEventListener('mouseup', (e) => {
+        if (isDragging) {
+            isDragging = false;
+            sim.isDragging = false;
+            let dx = dragStart.x - dragCurrent.x;
+            let dy = dragStart.y - dragCurrent.y;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist > 5) {
+                let MAX_DRAG = 200;
+                let SCALE = 5;
+                let power = Math.min(dist, MAX_DRAG) * SCALE;
+                let vx = (dx / dist) * power;
+                let vy = (dy / dist) * power;
+                sim.shoot(vx, vy);
+            }
+            sim.draw();
+        }
+    });
+    
+    document.getElementById('reset-btn').addEventListener('click', () => {
+        sim.reset(getDefaultRack());
+        document.getElementById('status').innerText = "Ready to play";
+    });
+    
+    // Init
+    sim.reset(getDefaultRack());
+    sim.resume();
+})();
+</script>
+</body>
+</html>

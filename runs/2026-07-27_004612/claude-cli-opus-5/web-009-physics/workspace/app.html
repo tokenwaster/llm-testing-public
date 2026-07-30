@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bouncing Ball Playground</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --edge: #2b3441;
+    --ink: #e6edf3;
+    --muted: #8b97a6;
+    --accent: #4cc2ff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 24px 16px 32px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  #sim {
+    width: 480px;
+    height: 480px;
+    max-width: 92vw;
+    background: #11161d;
+    border: 1px solid var(--edge);
+    border-radius: 12px;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+    cursor: crosshair;
+    display: block;
+    touch-action: none;
+  }
+  #controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+  }
+  button:hover { background: #1e2733; border-color: #3b4757; }
+  button:active { transform: translateY(1px); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #status {
+    font-size: 13px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+  <h1>Bouncing Balls</h1>
+  <canvas id="sim" width="480" height="480"></canvas>
+  <div id="controls">
+    <button id="drop" type="button">Drop</button>
+    <button id="play" type="button">Pause</button>
+    <button id="clear" type="button">Clear</button>
+  </div>
+  <div id="status">click the canvas to add a ball</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("sim");
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width;
+  var H = canvas.height;
+
+  var GRAVITY = 0.5;       // px per step^2
+  var RESTITUTION = 0.82;  // energy kept per bounce
+  var FRICTION = 0.995;    // mild horizontal drag
+  var MAX_SPEED = 60;      // hard cap so nothing can tunnel
+
+  var balls = [];
+  var running = true;
+  var nextHue = 200;
+
+  function clampNum(v, lo, hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+  }
+
+  function addBall(x, y, vx, vy, r) {
+    var radius = (typeof r === "number" && isFinite(r) && r > 0) ? r : (8 + Math.random() * 12);
+    radius = clampNum(radius, 2, Math.min(W, H) / 2 - 1);
+    var b = {
+      x: clampNum(Number(x) || 0, radius, W - radius),
+      y: clampNum(Number(y) || 0, radius, H - radius),
+      vx: Number(vx) || 0,
+      vy: Number(vy) || 0,
+      r: radius,
+      hue: nextHue
+    };
+    nextHue = (nextHue + 47) % 360;
+    balls.push(b);
+    return b;
+  }
+
+  function clearBalls() {
+    balls.length = 0;
+    draw();
+  }
+
+  // Integrate one ball by a sub-step of length h, then resolve edges.
+  function integrate(b, h) {
+    b.vy += GRAVITY * h;
+    b.vx *= Math.pow(FRICTION, h);
+
+    b.vx = clampNum(b.vx, -MAX_SPEED, MAX_SPEED);
+    b.vy = clampNum(b.vy, -MAX_SPEED, MAX_SPEED);
+
+    b.x += b.vx * h;
+    b.y += b.vy * h;
+
+    // Left / right walls
+    if (b.x - b.r < 0) {
+      b.x = b.r;
+      if (b.vx < 0) b.vx = -b.vx * RESTITUTION;
+    } else if (b.x + b.r > W) {
+      b.x = W - b.r;
+      if (b.vx > 0) b.vx = -b.vx * RESTITUTION;
+    }
+
+    // Ceiling / floor
+    if (b.y - b.r < 0) {
+      b.y = b.r;
+      if (b.vy < 0) b.vy = -b.vy * RESTITUTION;
+    } else if (b.y + b.r > H) {
+      b.y = H - b.r;
+      if (b.vy > 0) b.vy = -b.vy * RESTITUTION;
+    }
+
+    // Absolute safety clamp — a ball can never leave the canvas.
+    b.x = clampNum(b.x, b.r, W - b.r);
+    b.y = clampNum(b.y, b.r, H - b.r);
+  }
+
+  function step(dt) {
+    var total = (typeof dt === "number" && isFinite(dt)) ? dt : 1;
+    if (total <= 0) { draw(); return; }
+
+    // Sub-step so fast balls cannot pass through an edge in one update.
+    var subs = Math.max(1, Math.ceil(total / 0.5));
+    var h = total / subs;
+
+    for (var s = 0; s < subs; s++) {
+      for (var i = 0; i < balls.length; i++) {
+        integrate(balls[i], h);
+      }
+    }
+    draw();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // backdrop
+    ctx.fillStyle = "#11161d";
+    ctx.fillRect(0, 0, W, H);
+
+    // subtle grid
+    ctx.strokeStyle = "rgba(255,255,255,0.04)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var g = 40; g < W; g += 40) {
+      ctx.moveTo(g + 0.5, 0);
+      ctx.lineTo(g + 0.5, H);
+    }
+    for (var k = 40; k < H; k += 40) {
+      ctx.moveTo(0, k + 0.5);
+      ctx.lineTo(W, k + 0.5);
+    }
+    ctx.stroke();
+
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+      var hue = (typeof b.hue === "number") ? b.hue : 200;
+
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fillStyle = "hsl(" + hue + ", 78%, 60%)";
+      ctx.fill();
+
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "hsl(" + hue + ", 85%, 78%)";
+      ctx.stroke();
+
+      // highlight
+      ctx.beginPath();
+      ctx.arc(b.x - b.r * 0.3, b.y - b.r * 0.32, Math.max(1, b.r * 0.26), 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(255,255,255,0.45)";
+      ctx.fill();
+    }
+
+    var status = document.getElementById("status");
+    if (status) {
+      status.textContent = balls.length + (balls.length === 1 ? " ball" : " balls") +
+        " · " + (running ? "running" : "paused");
+    }
+  }
+
+  function loop() {
+    if (running) step(1);
+    requestAnimationFrame(loop);
+  }
+
+  // ---- controls -----------------------------------------------------------
+  document.getElementById("drop").addEventListener("click", function () {
+    var r = 8 + Math.random() * 12;
+    addBall(r + Math.random() * (W - 2 * r), r + Math.random() * 60, (Math.random() - 0.5) * 8, 0, r);
+    draw();
+  });
+
+  var playBtn = document.getElementById("play");
+  playBtn.addEventListener("click", function () {
+    running = !running;
+    playBtn.textContent = running ? "Pause" : "Play";
+    draw();
+  });
+
+  document.getElementById("clear").addEventListener("click", clearBalls);
+
+  canvas.addEventListener("pointerdown", function (ev) {
+    var rect = canvas.getBoundingClientRect();
+    var sx = W / rect.width;
+    var sy = H / rect.height;
+    addBall((ev.clientX - rect.left) * sx, (ev.clientY - rect.top) * sy,
+            (Math.random() - 0.5) * 6, 0);
+    draw();
+  });
+
+  // ---- public API ---------------------------------------------------------
+  window.sim = {
+    w: W,
+    h: H,
+    canvas: canvas,
+    balls: function () { return balls; },
+    addBall: function (x, y, vx, vy, r) { return addBall(x, y, vx, vy, r); },
+    clear: clearBalls,
+    step: function (dt) { step(dt); },
+    draw: draw,
+    get running() { return running; },
+    set running(v) {
+      running = !!v;
+      playBtn.textContent = running ? "Pause" : "Play";
+    }
+  };
+
+  addBall(W * 0.35, 60, 3, 0, 14);
+  addBall(W * 0.65, 100, -2, 0, 10);
+  draw();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

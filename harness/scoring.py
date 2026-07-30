@@ -1,19 +1,3 @@
-"""Scoring lanes:
-
-  pytest — copy the task's checker.py into the workspace as test_checker.py,
-           run pytest, score = passed / (passed + failed). Syntax/collection
-           errors score 0.
-  answer — extract the final `ANSWER: ...` line, match against meta
-           (exact | numeric | regex).
-  response — save the model's RAW reply as response.txt in the workspace, then
-           run the task's checker.py against it (same pytest machinery as the
-           code lane, but no code workspace and no forced format instruction).
-           For constraint/format, structured-extraction, grounded-QA and
-           prompt-based tool-call tasks whose whole reply must be inspected.
-  manual — mark pending (legacy lane; the review UI was retired).
-
-Every score record carries `scored_by` so methodology stays auditable.
-"""
 
 import os
 import re
@@ -33,16 +17,18 @@ CONTROL_TOKEN_RE = re.compile(r"<\|[^|>]*\|>|</?s>|<\|?endoftext\|?>")
 PYTEST_PASSED_RE = re.compile(r"(\d+) passed")
 PYTEST_FAILED_RE = re.compile(r"(\d+) failed")
 PYTEST_ERROR_RE = re.compile(r"(\d+) error")
+PYTEST_COLLECT_RE = re.compile(r"ERROR collecting|errors? during collection")
+SUBMISSION_BROKE_RE = re.compile(
+    r"^E\s+((?:Syntax|Indentation|Tab|Import|ModuleNotFound|Name|Attribute|Type|Value)"
+    r"Error.*)$", re.M)
 
 
 def extract_code_block(text: str) -> str | None:
-    """Last fenced python block wins (models often show sketches first)."""
     blocks = CODE_BLOCK_RE.findall(text)
     return blocks[-1].strip() + "\n" if blocks else None
 
 
 def extract_html_block(text: str) -> str | None:
-    """Last fenced html block wins; falls back to a raw <!doctype/<html document."""
     blocks = HTML_BLOCK_RE.findall(text)
     if blocks:
         return blocks[-1].strip() + "\n"
@@ -59,7 +45,6 @@ def extract_answer(text: str) -> str | None:
 
 
 def run_pytest_checker(task: Task, workspace: Path) -> dict:
-    """Run the task's checker against the workspace. Returns a score record."""
     checker = task.checker
     if checker is None:
         return _record(0.0, "checker", "missing checker.py")
@@ -91,6 +76,12 @@ def run_pytest_checker(task: Task, workspace: Path) -> dict:
     passed = _first_int(PYTEST_PASSED_RE, out)
     failed = _first_int(PYTEST_FAILED_RE, out) + _first_int(PYTEST_ERROR_RE, out)
     total = passed + failed
+    if passed == 0 and PYTEST_COLLECT_RE.search(out):
+        why = SUBMISSION_BROKE_RE.search(out)
+        reason = why.group(1).strip() if why else "the test module could not be imported"
+        return _record(0.0, "checker",
+                       f"submission does not import — no test ran ({reason})",
+                       detail=_tail(out))
     if total == 0:
         return _record(0.0, "checker", f"no tests ran (exit {proc.returncode})",
                        detail=_tail(out))
@@ -135,8 +126,6 @@ def score_answer(task: Task, response_text: str) -> dict:
 
 
 def _answer_present(expected: str, match_type: str, got: str) -> bool:
-    """Expected value present in the ANSWER line despite a failed strict match.
-    ANSWER line only — a value merely mentioned in reasoning isn't flagged."""
     clean = _norm(CONTROL_TOKEN_RE.sub("", got))
     if match_type == "numeric":
         try:

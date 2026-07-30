@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  #app {
+    min-width: 600px;
+    min-height: 400px;
+    padding: 10px;
+    font-family: sans-serif;
+  }
+  #grid {
+    border-collapse: collapse;
+    table-layout: fixed;
+    width: 100%;
+  }
+  #grid th, #grid td {
+    border: 1px solid #ccc;
+    padding: 0;
+  }
+  .corner {
+    background: #eee;
+    width: 40px;
+    height: 30px;
+  }
+  .col-header {
+    background: #eee;
+    height: 30px;
+    text-align: center;
+    font-weight: bold;
+  }
+  .row-header {
+    background: #eee;
+    width: 40px;
+    text-align: center;
+    font-weight: bold;
+  }
+  .cell-input {
+    width: 100%;
+    height: 100%;
+    min-height: 30px;
+    box-sizing: border-box;
+    border: none;
+    outline: none;
+    padding: 2px;
+    font-family: monospace;
+    font-size: 14px;
+    background: white;
+    text-align: right;
+  }
+  .cell-input:focus {
+    background: #ffffee;
+    outline: 2px solid blue;
+  }
+  #export {
+    margin-top: 10px;
+    padding: 5px 10px;
+  }
+  #csv {
+    width: 100%;
+    height: 150px;
+    margin-top: 10px;
+    font-family: monospace;
+    box-sizing: border-box;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <table id="grid"></table>
+  <button id="export">Export CSV</button>
+  <textarea id="csv" rows="10" cols="80"></textarea>
+</div>
+<script>
+const ROWS = 10, COLS = 10;
+let rawValues = Array(ROWS).fill().map(() => Array(COLS).fill(''));
+let displayValues = Array(ROWS).fill().map(() => Array(COLS).fill(''));
+let activeCell = null;
+const inputs = {};
+
+function initGrid() {
+  const table = document.getElementById('grid');
+  // thead
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  const corner = document.createElement('th');
+  corner.className = 'corner';
+  headRow.appendChild(corner);
+  for (let c = 0; c < COLS; c++) {
+    const th = document.createElement('th');
+    th.className = 'col-header';
+    th.textContent = String.fromCharCode(65 + c);
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  // tbody
+  const tbody = document.createElement('tbody');
+  for (let r = 0; r < ROWS; r++) {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th');
+    th.className = 'row-header';
+    th.textContent = r + 1;
+    tr.appendChild(th);
+    for (let c = 0; c < COLS; c++) {
+      const td = document.createElement('td');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'cell-input';
+      const cellId = String.fromCharCode(65 + c) + (r + 1);
+      input.id = 'cell-' + cellId;
+      input.dataset.col = c;
+      input.dataset.row = r;
+      inputs[cellId] = input;
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+
+  document.querySelectorAll('.cell-input').forEach(input => {
+    input.addEventListener('focus', onFocus);
+    input.addEventListener('blur', onBlur);
+    input.addEventListener('keydown', onKeyDown);
+  });
+  document.getElementById('export').addEventListener('click', exportCSV);
+}
+
+function onFocus(e) {
+  const input = e.target;
+  const r = parseInt(input.dataset.row);
+  const c = parseInt(input.dataset.col);
+  activeCell = {r, c};
+  input.value = rawValues[r][c];
+}
+
+function onBlur(e) {
+  const input = e.target;
+  const r = parseInt(input.dataset.row);
+  const c = parseInt(input.dataset.col);
+  const newRaw = input.value;
+  if (newRaw !== rawValues[r][c]) {
+    rawValues[r][c] = newRaw;
+    recompute();
+  }
+  activeCell = null;
+}
+
+function onKeyDown(e) {
+  if (e.key === 'Enter') {
+    e.target.blur();
+  }
+}
+
+function recompute() {
+  // 1. Build dependency graph
+  const isFormula = Array(ROWS).fill().map(() => Array(COLS).fill(false));
+  const formulaTokens = Array(ROWS).fill().map(() => Array(COLS).fill(null));
+  const deps = Array(ROWS).fill().map(() => Array(COLS).fill().map(() => []));
+  const dependents = Array(ROWS).fill().map(() => Array(COLS).fill().map(() => []));
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const raw = rawValues[r][c];
+      if (raw.startsWith('=')) {
+        isFormula[r][c] = true;
+        try {
+          const tokens = tokenize(raw.substring(1));
+          formulaTokens[r][c] = tokens;
+          for (const token of tokens) {
+            if (token.type === 'cell') {
+              const [dr, dc] = parseCellRef(token.value);
+              deps[r][c].push({r: dr, c: dc});
+              dependents[dr][dc].push({r, c});
+            }
+          }
+        } catch (e) {
+          formulaTokens[r][c] = null;
+        }
+      }
+    }
+  }
+
+  // 2. Detect cycles
+  const cyclic = Array(ROWS).fill().map(() => Array(COLS).fill(false));
+  const visited = Array(ROWS).fill().map(() => Array(COLS).fill(0));
+  const stack = [];
+
+  function dfs(r, c) {
+    if (visited[r][c] === 2) return;
+    if (visited[r][c] === 1) {
+      const idx = stack.findIndex(cell => cell.r === r && cell.c === c);
+      for (let i = idx; i < stack.length; i++) {
+        cyclic[stack[i].r][stack[i].c] = true;
+      }
+      return;
+    }
+    visited[r][c] = 1;
+    stack.push({r, c});
+    if (isFormula[r][c]) {
+      for (const dep of deps[r][c]) {
+        dfs(dep.r, dep.c);
+      }
+    }
+    stack.pop();
+    visited[r][c] = 2;
+  }
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (visited[r][c] === 0) dfs(r, c);
+    }
+  }
+
+  // 3. Topological sort (Kahn) for non-cyclic formula cells
+  const indegree = Array(ROWS).fill().map(() => Array(COLS).fill(0));
+  const formulaCells = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (isFormula[r][c] && !cyclic[r][c]) {
+        formulaCells.push({r, c});
+        for (const dep of deps[r][c]) {
+          if (isFormula[dep.r][dep.c] && !cyclic[dep.r][dep.c]) {
+            indegree[r][c]++;
+          }
+        }
+      }
+    }
+  }
+
+  const queue = formulaCells.filter(cell => indegree[cell.r][cell.c] === 0);
+  const topoOrder = [];
+  while (queue.length) {
+    const cell = queue.shift();
+    topoOrder.push(cell);
+    for (const dependent of dependents[cell.r][cell.c]) {
+      if (isFormula[dependent.r][dependent.c] && !cyclic[dependent.r][dependent.c]) {
+        indegree[dependent.r][dependent.c]--;
+        if (indegree[dependent.r][dependent.c] === 0) {
+          queue.push(dependent);
+        }
+      }
+    }
+  }
+
+  // 4. Evaluate
+  const numericValue = Array(ROWS).fill().map(() => Array(COLS).fill(NaN));
+  const newDisplayValues = Array(ROWS).fill().map(() => Array(COLS).fill(''));
+
+  // Plain text and cyclic cells
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (cyclic[r][c]) {
+        newDisplayValues[r][c] = '#CYCLE';
+        numericValue[r][c] = NaN;
+      } else if (!isFormula[r][c]) {
+        const raw = rawValues[r][c];
+        newDisplayValues[r][c] = raw;
+        const num = parseFloat(raw);
+        numericValue[r][c] = isNaN(num) ? 0 : num;
+      }
+    }
+  }
+
+  // Formula cells in topo order
+  for (const cell of topoOrder) {
+    const tokens = formulaTokens[cell.r][cell.c];
+    if (!tokens) {
+      newDisplayValues[cell.r][cell.c] = '#ERR';
+      numericValue[cell.r][cell.c] = NaN;
+      continue;
+    }
+    try {
+      const val = evaluateTokens(tokens, numericValue);
+      numericValue[cell.r][cell.c] = val;
+      newDisplayValues[cell.r][cell.c] = Number.isInteger(val) ? val.toString() : val.toString();
+    } catch (e) {
+      newDisplayValues[cell.r][cell.c] = '#ERR';
+      numericValue[cell.r][cell.c] = NaN;
+    }
+  }
+
+  displayValues = newDisplayValues;
+  updateUI();
+}
+
+function updateUI() {
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const cellId = String.fromCharCode(65 + c) + (r + 1);
+      const input = inputs[cellId];
+      if (activeCell && activeCell.r === r && activeCell.c === c) continue;
+      input.value = displayValues[r][c];
+    }
+  }
+}
+
+function tokenize(str) {
+  const tokens = [];
+  let i = 0;
+  while (i < str.length) {
+    const ch = str[i];
+    if (/\s/.test(ch)) { i++; continue; }
+    if (ch >= '0' && ch <= '9' || ch === '.') {
+      let start = i;
+      let hasDot = false;
+      while (i < str.length && (str[i] >= '0' && str[i] <= '9' || str[i] === '.')) {
+        if (str[i] === '.') {
+          if (hasDot) throw new Error('Invalid number');
+          hasDot = true;
+        }
+        i++;
+      }
+      const numStr = str.substring(start, i);
+      const num = parseFloat(numStr);
+      if (isNaN(num)) throw new Error('Invalid number');
+      tokens.push({type: 'number', value: num});
+    } else if (ch >= 'A' && ch <= 'J' || ch >= 'a' && ch <= 'j') {
+      const col = ch.toUpperCase();
+      i++;
+      let rowStr = '';
+      while (i < str.length && str[i] >= '0' && str[i] <= '9') {
+        rowStr += str[i];
+        i++;
+      }
+      if (rowStr === '') throw new Error('Invalid cell reference');
+      const row = parseInt(rowStr, 10);
+      if (row < 1 || row > 10) throw new Error('Invalid cell reference');
+      tokens.push({type: 'cell', value: col + rowStr});
+    } else if (ch === '+' || ch === '-' || ch === '*' || ch === '/' || ch === '(' || ch === ')') {
+      tokens.push({type: 'operator', value: ch});
+      i++;
+    } else {
+      throw new Error('Invalid character');
+    }
+  }
+  return tokens;
+}
+
+function parseCellRef(ref) {
+  const col = ref.charCodeAt(0) - 65;
+  const row = parseInt(ref.substring(1), 10) - 1;
+  return [row, col];
+}
+
+function evaluateTokens(tokens, numericValue) {
+  let pos = 0;
+  function parseExpr() {
+    let val = parseTerm();
+    while (pos < tokens.length && (tokens[pos].value === '+' || tokens[pos].value === '-')) {
+      const op = tokens[pos].value;
+      pos++;
+      const right = parseTerm();
+      if (op === '+') val += right; else val -= right;
+    }
+    return val;
+  }
+  function parseTerm() {
+    let val = parseFactor();
+    while (pos < tokens.length && (tokens[pos].value === '*' || tokens[pos].value === '/')) {
+      const op = tokens[pos].value;
+      pos++;
+      const right = parseFactor();
+      if (op === '*') val *= right; else {
+        if (right === 0) throw new Error('Division by zero');
+        val /= right;
+      }
+    }
+    return val;
+  }
+  function parseFactor() {
+    if (pos >= tokens.length) throw new Error('Unexpected end');
+    const token = tokens[pos];
+    if (token.type === 'number') {
+      pos++;
+      return token.value;
+    } else if (token.type === 'cell') {
+      pos++;
+      const [r, c] = parseCellRef(token.value);
+      const nv = numericValue[r][c];
+      if (isNaN(nv)) throw new Error('Reference error');
+      return nv;
+    } else if (token.value === '(') {
+      pos++;
+      const val = parseExpr();
+      if (pos >= tokens.length || tokens[pos].value !== ')') throw new Error('Missing )');
+      pos++;
+      return val;
+    } else if (token.value === '+' || token.value === '-') {
+      const op = token.value;
+      pos++;
+      const val = parseFactor();
+      return op === '+' ? val : -val;
+    } else {
+      throw new Error('Unexpected token');
+    }
+  }
+  const result = parseExpr();
+  if (pos !== tokens.length) throw new Error('Extra tokens');
+  return result;
+}
+
+function exportCSV() {
+  let csv = '';
+  for (let r = 0; r < ROWS; r++) {
+    const row = [];
+    for (let c = 0; c < COLS; c++) {
+      row.push(displayValues[r][c]);
+    }
+    csv += row.join(',') + '\n';
+  }
+  document.getElementById('csv').value = csv.trim();
+}
+
+window.sheet = {
+  set(id, text) {
+    const [r, c] = parseCellRef(id.toUpperCase());
+    if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
+    rawValues[r][c] = text;
+    recompute();
+  },
+  get(id) {
+    const [r, c] = parseCellRef(id.toUpperCase());
+    if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return '';
+    return displayValues[r][c];
+  },
+  raw(id) {
+    const [r, c] = parseCellRef(id.toUpperCase());
+    if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return '';
+    return rawValues[r][c];
+  }
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  initGrid();
+  recompute();
+});
+</script>
+</body>
+</html>

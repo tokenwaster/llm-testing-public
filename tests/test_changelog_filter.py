@@ -1,8 +1,3 @@
-"""The info page shows one dataset's changelog. A live v0.6 report must not
-carry v0.5 / v0.4 history — that lives in the archived reports and is noise for
-the end user. `_changelog_for_version` keeps the preamble + Unreleased + the
-current major.minor sections only.
-"""
 import re
 
 from harness.report import _changelog_for_version

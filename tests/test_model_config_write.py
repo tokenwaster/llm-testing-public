@@ -1,11 +1,3 @@
-"""Writing a model yaml from the operator page must not destroy what is around it.
-
-Every configuration bug this suite has shipped was a value that did not reach the
-provider it was written for, so the write path is worth testing directly: the
-comments in a model yaml are the record of WHY a value is what it is (max_tokens
-carries "uniform thinking budget across all local models (fairness)"), and a save
-that silently drops them loses the reason while keeping the number.
-"""
 import textwrap
 
 import yaml
@@ -51,8 +43,6 @@ def test_other_lines_are_untouched(tmp_path):
 
 
 def test_a_hash_inside_a_value_is_not_treated_as_a_comment(tmp_path):
-    """YAML only starts a comment after whitespace, and sampling_source is a URL —
-    a fragment must not be mistaken for one and re-attached to the next value."""
     p = _write(tmp_path)
     set_yaml_key(p, "sampling_source", "https://example.invalid/docs#sampling")
     set_yaml_key(p, "sampling_source", "https://example.invalid/other")
@@ -61,7 +51,6 @@ def test_a_hash_inside_a_value_is_not_treated_as_a_comment(tmp_path):
 
 
 def test_an_inline_mapping_round_trips(tmp_path):
-    """sampling and sampling_profiles are written as one inline mapping line."""
     p = _write(tmp_path)
     set_yaml_key(p, "sampling", "{ top_p: 0.95, top_k: 20 }")
     set_yaml_key(p, "sampling_profiles",
@@ -73,8 +62,6 @@ def test_an_inline_mapping_round_trips(tmp_path):
 
 
 def test_clearing_removes_the_key_entirely(tmp_path):
-    """A bare `key:` parses to None, same as absent — but "not sent at all" is the
-    meaning that matters, so the line goes."""
     p = _write(tmp_path)
     set_yaml_key(p, "sampling", "{ top_p: 0.9 }")
     set_yaml_key(p, "sampling", "")

@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maze Explorer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, sans-serif;
+    background: #1a1a2e;
+    color: #eaeaea;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+    gap: 16px;
+  }
+  h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: 0.5px; }
+  #ui {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .stat { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .stat-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; color: #888; }
+  .stat-value { font-size: 2rem; font-variant-numeric: tabular-nums; font-weight: 700; color: #00d4aa; }
+  #reset {
+    background: #00d4aa;
+    color: #1a1a2e;
+    border: none;
+    padding: 10px 24px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.05s;
+  }
+  #reset:hover { background: #00e8bb; }
+  #reset:active { transform: scale(0.98); }
+  #maze {
+    background: #0f0f1a;
+    border-radius: 8px;
+    box-shadow: 0 0 0 2px #333, 0 8px 32px rgba(0,0,0,0.5);
+    display: block;
+  }
+  canvas { display: block; border-radius: 8px; }
+  @media (max-width: 500px) {
+    #maze { transform: scale(0.85); transform-origin: top center; }
+  }
+</style>
+</head>
+<body>
+<h1>Maze Explorer</h1>
+<div id="ui">
+  <div class="stat"><span class="stat-label">Completed</span><span id="completed" class="stat-value">0</span></div>
+  <div class="stat"><span class="stat-label">Timer</span><span id="timer" class="stat-value">0</span></div>
+  <button id="reset">Reset</button>
+</div>
+<div id="maze"><canvas id="canvas"></canvas></div>
+
+<script>
+// ============================================================
+// Seeded Random Number Generator (Mulberry32)
+// ============================================================
+function createRNG(seed) {
+  let t = seed >>> 0;
+  return function() {
+    t += 0x6D2B79F5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ============================================================
+// Maze Generation (Recursive Backtracker - Perfect Maze)
+// ============================================================
+function generateMaze(rows, cols, rng) {
+  // walls[r][c] = {n, e, s, w} booleans (true = wall exists)
+  const walls = Array.from({length: rows}, () =>
+    Array.from({length: cols}, () => ({n: true, e: true, s: true, w: true}))
+  );
+  const visited = Array.from({length: rows}, () => Array(cols).fill(false));
+  const stack = [{r: 0, c: 0}];
+  visited[0][0] = true;
+
+  const dirs = [
+    {dr: -1, dc: 0, wall: 'n', opp: 's'},
+    {dr: 0, dc: 1, wall: 'e', opp: 'w'},
+    {dr: 1, dc: 0, wall: 's', opp: 'n'},
+    {dr: 0, dc: -1, wall: 'w', opp: 'e'}
+  ];
+
+  while (stack.length) {
+    const {r, c} = stack[stack.length - 1];
+    const neighbors = [];
+    for (const d of dirs) {
+      const nr = r + d.dr, nc = c + d.dc;
+      if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) {
+        neighbors.push(d);
+      }
+    }
+    if (neighbors.length) {
+      const idx = Math.floor(rng() * neighbors.length);
+      const d = neighbors[idx];
+      const nr = r + d.dr, nc = c + d.dc;
+      walls[r][c][d.wall] = false;
+      walls[nr][nc][d.opp] = false;
+      visited[nr][nc] = true;
+      stack.push({r: nr, c: nc});
+    } else {
+      stack.pop();
+    }
+  }
+  return walls;
+}
+
+// ============================================================
+// Bot Class - Tremaux/DFS Exploration
+// ============================================================
+class Bot {
+  constructor(id, spawnR, spawnC, exitR, exitC, walls, rows, cols, rng) {
+    this.id = id;
+    this.spawnR = spawnR;
+    this.spawnC = spawnC;
+    this.exitR = exitR;
+    this.exitC = exitC;
+    this.walls = walls;
+    this.rows = rows;
+    this.cols = cols;
+    this.rng = rng;
+
+    // Position (can be fractional for smooth movement)
+    this.r = spawnR;
+    this.c = spawnC;
+    this.targetR = spawnR;
+    this.targetC = spawnC;
+    this.moving = false;
+    this.moveProgress = 0; // 0 to 1
+
+    // Exploration memory
+    this.visited = new Set(); // "r,c" strings
+    this.deadEnds = new Set(); // cells marked as dead ends
+    this.path = [{r: spawnR, c: spawnC}]; // every cell entered in order
+    this.finishTick = null;
+
+    // Tremaux state: for each cell, which directions have been tried
+    this.tried = new Map(); // "r,c" -> Set of direction indices (0=N,1=E,2=S,3=W)
+    // Parent pointers for backtracking
+    this.parent = new Map(); // "r,c" -> {r, c} parent cell
+
+    // Direction order preference (seeded per bot)
+    this.dirOrder = [0, 1, 2, 3].sort(() => rng() - 0.5);
+
+    // Initialize at spawn
+    this.visited.add(`${spawnR},${spawnC}`);
+    this.tried.set(`${spawnR},${spawnC}`, new Set());
+    this.parent.set(`${spawnR},${spawnC}`, null);
+  }
+
+  // Check if at exit
+  atExit() {
+    return this.r === this.exitR && this.c === this.exitC;
+  }
+
+  // Get untried directions from current cell
+  getUntriedDirections(r, c) {
+    const tried = this.tried.get(`${r},${c}`) || new Set();
+    const untried = [];
+    const dirs = [
+      {dr: -1, dc: 0, wall: 'n', idx: 0},
+      {dr: 0, dc: 1, wall: 'e', idx: 1},
+      {dr: 1, dc: 0, wall: 's', idx: 2},
+      {dr: 0, dc: -1, wall: 'w', idx: 3}
+    ];
+    for (const d of this.dirOrder.map(i => dirs[i])) {
+      if (!tried.has(d.idx) && !this.walls[r][c][d.wall]) {
+        const nr = r + d.dr, nc = c + d.dc;
+        if (nr >= 0 && nr < this.rows && nc >= 0 && nc < this.cols) {
+          untried.push(d);
+        }
+      }
+    }
+    return untried;
+  }
+
+  // Mark a direction as tried
+  markTried(r, c, dirIdx) {
+    if (!this.tried.has(`${r},${c}`)) {
+      this.tried.set(`${r},${c}`, new Set());
+    }
+    this.tried.get(`${r},${c}`).add(dirIdx);
+  }
+
+  // Check if a cell is fully explored (all passages tried or lead to dead ends)
+  isFullyExplored(r, c) {
+    const dirs = [
+      {dr: -1, dc: 0, wall: 'n', idx: 0},
+      {dr: 0, dc: 1, wall: 'e', idx: 1},
+      {dr: 1, dc: 0, wall: 's', idx: 2},
+      {dr: 0, dc: -1, wall: 'w', idx: 3}
+    ];
+    for (const d of dirs) {
+      if (!this.walls[r][c][d.wall]) {
+        const nr = r + d.dr, nc = c + d.dc;
+        if (nr >= 0 && nr < this.rows && nc >= 0 && nc < this.cols) {
+          const tried = this.tried.get(`${r},${c}`) || new Set();
+          if (!tried.has(d.idx)) return false;
+          // If tried but leads to unexplored non-dead-end, not fully explored
+          if (!this.deadEnds.has(`${nr},${nc}`) && !this.visited.has(`${nr},${nc}`)) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  // Perform one tick of exploration logic
+  // Returns true if started moving to a new cell
+  step() {
+    if (this.finishTick !== null) return false; // Already finished
+    if (this.moving) return false; // Currently animating
+
+    const cr = Math.round(this.r), cc = Math.round(this.c);
+
+    // Check if at exit
+    if (cr === this.exitR && cc === this.exitC) {
+      this.finishTick = game.elapsed + 1; // Will be set by game.tick after increment
+      return false;
+    }
+
+    // Try to find untried direction from current cell
+    const untried = this.getUntriedDirections(cr, cc);
+
+    if (untried.length > 0) {
+      // Pick first untried direction (in preferred order)
+      const d = untried[0];
+      this.markTried(cr, cc, d.idx);
+      const nr = cr + d.dr, nc = cc + d.dc;
+
+      // Move to new cell
+      this.targetR = nr;
+      this.targetC = nc;
+      this.moving = true;
+      this.moveProgress = 0;
+
+      // Update exploration state
+      this.visited.add(`${nr},${nc}`);
+      this.path.push({r: nr, c: nc});
+      if (!this.tried.has(`${nr},${nc}`)) {
+        this.tried.set(`${nr},${nc}`, new Set());
+      }
+      // Mark reverse direction as tried in new cell
+      const oppIdx = (d.idx + 2) % 4;
+      this.markTried(nr, nc, oppIdx);
+      this.parent.set(`${nr},${nc}`, {r: cr, c: cc});
+
+      return true;
+    }
+
+    // No untried directions - backtrack
+    const parent = this.parent.get(`${cr},${cc}`);
+    if (parent) {
+      // Mark current cell as dead end if fully explored
+      if (this.isFullyExplored(cr, cc)) {
+        this.deadEnds.add(`${cr},${cc}`);
+      }
+
+      // Move back to parent
+      this.targetR = parent.r;
+      this.targetC = parent.c;
+      this.moving = true;
+      this.moveProgress = 0;
+      return true;
+    }
+
+    // No parent (back at start) and no moves - stuck (shouldn't happen in perfect maze)
+    return false;
+  }
+
+  // Update animation progress
+  updateAnimation(dt) {
+    if (!this.moving) return;
+    this.moveProgress += dt;
+    if (this.moveProgress >= 1) {
+      this.moveProgress = 1;
+      this.moving = false;
+      this.r = this.targetR;
+      this.c = this.targetC;
+    } else {
+      this.r = this.r + (this.targetR - this.r) * this.moveProgress;
+      this.c = this.c + (this.targetC - this.c) * this.moveProgress;
+    }
+  }
+
+  // Get data for API
+  getApiData() {
+    return {
+      path: this.path.map(p => ({r: p.r, c: p.c})),
+      deadEnds: Array.from(this.deadEnds).map(s => {
+        const [r, c] = s.split(',').map(Number);
+        return {r, c};
+      }),
+      finishTick: this.finishTick
+    };
+  }
+}
+
+// ============================================================
+// Game State
+// ============================================================
+const GAME_CONFIG = {
+  rows: 25,
+  cols: 25,
+  numBots: 24,
+  maxTicks: 20000,
+  cellSize: 16, // Will be calculated based on canvas size
+  animationSpeed: 0.15 // Progress per tick (0-1)
+};
+
+let game = {
+  elapsed: 0,
+  size: {rows: GAME_CONFIG.rows, cols: GAME_CONFIG.cols},
+  spawn: {r: 0, c: 0},
+  exit: {r: GAME_CONFIG.rows - 1, c: GAME_CONFIG.cols - 1},
+  walls: null,
+  bots: [],
+  running: true,
+  seed: null,
+  lastTimestamp: 0,
+  animationFrame: null
+};
+
+// Canvas setup
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const MAZE_DISPLAY_SIZE = 480; // Internal maze size in pixels
+let cellSize = MAZE_DISPLAY_SIZE / GAME_CONFIG.cols;
+
+// Colors for 24 bots (distinct hues)
+const BOT_COLORS = Array.from({length: 24}, (_, i) => {
+  const hue = (i * 15) % 360; // Spread around color wheel
+  return `hsl(${hue}, 85%, 55%)`;
+});
+
+// ============================================================
+// Initialization
+// ============================================================
+function initGame(seed = null) {
+  // Use provided seed or random
+  const rngSeed = seed !== null && seed !== undefined ? seed : (Date.now() & 0xfffffff);
+  const rng = createRNG(rngSeed);
+
+  game.seed = rngSeed;
+  game.elapsed = 0;
+  game.running = true;
+  game.size = {rows: GAME_CONFIG.rows, cols: GAME_CONFIG.cols};
+  game.spawn = {r: 0, c: 0};
+  game.exit = {r: GAME_CONFIG.rows - 1, c: GAME_CONFIG.cols - 1};
+
+  // Generate maze
+  game.walls = generateMaze(GAME_CONFIG.rows, GAME_CONFIG.cols, rng);
+
+  // Create bots with individual RNGs (derived from main seed)
+  game.bots = [];
+  for (let i = 0; i < GAME_CONFIG.numBots; i++) {
+    const botRng = createRNG((rngSeed * 10007 + i * 1009) >>> 0);
+    game.bots.push(new Bot(
+      i, game.spawn.r, game.spawn.c,
+      game.exit.r, game.exit.c,
+      game.walls, GAME_CONFIG.rows, GAME_CONFIG.cols,
+      botRng
+    ));
+  }
+
+  // Resize canvas
+  cellSize = MAZE_DISPLAY_SIZE / GAME_CONFIG.cols;
+  canvas.width = MAZE_DISPLAY_SIZE;
+  canvas.height = MAZE_DISPLAY_SIZE;
+  canvas.style.width = MAZE_DISPLAY_SIZE + 'px';
+  canvas.style.height = MAZE_DISPLAY_SIZE + 'px';
+
+  updateUI();
+  render();
+}
+
+// ============================================================
+// Game Tick
+// ============================================================
+function gameTick(n = 1) {
+  if (!game.running) return;
+
+  for (let i = 0; i < n; i++) {
+    // Check if all bots finished
+    const allFinished = game.bots.every(b => b.finishTick !== null);
+    if (allFinished) {
+      game.running = false;
+      break;
+    }
+
+    // Step each bot
+    let anyMoved = false;
+    for (const bot of game.bots) {
+      if (bot.finishTick === null) {
+        const moved = bot.step();
+        if (moved) anyMoved = true;
+        // Check if arrived at exit this tick
+        if (bot.atExit() && bot.finishTick === null) {
+          bot.finishTick = game.elapsed + 1;
+        }
+      }
+    }
+
+    game.elapsed++;
+
+    // Safety limit
+    if (game.elapsed >= GAME_CONFIG.maxTicks) {
+      game.running = false;
+      // Force finish any remaining bots
+      for (const bot of game.bots) {
+        if (bot.finishTick === null) bot.finishTick = game.elapsed;
+      }
+      break;
+    }
+  }
+
+  updateUI();
+}
+
+// ============================================================
+// Animation Loop (for smooth rendering)
+// ============================================================
+function animate(timestamp) {
+  if (!game.lastTimestamp) game.lastTimestamp = timestamp;
+  const dt = (timestamp - game.lastTimestamp) / 1000; // seconds
+  game.lastTimestamp = timestamp;
+
+  // Update bot animation positions
+  // We animate at 60fps, but game ticks are discrete
+  // Bots move one cell per tick, so animation completes in 1 tick duration
+  const animSpeed = GAME_CONFIG.animationSpeed; // fraction per frame at 60fps ~ 0.15
+  for (const bot of game.bots) {
+    bot.updateAnimation(animSpeed);
+  }
+
+  render();
+  game.animationFrame = requestAnimationFrame(animate);
+}
+
+// ============================================================
+// Rendering
+// ============================================================
+function render() {
+  const {rows, cols} = game.size;
+  const cw = canvas.width, ch = canvas.height;
+
+  ctx.fillStyle = '#0f0f1a';
+  ctx.fillRect(0, 0, cw, ch);
+
+  // Draw maze walls
+  ctx.strokeStyle = '#4a4a6a';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'square';
+
+  ctx.beginPath();
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = c * cellSize;
+      const y = r * cellSize;
+      const w = cellSize;
+      const cell = game.walls[r][c];
+      if (cell.n) { ctx.moveTo(x, y); ctx.lineTo(x + w, y); }
+      if (cell.e) { ctx.moveTo(x + w, y); ctx.lineTo(x + w, y + w); }
+      if (cell.s) { ctx.moveTo(x + w, y + w); ctx.lineTo(x, y + w); }
+      if (cell.w) { ctx.moveTo(x, y + w); ctx.lineTo(x, y); }
+    }
+  }
+  ctx.stroke();
+
+  // Draw exit marker
+  ctx.fillStyle = '#ff6b6b';
+  const ex = game.exit.c * cellSize + cellSize / 2;
+  const ey = game.exit.r * cellSize + cellSize / 2;
+  ctx.beginPath();
+  ctx.arc(ex, ey, cellSize * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+  // Exit label
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('EXIT', ex, ey);
+
+  // Draw bots
+  for (let i = 0; i < game.bots.length; i++) {
+    const bot = game.bots[i];
+    if (bot.finishTick !== null) continue; // Don't draw finished bots (they stay at exit)
+
+    const x = bot.c * cellSize + cellSize / 2;
+    const y = bot.r * cellSize + cellSize / 2;
+    const radius = Math.max(3, cellSize * 0.28);
+
+    // Bot body
+    ctx.fillStyle = BOT_COLORS[i];
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Bot border
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Bot ID
+    ctx.fillStyle = '#1a1a2e';
+    ctx.font = `bold ${Math.max(7, radius * 0.7)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(i + 1), x, y + 1);
+  }
+}
+
+// ============================================================
+// UI Updates
+// ============================================================
+function updateUI() {
+  const completed = game.bots.filter(b => b.finishTick !== null).length;
+  document.getElementById('completed').textContent = completed;
+  document.getElementById('timer').textContent = game.elapsed;
+}
+
+// ============================================================
+// Public API
+// ============================================================
+window.game = {
+  tick(n) {
+    if (typeof n !== 'number' || n < 1) n = 1;
+    gameTick(Math.floor(n));
+  },
+  reset(seed) {
+    if (game.animationFrame) cancelAnimationFrame(game.animationFrame);
+    initGame(seed);
+    game.lastTimestamp = 0;
+    game.animationFrame = requestAnimationFrame(animate);
+  },
+  get elapsed() { return game.elapsed; },
+  get size() { return game.size; },
+  get spawn() { return game.spawn; },
+  get exit() { return game.exit; },
+  walls(r, c) {
+    if (r < 0 || r >= GAME_CONFIG.rows || c < 0 || c >= GAME_CONFIG.cols) {
+      return {n: true, e: true, s: true, w: true};
+    }
+    const w = game.walls[r][c];
+    return {n: w.n, e: w.e, s: w.s, w: w.w};
+  },
+  get bots() {
+    return game.bots.map(b => b.getApiData());
+  }
+};
+
+// ============================================================
+// Event Listeners
+// ============================================================
+document.getElementById('reset').addEventListener('click', () => {
+  window.game.reset();
+});
+
+// ============================================================
+// Start
+// ============================================================
+initGame();
+game.animationFrame = requestAnimationFrame(animate);
+</script>
+</body>
+</html>

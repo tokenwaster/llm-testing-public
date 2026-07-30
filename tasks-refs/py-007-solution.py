@@ -1,9 +1,6 @@
-"""Reference: recursive backtracking regex engine (v0.5 py-007)."""
 
 
 def _parse(pattern: str) -> list:
-    """-> list of (matcher_desc, quantifier). matcher_desc: ('char', c) |
-    ('dot',) | ('class', set, negated)."""
     elems = []
     i = 0
     while i < len(pattern):

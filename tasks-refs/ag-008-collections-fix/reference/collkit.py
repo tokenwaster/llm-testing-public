@@ -1,17 +1,12 @@
-"""collkit — small collection utilities. THIS IS THE CORRECT REFERENCE
-(used only to prove the grading suite is satisfiable — scores 1.0).
-The shipped seed introduces exactly three bugs into unique/partition/windows."""
 
 
 def chunk(items, n):
-    """Split into consecutive chunks of at most n (the last may be shorter)."""
     if n <= 0:
         raise ValueError("n must be positive")
     return [items[i:i + n] for i in range(0, len(items), n)]
 
 
 def flatten(items):
-    """Flatten ONE level. Non-list items pass through; strings are not split."""
     out = []
     for x in items:
         if isinstance(x, (list, tuple)):
@@ -22,8 +17,6 @@ def flatten(items):
 
 
 def group_by(items, key):
-    """Group into {key(item): [items...]}, preserving first-seen key order and
-    within-group order."""
     groups = {}
     for x in items:
         groups.setdefault(key(x), []).append(x)
@@ -31,7 +24,6 @@ def group_by(items, key):
 
 
 def take_while(items, pred):
-    """Prefix of items while pred holds; stops at the first failure."""
     out = []
     for x in items:
         if not pred(x):
@@ -41,7 +33,6 @@ def take_while(items, pred):
 
 
 def unique(items):
-    """Order-preserving de-duplication (first occurrence wins)."""
     seen, out = set(), []
     for x in items:
         if x not in seen:
@@ -51,7 +42,6 @@ def unique(items):
 
 
 def partition(items, pred):
-    """(matches, non_matches) — items where pred is truthy come FIRST."""
     yes, no = [], []
     for x in items:
         (yes if pred(x) else no).append(x)
@@ -59,7 +49,6 @@ def partition(items, pred):
 
 
 def windows(items, k):
-    """All contiguous windows of length k, in order. Empty if k > len."""
     if k <= 0:
         raise ValueError("k must be positive")
     return [items[i:i + k] for i in range(0, len(items) - k + 1)]

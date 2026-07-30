@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body {font-family: Arial, sans-serif; margin: 10px;}
+  table {border-collapse: collapse; min-width: 600px; min-height: 400px;}
+  th, td {border: 1px solid #999; padding: 0; text-align: center;}
+  th {background:#eee; width:60px; height:30px;}
+  input {width:100%; box-sizing:border-box; border:none; height:28px; padding:0 2px;}
+  input:focus {outline:2px solid #6cf;}
+  #controls {margin-top:10px;}
+  #csv {width:100%; height:150px;}
+</style>
+</head>
+<body>
+
+<table id="sheet">
+  <thead>
+    <tr><th></th><!-- column headers -->
+      <script>
+        const cols = [...Array(10)].map((_,i)=>String.fromCharCode(65+i));
+        document.write(cols.map(c=>`<th>${c}</th>`).join(''));
+      </script>
+    </tr>
+  </thead>
+  <tbody>
+    <script>
+      const rows = [...Array(10)].map((_,i)=>i+1);
+      rows.forEach(r=>{
+        document.write('<tr>');
+        document.write(`<th>${r}</th>`);
+        cols.forEach(c=>{
+          const id=`${c}${r}`;
+          document.write(`<td><input type="text" id="cell-${id}" data-id="${id}"></td>`);
+        });
+        document.write('</tr>');
+      });
+    </script>
+  </tbody>
+</table>
+
+<div id="controls">
+  <button id="export">Export CSV</button><br/>
+  <textarea id="csv" readonly></textarea>
+</div>
+
+<script>
+(() => {
+  const COLS = [...Array(10)].map((_,i)=>String.fromCharCode(65+i));
+  const ROWS = [...Array(10)].map((_,i)=>i+1);
+  const ALL_IDS = [];
+  COLS.forEach(c=>ROWS.forEach(r=>ALL_IDS.push(`${c}${r}`)));
+
+  const rawVals = {};          // id -> raw string
+  const compVals = {};         // id -> displayed string (or number)
+  
+  // ---------- Evaluation ----------
+  function evaluateCell(id, stack=[]) {
+    if (compVals.hasOwnProperty(id)) return compVals[id];
+    if (stack.includes(id)) {
+      // cycle detected – mark all cells in the cycle
+      stack.concat([id]).forEach(cid => compVals[cid] = '#CYCLE');
+      return '#CYCLE';
+    }
+    stack.push(id);
+    const raw = rawVals[id];
+    let result;
+    if (raw === undefined || raw === '') {
+      result = 0;
+    } else if (raw[0] !== '=') {
+      result = raw;                     // plain text
+    } else {
+      const expr = raw.slice(1);
+      try {
+        const val = evalFormula(expr, id, stack);
+        if (typeof val === 'number' && !isNaN(val) && isFinite(val))
+          result = val;
+        else
+          result = '#ERR';
+      } catch (_) {
+        result = '#ERR';
+      }
+    }
+    // Store result
+    compVals[id] = result;
+    stack.pop();
+    return result;
+  }
+
+  function evalFormula(str, curId, stack) {
+    const tokens = tokenize(str);
+    let pos = 0;
+
+    function peek() {return tokens[pos];}
+    function consume() {return tokens[pos++];}
+
+    function parseExpression() {
+      let node = parseTerm();
+      while (peek() && (peek().type==='op') && (peek().value==='+'||peek().value==='-')) {
+        const op = consume().value;
+        const right = parseTerm();
+        node = applyOp(node, op, right);
+      }
+      return node;
+    }
+
+    function parseTerm() {
+      let node = parseFactor();
+      while (peek() && (peek().type==='op') && (peek().value==='*'||peek().value==='/')) {
+        const op = consume().value;
+        const right = parseFactor();
+        node = applyOp(node, op, right);
+      }
+      return node;
+    }
+
+    function parseFactor() {
+      const tk = peek();
+      if (!tk) throw new Error('Unexpected end');
+      if (tk.type==='num') {
+        consume();
+        return parseFloat(tk.value);
+      }
+      if (tk.type==='ref') {
+        consume();
+        const refId = tk.value.toUpperCase();
+        if (!ALL_IDS.includes(refId)) throw new Error('Bad ref');
+        const val = evaluateCell(refId, stack);
+        if (typeof val === 'number') return val;
+        // Propagate errors
+        if (val === '#CYCLE') throw new Error('Cycle');
+        throw new Error('Ref err');
+      }
+      if (tk.type==='paren' && tk.value==='(') {
+        consume(); // '('
+        const inner = parseExpression();
+        if (!peek() || peek().type!=='paren' || peek().value!==')')
+          throw new Error('Missing )');
+        consume(); // ')'
+        return inner;
+      }
+      if (tk.type==='op' && (tk.value==='+'||tk.value==='-')) {
+        // unary plus/minus
+        const op = consume().value;
+        const factor = parseFactor();
+        return op==='-' ? -factor : factor;
+      }
+      throw new Error('Invalid token');
+    }
+
+    function applyOp(a,b,op){
+      if (typeof a!=='number' || typeof b!=='number') throw new Error('Non‑numeric');
+      switch(op){
+        case '+': return a+b;
+        case '-': return a-b;
+        case '*': return a*b;
+        case '/': return a/b;
+      }
+      throw new Error('Bad op');
+    }
+
+    const val = parseExpression();
+    if (pos !== tokens.length) throw new Error('Extra token');
+    return val;
+  }
+
+  function tokenize(s) {
+    const re = /\s*([A-J](?:[1-9]|10)|\d+(?:\.\d+)?|\+|\-|\*|\/|\(|\))/gi;
+    const tokens=[];
+    let m;
+    let i=0;
+    while(i<s.length){
+      if(/\s/.test(s[i])){i++;continue;}
+      re.lastIndex=i;
+      m=re.exec(s);
+      if(m && m.index===i){
+        const t=m[1];
+        if (/^[A-J](?:[1-9]|10)$/i.test(t)) tokens.push({type:'ref',value:t});
+        else if (/^\d+(\.\d+)?$/.test(t)) tokens.push({type:'num',value:t});
+        else if (/^[\+\-\*\/]$/.test(t)) tokens.push({type:'op',value:t});
+        else if (/^[\(\)]$/.test(t)) tokens.push({type:'paren',value:t});
+        i+=t.length;
+      }else{
+        throw new Error('Lex error');
+      }
+    }
+    return tokens;
+  }
+
+  // ---------- UI & Updating ----------
+  function commitFromInput(inp) {
+    const id = inp.dataset.id;
+    rawVals[id] = inp.value.trim();
+    recalcAll();
+    refreshDisplay();
+  }
+
+  function recalcAll() {
+    Object.keys(compVals).forEach(k=>delete compVals[k]);
+    ALL_IDS.forEach(id=>evaluateCell(id, []));
+  }
+
+  function refreshDisplay() {
+    ALL_IDS.forEach(id=>{
+      const inp = document.getElementById('cell-'+id);
+      if (document.activeElement===inp) return; // keep raw while editing
+      const disp = compVals[id];
+      inp.value = (disp===undefined) ? '' : String(disp);
+    });
+  }
+
+  // Attach events
+  ALL_IDS.forEach(id=>{
+    const inp = document.getElementById('cell-'+id);
+    inp.addEventListener('focus', () => {
+      inp.value = rawVals[id] ?? '';
+    });
+    inp.addEventListener('blur', ()=>commitFromInput(inp));
+    inp.addEventListener('keydown', e=>{
+      if (e.key==='Enter'){
+        inp.blur();
+        e.preventDefault();
+      }
+    });
+  });
+
+  // Export CSV
+  document.getElementById('export').addEventListener('click',()=>{
+    const lines = ROWS.map(r=>{
+      return COLS.map(c=>String(compVals[`${c}${r}`] ?? '')).join(',');
+    }).join('\n');
+    document.getElementById('csv').value = lines;
+  });
+
+  // ----------- Sheet API ----------
+  window.sheet = {
+    set(cellId, txt){
+      const inp=document.getElementById('cell-'+cellId);
+      if(!inp)return;
+      inp.value = txt;
+      rawVals[cellId]=txt.trim();
+      recalcAll();
+      refreshDisplay();
+    },
+    get(cellId){
+      const val = compVals[cellId];
+      return (val===undefined) ? '' : String(val);
+    },
+    raw(cellId){
+      return rawVals[cellId] ?? '';
+    }
+  };
+
+  // Initial calculation (all empty)
+  recalcAll();
+})();
+</script>
+</body>
+</html>

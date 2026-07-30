@@ -58,7 +58,7 @@ auditability that makes the data worth anything.
 So the public set stays fully open, and a **private variant of the same task** is
 held back: same generator, re-run at a **different seed**, never published. A model
 that scores markedly higher on the published instance than on the unpublished one
-has memorised *that instance*.
+has memorized *that instance*.
 
 **What ships and what doesn't:**
 
@@ -89,7 +89,7 @@ has memorised *that instance*.
   easier or harder, so a small delta is instance noise, not evidence. The verdict
   is therefore sized against the number of paired tasks — one task differing moves
   the mean by `1/n` — instead of a fixed cutoff.
-- **It detects memorisation of the published instance, nothing more.** A model that
+- **It detects memorization of the published instance, nothing more.** A model that
   genuinely learned the skill scores the same on both, and should. That's learning,
   not cheating, and the delta is built to read it that way.
 - **A held-out set is not externally verifiable**, by construction. You can audit

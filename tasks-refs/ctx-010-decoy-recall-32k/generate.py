@@ -1,22 +1,3 @@
-"""Generator + reference for ctx-010-decoy-recall-32k (v0.6 long-context overhaul).
-
-Why this task: v0.5 showed plain needle-recall is free for modern windows
-(ctx-001/002 100% aced). This makes retrieval require PRECISION rather than
-window size:
-
-  - the needle matches on TWO constraints (person AND system), not one, and the
-    doc is flooded with near-duplicate decoys that satisfy exactly one of them;
-  - the target has SEVERAL entries over time (rotation) — only the LATEST key is
-    current; the earlier ones are planted as tempting wrong answers.
-
-A big context window doesn't help; carelessly grabbing the first "MAPLE" line,
-or the right person's key for the wrong system, or a rotated-out key, all fail.
-
-The answer is correct BY CONSTRUCTION (this script computes it), which is the
-task's reference verification — plus we assert a wrong/empty answer scores 0.
-
-Run:  python tasks-refs/ctx-010-decoy-recall-32k/generate.py   (writes the staged task)
-"""
 
 import random
 from pathlib import Path

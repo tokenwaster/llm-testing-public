@@ -1,17 +1,3 @@
-"""Provider adapters: Anthropic, OpenAI-compatible (LM Studio, Ollama, vLLM,
-OpenAI, OpenRouter, ...) and a mock, behind one neutral interface.
-
-Neutral message format used by the runner:
-    {"role": "user"|"assistant", "content": str,
-     "tool_calls":  [{"id","name","args"}]        (assistant, optional)
-    }
-    {"role": "tool_results", "results": [{"id","name","output"}]}
-
-Neutral tool format:
-    {"name", "description", "parameters": <JSON schema object>}
-
-Token usage comes from the provider's usage field — never estimated.
-"""
 
 import json
 import re
@@ -76,7 +62,6 @@ _USAGE_LIMIT_PHRASES = (
 
 
 def _detect_usage_limit(text: str) -> tuple[bool, float | None, str]:
-    """Return (is_usage_limit, reset_epoch_or_None, reset_hint) for a CLI error blob."""
     if not text:
         return False, None, ""
     low = text.lower()
@@ -95,9 +80,6 @@ def _detect_usage_limit(text: str) -> tuple[bool, float | None, str]:
 
 
 def _retry_after_s(headers, body: str) -> float | None:
-    """Seconds the provider asked us to wait. Retry-After is the standard header
-    (seconds, or an HTTP date); OpenRouter also puts a reset epoch in the 429
-    body. Returns None when nobody said."""
     try:
         raw = (headers or {}).get("retry-after") or (headers or {}).get("Retry-After")
     except Exception:
@@ -195,6 +177,8 @@ class OpenAICompatAdapter(BaseAdapter):
             **self.model.sampling_payload(self.task_category),
             **self.model.extra,
         }
+        if self.model.thinking_off:
+            payload["reasoning"] = {"enabled": False}
         if tools:
             payload["tools"] = [
                 {"type": "function",
@@ -363,13 +347,6 @@ class OpenAICompatAdapter(BaseAdapter):
 
 
 class _LoopGuard:
-    """Detects a degenerate generation loop mid-stream (a bad local quant emits
-    its full token ceiling as one repeating cycle and never stops).
-
-    Fires only on strong evidence (a short cycle repeated MIN_REPS times over
-    MIN_SPAN chars) so it never trips on legitimate repetitive output like
-    tables. Watches the combined content+reasoning stream (a rumination loop may
-    stay entirely in the think channel)."""
     WINDOW = 4096
     CHECK_EVERY = 512
     MIN_REPS = 24
@@ -381,7 +358,6 @@ class _LoopGuard:
         self._since = 0
 
     def feed(self, piece: str) -> bool:
-        """Accumulate a stream piece; return True if a loop is detected."""
         if not piece:
             return False
         self._buf = (self._buf + piece)[-self.WINDOW:]
@@ -408,17 +384,6 @@ class _LoopGuard:
 
 
 def _reject_degenerate(res: "ChatResult", local: bool) -> None:
-    """A 200 with no text, no tool calls, no usage and no stop reason is a
-    server failure — surface it as an error, not a mysterious format miss.
-
-    The cause depends on where it came from, and mislabelling it corrupts the
-    attribution. For a LOCAL model (LM Studio) an empty 200 means the prompt
-    overflowed the loaded context window: a real, non-retryable known-limit. For
-    a CLOUD model it is a transient upstream hiccup — the provider accepted the
-    request and returned nothing (kimi-k3 hit this on a 550-token prompt). That
-    is infra, not the model's context, so it must retry and, if it persists,
-    attribute to transport-drop — never context-overflow against a model whose
-    window was nowhere near full."""
     if res.text or res.tool_calls or res.tokens_out is not None \
             or res.stop_reason is not None:
         return
@@ -568,13 +533,6 @@ class AnthropicAdapter(BaseAdapter):
 
 
 class ClaudeCLIAdapter(BaseAdapter):
-    """Runs `claude -p` per request. Every call spawns a fresh subprocess (no
-    history) in an empty sandbox with file/shell/web tools disallowed, so the
-    model can only see the prompt.
-
-    Single-turn only (tier 1; set supports_tools: false in the yaml). No
-    streaming, so ttft_ms is None.
-    """
 
     DISALLOWED = ("Bash", "Read", "Write", "Edit", "Glob", "Grep",
                   "WebFetch", "WebSearch", "Task", "NotebookEdit")
@@ -594,6 +552,8 @@ class ClaudeCLIAdapter(BaseAdapter):
         cmd = [exe, "-p", "--output-format", "json", "--max-turns", "1",
                "--model", self.model.model,
                "--disallowedTools", ",".join(self.DISALLOWED)]
+        if self.model.effort:
+            cmd += ["--effort", self.model.effort]
         if system:
             cmd += ["--append-system-prompt", system]
         cmd += list(self.model.extra.get("cli_args", []))
@@ -606,9 +566,6 @@ class ClaudeCLIAdapter(BaseAdapter):
 
     def chat_agentic(self, prompt: str, workspace, max_turns: int,
                      timeout_s: int) -> ChatResult:
-        """Tier-2: Claude Code works in the task workspace with its own tools
-        (file ops + running python). Fresh session, cwd=workspace, so it sees
-        only the task's files."""
         import shutil
 
         exe = shutil.which("claude")
@@ -621,6 +578,8 @@ class ClaudeCLIAdapter(BaseAdapter):
                "--permission-mode", "acceptEdits",
                "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash(python:*)",
                "--disallowedTools", "WebFetch,WebSearch,Task,NotebookEdit"]
+        if self.model.effort:
+            cmd += ["--effort", self.model.effort]
         t0 = now_ms()
         data = _stream_claude_cli(cmd, prompt, str(workspace), timeout_s)
         return self._parse_result(data, now_ms() - t0)
@@ -678,7 +637,6 @@ class ClaudeCLIAdapter(BaseAdapter):
 
 
 class MockAdapter(BaseAdapter):
-    """Echoes a canned response; used to verify the whole pipeline offline."""
 
     def chat(self, messages, system=None, tools=None, timeout_s=180) -> ChatResult:
         prompt = messages[-1].get("content", "") if messages else ""
@@ -706,21 +664,6 @@ from .util import terminate_tree as _terminate_tree
 
 def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str,
                        timeout_s: int) -> dict:
-    """Run `claude -p --output-format stream-json` and watch it work.
-
-    Streaming (over `--output-format json`, which emits nothing until exit) lets
-    us record time-to-first-answer-token and enforce the total `timeout_s`
-    deadline. It does NOT stop the model for being silent: the CLI exposes only
-    answer text and the final result — never the thinking content — so we cannot
-    tell genuine extended thinking from a loop, and silence alone means only
-    "needs a bigger window", never a spiral. A model that thinks the whole window
-    without answering hits `timeout_s` (a window/time result), and the operator
-    widens the window from the measured first-answer times. Real spirals — a
-    repeating cycle going nowhere — are only detectable where the token stream is
-    visible (_LoopGuard on local/API models), not here.
-
-    Returns the CLI's final `result` event (same shape as --output-format json).
-    """
     import json as _json
     import queue as _queue
     import subprocess
@@ -809,13 +752,6 @@ def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str,
 
 
 def _resolve_served_model(model_usage, requested: str) -> str | None:
-    """Which model actually answered, from the CLI's `modelUsage` block.
-
-    Claude Code bills a small helper model alongside the real one, so modelUsage
-    routinely holds two entries; picking by tokens or alphabetically selects the
-    helper. Match the requested alias's family first, else fall back to the
-    priciest entry (the real work is the expensive one).
-    """
     if not isinstance(model_usage, dict) or not model_usage:
         return None
     if len(model_usage) == 1:
@@ -829,7 +765,6 @@ def _resolve_served_model(model_usage, requested: str) -> str | None:
 
 
 def _fmt_epoch(epoch: float | None) -> str:
-    """UNIX epoch -> local 'Mon 15:04' string, or '' when unknown."""
     if not epoch:
         return ""
     from datetime import datetime

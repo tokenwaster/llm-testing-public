@@ -1,10 +1,3 @@
-"""Generator + reference for rs-012-permutation-track (v0.6 reasoning trap).
-
-A row of numbered cups, a sequence of swap/rotate operations, then: where did
-the ball that STARTED under cup K end up? Pure state-tracking — models that skim
-the ops or track the wrong direction lose the ball. Answer computed by applying
-the ops, so the key is exact. Not memorizable: novel op sequence each build.
-"""
 
 import random
 from pathlib import Path

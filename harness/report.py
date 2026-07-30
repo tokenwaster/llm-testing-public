@@ -1,4 +1,3 @@
-"""Static HTML reports, regenerated deterministically from runs/."""
 
 import colorsys
 import html
@@ -20,8 +19,6 @@ def _hsl_hex(h_deg: float, s: float, lum: float) -> str:
 
 
 def _overflow_palette(n: int = PALETTE_N - 8) -> tuple[str, str]:
-    """Distinct theme-aware colours for slots 9..PALETTE_N via golden-angle hue
-    rotation. Returns (dark_css, light_css) as `--s9:..;--s10:..;` fragments."""
     golden = 137.508
     dark, light = [], []
     for i in range(n):
@@ -53,9 +50,24 @@ _NAV = [
 ]
 
 
+BRAND_NAME = "Token Waster"
+
+BRAND_SVG = (
+    '<svg viewBox="0 0 32 32" role="img" aria-label="Token Waster" '
+    'fill="none" xmlns="http://www.w3.org/2000/svg">'
+    '<circle cx="16" cy="16" r="13" stroke="currentColor" stroke-width="2.5"/>'
+    '<path d="M9.5 22.5 L22.5 9.5" stroke="currentColor" stroke-width="2.5" '
+    'stroke-linecap="round"/>'
+    '</svg>')
+
+
+def _brand(prefix: str = "") -> str:
+    return (f'<a class="brand" href="{prefix}index.html" '
+            f'title="{BRAND_NAME}">{BRAND_SVG}'
+            f'<span class="bw">{BRAND_NAME}</span></a>')
+
+
 def _nav(prefix: str = "") -> str:
-    """Site nav for a page at the given relative `prefix` ('' at the report root,
-    '../' under runs/ tasks/ models/). Control links drop in the public build."""
     out = []
     for label, href, control in _NAV:
         if control and _PUBLIC_NAV:
@@ -100,8 +112,6 @@ def fmt_ms(ms) -> str:
 
 
 def fmt_span(ms) -> str:
-    """Human duration for large totals: seconds under a minute, minutes under an
-    hour, else hours. Per-task times keep fmt_ms."""
     if ms is None:
         return "—"
     s = ms / 1000
@@ -127,7 +137,6 @@ def fmt_tok(n) -> str:
 
 
 def last_response_text(run_id: str, model: str, task: str, limit: int = 5000) -> str:
-    """The model's final answer text, straight from the transcript."""
     events = read_jsonl(_RUNS_BASE / run_id / model / task / "transcript.jsonl")
     text = ""
     for ev in events:
@@ -139,8 +148,6 @@ def last_response_text(run_id: str, model: str, task: str, limit: int = 5000) ->
 
 
 def score_state(s: dict) -> str:
-    """good | warn | crit | pend — drives the status chip. Anything not
-    scored (pending, skipped, missing) renders as pend."""
     if not s or s.get("status") != "scored" or s.get("score") is None:
         return "pend"
     v = s["score"]
@@ -151,15 +158,11 @@ CHIP_SYMBOL = {"good": "✓", "warn": "◐", "crit": "✕", "pend": "◌"}
 
 
 def chip(state: str, text: str, tip: str = "") -> str:
-    """Status chip: symbol + text so state is never color-alone."""
     return (f'<span class="chip {state}" title="{html.escape(tip)}">'
             f'<i>{CHIP_SYMBOL[state]}</i>{html.escape(text)}</span>')
 
 
 def _heat_swatch(v: float | None) -> str:
-    """The matrix cell, reused inline: a square that ramps ink-opacity with the
-    score (hollow when there's nothing scored). Same visual vocabulary as the
-    overview grid so every score on the site reads the same way."""
     if v is None:
         return '<span class="hsw pend"></span>'
     a = 0.10 + 0.90 * max(0.0, min(1.0, v))
@@ -187,8 +190,6 @@ _FAIL_BADGES = {
 
 
 def _failure_mode_of(e: dict) -> str | None:
-    """failure_mode from the metrics, or derived from attempts for runs written
-    before the field existed (keeps old runs legible without a re-run)."""
     fm = e.get("failure_mode")
     if fm:
         return fm
@@ -214,8 +215,6 @@ def _failure_mode_of(e: dict) -> str | None:
 
 
 def _fail_badge(e: dict) -> str:
-    """Badge naming why a result failed, so a runaway reads differently from a
-    wrong answer. Suppressed on a full pass."""
     sc = e.get("score") or {}
     if sc.get("status") == "scored" and sc.get("score") == 1.0:
         return ""
@@ -230,9 +229,6 @@ def _fail_badge(e: dict) -> str:
 
 def diagnose(e: dict, tdef, acfg: dict | None = None,
              suspect: dict | None = None) -> dict | None:
-    """The reason a result went the way it did, via `assess.classify`:
-    {category, attribution, detail}; None on a clean pass. The single source
-    every page uses to explain a failure, so the wording never diverges."""
     if not tdef:
         return None
     from . import assess
@@ -241,8 +237,6 @@ def diagnose(e: dict, tdef, acfg: dict | None = None,
 
 
 def why_cell(cls: dict | None) -> str:
-    """Compact HTML for a diagnosis: attribution badge + category, with the full
-    detail on hover. '' for a clean pass."""
     if not cls:
         return ""
     attr = cls["attribution"]
@@ -252,7 +246,6 @@ def why_cell(cls: dict | None) -> str:
 
 
 def sparkline(values: list[float | None], width=140, height=34) -> str:
-    """Inline SVG sparkline, 0..1 domain pinned so trends compare across rows."""
     pts = [(i, v) for i, v in enumerate(values) if v is not None]
     if not pts:
         return '<span class="muted">—</span>'
@@ -271,21 +264,16 @@ def sparkline(values: list[float | None], width=140, height=34) -> str:
 
 
 def _slug_name(name: str) -> str:
-    """Model name -> safe filename/anchor slug. Display keeps the real name."""
     import re
     return re.sub(r"[^a-zA-Z0-9._-]+", "-", name).strip("-").lower() or "model"
 
 
 def _mlink(name: str, prefix: str = "", cls: str = "mlink") -> str:
-    """Model name linked to its summary page; `prefix` adjusts the relative path
-    per page depth ('' from index, '../' from runs/tasks/models)."""
     return (f'<a class="{cls}" href="{prefix}models/{_slug_name(name)}.html">'
             f'{html.escape(name)}</a>')
 
 
 def chart_legend(entries: list[dict], prefix: str = "") -> str:
-    """Interactive right-side legend (colored dot + model name); hover highlights
-    the model's marks in the sibling chart, click opens its page."""
     if not entries:
         return ""
     items = "".join(
@@ -298,7 +286,6 @@ def chart_legend(entries: list[dict], prefix: str = "") -> str:
 
 
 def _nice_ceiling(v: float) -> float:
-    """Round a max up to a clean axis top (1/2/5 × 10ⁿ) so ticks read well."""
     import math
     if v <= 0:
         return 1.0
@@ -310,8 +297,6 @@ def _nice_ceiling(v: float) -> float:
 
 
 def scatter(points: list[dict], width=1000, height=340) -> str:
-    """Efficiency frontier: x = avg output tokens per task, y = avg score.
-    One DOT per model; identity via the interactive right-legend + hover."""
     if not points:
         return ""
     pad_l, pad_r, pad_t, pad_b = 54, 20, 16, 40
@@ -348,9 +333,6 @@ def scatter(points: list[dict], width=1000, height=340) -> str:
 
 
 def _dominates(q: dict, p: dict, x_minimize: bool) -> bool:
-    """q Pareto-dominates p: at-least-as-good on both axes, strictly better on
-    one. y (score) is always maximised; x is minimised (cost) or maximised
-    (speed) per `x_minimize`."""
     xb = (q["x"] <= p["x"]) if x_minimize else (q["x"] >= p["x"])
     xs = (q["x"] < p["x"]) if x_minimize else (q["x"] > p["x"])
     return xb and q["y"] >= p["y"] and (xs or q["y"] > p["y"])
@@ -359,9 +341,6 @@ def _dominates(q: dict, p: dict, x_minimize: bool) -> bool:
 def pareto_scatter(points: list[dict], x_label: str, *, x_minimize: bool,
                    x_fmt: str = "{:,.2f}", width: int = 1000,
                    height: int = 360) -> str:
-    """Score (y, maximised) vs a cost/speed axis (x): draws the Pareto frontier
-    and dims dominated dots. Dots carry data-tip for the shared hover JS; class
-    matches the family scatter so both share one hover handler."""
     pts = [p for p in points if p.get("x") is not None and p.get("y") is not None]
     if len(pts) < 2:
         return ""
@@ -450,7 +429,6 @@ _SCATTER_HOVER_JS = """<script>
 
 
 def bar(value: float, vmax: float, width=140) -> str:
-    """Thin magnitude bar, rounded data-end, hairline track."""
     w = 0 if vmax <= 0 else max(2, value / vmax * width)
     return (f'<span class="track" style="width:{width}px">'
             f'<span class="fill" style="width:{w:.0f}px"></span></span>')
@@ -469,11 +447,14 @@ BASE_CSS = """
      tables and score grids so the whole suite reads as one thing */
   --hair:rgba(255,255,255,.07); --rule:rgba(255,255,255,.15);
   /* Matrix failure hues. --trap is NOT --warn: amber (#fab219) sits ~12 degrees
-     from the retrieval-miss orange, so the two cells read as one colour in the
+     from the retrieval-miss orange, so the two cells read as one color in the
      grid. This yellow is ~23 degrees off it and much brighter, separating them
      by hue AND luminance. Kept separate from --warn because that token is text
      on the light theme, where a yellow this bright is unreadable. */
   --trap:#ffd60a; --miss:#d9600f; --cell-rgb:242,242,240;
+  /* text sitting ON the score ramp: --cell-ink is the flip, used once the tint
+     is opaque enough that the normal ink disappears into it */
+  --cell-ink:#0b0b0b;
   --mono:ui-monospace,"Cascadia Code","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
   /* categorical series — validated dark steps, fixed assignment order */
   --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#008300;
@@ -492,6 +473,7 @@ BASE_CSS = """
        off the orange) while the lightness drops far enough for the cell and its
        legend swatch to actually read against the page. */
     --trap:#a87f00; --miss:#b8460a; --cell-rgb:22,22,26;
+    --cell-ink:#ffffff;
     --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --s4:#008300;
     --s5:#4a3aa7; --s6:#e34948; --s7:#e87ba4; --s8:#eb6834;
     color-scheme: light;
@@ -499,8 +481,7 @@ BASE_CSS = """
 }
 * { box-sizing:border-box; }
 body { background:var(--plane); color:var(--ink);
-  font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
-  margin:0 auto; max-width:1480px; padding:32px 30px 72px; }
+  font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
 a { color:var(--accent); text-decoration:none; }
 a:hover { text-decoration:underline; }
 h1 { font-size:21px; font-weight:650; letter-spacing:-.01em; margin:0; }
@@ -508,9 +489,7 @@ h1 { font-size:21px; font-weight:650; letter-spacing:-.01em; margin:0; }
 .reflink { display:inline-block; margin-left:10px; padding:1px 7px; border-radius:10px;
   border:1px solid var(--border); font-size:11.5px; text-decoration:none; white-space:nowrap; }
 .reflink:hover { border-color:var(--accent); color:var(--accent); }
-.topbar { display:flex; align-items:baseline; justify-content:space-between;
-  gap:16px; flex-wrap:wrap; margin-bottom:22px; }
-.nav a { margin-left:16px; font-size:13px; }
+__HEADER_CSS__
 .tag { display:inline-block; background:var(--accent-soft); color:var(--accent);
   border-radius:20px; padding:2px 11px; font-size:11.5px; font-weight:600;
   margin-left:10px; vertical-align:2px; }
@@ -531,7 +510,10 @@ h2 { font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:
   text-transform:uppercase; color:var(--muted); margin-top:7px; }
 
 /* cards & tables */
-.card { background:var(--surface); border:1px solid var(--hair);
+/* Every bordered data container is this one rule. The version-over-version
+   block used to carry its own copy and drifted out of sync. */
+.card, .vc-cats, .vc-members, .vc-catdet {
+  background:var(--surface); border:1px solid var(--hair);
   border-radius:6px; padding:2px 0; overflow-x:auto; }
 table { border-collapse:collapse; width:100%; font-size:13px;
   font-variant-numeric:tabular-nums; }
@@ -541,7 +523,7 @@ th { color:var(--muted); font-family:var(--mono); font-size:10px; font-weight:60
 td { padding:8px 14px; border-bottom:1px solid var(--hair); vertical-align:middle; }
 tr:last-child td { border-bottom:none; }
 tbody tr:hover td { background:var(--surface-2); }
-/* Data columns are CENTRED (header + cells aligned); text/name columns stay
+/* Data columns are CENTERED (header + cells aligned); text/name columns stay
    left. One site-wide rule — every table on every page reads the same. */
 td.num, th.num, th[data-type="num"] { text-align:center; font-variant-numeric:tabular-nums; }
 th[data-type="text"], td.model { text-align:left; }  /* names left; default td is already left */
@@ -613,7 +595,7 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 /* score cells — the matrix swatch reused inline: a score-ramped square + the
    number, so every grid on the site (categories, per-task, score grid, model
    comparison) reads like the overview hero. The number is tinted good/warn/crit
-   so the state never rides on colour alone. */
+   so the state never rides on color alone. */
 .scv { display:inline-flex; align-items:center; font-variant-numeric:tabular-nums;
   white-space:nowrap; }
 .scv b { font-weight:600; }
@@ -652,10 +634,10 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 .cmp-row:hover { background:var(--surface); }
 .cmp-t { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   padding-right:10px; }
-/* A and B centre under their model columns; swatches mirror around the divider */
+/* A and B center under their model columns; swatches mirror around the divider */
 .cmp-row .scv { justify-content:center; font-variant-numeric:tabular-nums; }
 .cmp-row .scv.ra .hsw { margin-right:0; margin-left:7px; }
-/* the centre line dividing the two model sides — the delta sits on it */
+/* the center line dividing the two model sides — the delta sits on it */
 .cmp-dc { text-align:center; align-self:stretch; display:flex; align-items:center;
   justify-content:center;
   background:linear-gradient(var(--rule),var(--rule)) center/2px 100% no-repeat; }
@@ -694,7 +676,6 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
    boxes reconstruct rows/cells) so no page can overflow sideways, even a table
    that isn't wrapped in a .card. Verified 375px: family/info overflow → 0. */
 @media (max-width:760px) {
-  body { padding:20px 15px 56px; }
   h1 { font-size:19px; }
   /* stack the header so the menu gets the full width and its links wrap
      instead of overflowing (the nav is a flex item that otherwise sizes to
@@ -796,7 +777,16 @@ a.filelink:hover { color:var(--accent); border-color:var(--accent); }
 .vc-sum { font-size:13.5px; margin:4px 0 14px; }
 .vc-cell { display:inline-block; min-width:36px; text-align:center; font-family:var(--mono);
   font-size:11px; border-radius:3px; padding:2px 4px; margin-right:3px;
-  border:1px solid var(--hair); }
+  border:1px solid var(--hair); color:var(--ink); }
+/* The score ramp runs light-on-dark in one theme and the reverse in the other,
+   so the number has to flip ink at the point the tint overtakes it. Thresholds
+   are the WCAG crossovers for each theme's composite; worst case is 4.45:1 at
+   the crossover itself, which is the ceiling this ramp allows. */
+.vc-cell.flip-d { color:var(--cell-ink); }
+@media (prefers-color-scheme: light) {
+  .vc-cell.flip-d { color:var(--ink); }
+  .vc-cell.flip-l { color:var(--cell-ink); }
+}
 .vc-d { font-family:var(--mono); font-size:11px; font-weight:600; padding:1px 5px;
   border-radius:3px; margin:0 8px; }
 .vc-d.up { color:#1f9d55; } .vc-d.down { color:var(--crit); } .vc-d.flat { color:var(--muted); }
@@ -804,14 +794,23 @@ a.filelink:hover { color:var(--accent); border-color:var(--accent); }
   border-radius:3px; border:1px solid var(--hair); }
 .vc-verd.better { color:#1f9d55; border-color:#1f9d55; }
 .vc-verd.worse { color:var(--crit); border-color:var(--crit); }
-.vc-catrow, .vc-taskrow { display:flex; align-items:center; gap:2px; padding:2px 0; font-size:12px; }
+.vc-catrow, .vc-taskrow { display:flex; align-items:center; gap:2px;
+  padding:8px 14px; font-size:12px; border-bottom:1px solid var(--hair); }
+.vc-catrow:last-child, .vc-taskrow:last-child { border-bottom:none; }
+.vc-catrow:hover, .vc-taskrow:hover { background:var(--surface-2); }
 .vc-cat { min-width:130px; color:var(--muted); font-size:11px; }
-.vc-cats { margin:8px 0 4px; }
-.vc-catdet > summary { cursor:pointer; padding:6px 0; color:var(--ink-2); font-size:12px;
-  list-style:none; }
+.vc-cats, .vc-members, .vc-catdet { margin:8px 0 4px; }
+.vc-catdet > summary { cursor:pointer; padding:8px 14px; color:var(--ink-2);
+  font-size:12px; list-style:none; border-bottom:1px solid var(--hair); }
+.vc-catdet:not([open]) > summary { border-bottom:none; }
 .vc-catdet > summary::before { content:"›"; color:var(--muted); margin-right:6px; }
 .vc-catdet[open] > summary::before { content:"⌄"; }
-.vc-note { color:var(--muted); font-size:11px; margin:8px 0 0; }
+/* The card rule insets nothing horizontally because a table's own td does it.
+   This wrapper holds controls and prose, which have no such padding. */
+.vc-wrap { padding:12px 14px; }
+/* as a span it sits in a flex row and must not push itself down */
+.vc-note { color:var(--muted); font-size:11px; margin:0; }
+p.vc-note { margin:8px 0 0; }
 .vc-warn { color:var(--trap); font-size:10px; margin-left:6px; }
 pre { background:var(--plane); border:1px solid var(--grid); padding:10px 12px;
   border-radius:8px; font-size:12px; overflow-x:auto; white-space:pre-wrap;
@@ -821,6 +820,56 @@ pre { background:var(--plane); border:1px solid var(--grid); padding:10px 12px;
 code { background:var(--surface-2); border-radius:4px; padding:1px 6px;
   font-size:12px; }
 """
+
+HEADER_CSS = """
+:root { --topbar-h:56px; --brand-h:32px; --shell-w:1480px; --shell-x:30px; }
+/* The page shell. Operator pages declared their own body width — 980, 1100 and
+   1200 across eight templates — and _OP_CHROME then forced 1200 on top, so no
+   two sides of the site were the same measure. One declaration, here. */
+body { max-width:var(--shell-w); margin:0 auto;
+  padding:32px var(--shell-x) 72px; }
+@media (max-width:760px) {
+  body { padding:20px 15px 56px; }
+}
+/* brand + title + nav and NOTHING else, at a fixed height, so the bar lands on
+   the same pixels on every page. A sub-line, a dataset picker or a button goes
+   in .pagebar below: content inside a header changes its geometry — a select has
+   a different baseline than 21px text, and a long sub-line wrapped and pushed
+   the nav 65px down on model pages. */
+.topbar { display:flex; align-items:center; justify-content:space-between;
+  gap:20px; flex-wrap:nowrap; height:var(--topbar-h); margin:0 0 18px;
+  border-bottom:1px solid var(--hair); }
+.brand { flex:none; display:flex; align-items:center; gap:11px;
+  height:var(--brand-h); text-decoration:none; color:var(--ink); }
+.brand:hover { text-decoration:none; }
+.brand svg, .brand img { height:var(--brand-h); width:auto; display:block;
+  flex:none; }
+.brand .bw { font-weight:700; font-size:15px; letter-spacing:-.01em;
+  white-space:nowrap; }
+.topbar .ttl { flex:1 1 auto; min-width:0; display:flex; align-items:center;
+  gap:10px; }
+.topbar h1 { font-size:18px; font-weight:650; letter-spacing:-.01em; margin:0;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* the nav never shrinks and never hides a link — the title truncates instead */
+.topbar .nav { flex:none; display:block; margin:0; white-space:nowrap; }
+.topbar .nav a { margin:0 0 0 16px; font-size:13px; color:var(--accent);
+  text-decoration:none; }
+.topbar .nav a:hover { text-decoration:underline; }
+/* too narrow for both: stack, same height on every page */
+@media (max-width:1080px) {
+  :root { --topbar-h:auto; }
+  .topbar { flex-wrap:wrap; height:auto; min-height:56px; padding-bottom:10px;
+    align-items:center; row-gap:8px; }
+  .topbar .nav { flex:1 0 100%; overflow-x:auto; scrollbar-width:none; }
+  .topbar .nav::-webkit-scrollbar { display:none; }
+  .topbar .nav a { margin:0 16px 0 0; }
+}
+.pagebar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  margin:0 0 20px; font-size:12.5px; color:var(--muted); }
+.pagebar .sub { margin:0; }
+"""
+
+BASE_CSS = BASE_CSS.replace("__HEADER_CSS__", HEADER_CSS)
 
 BASE_CSS = BASE_CSS.replace(
     "--s8:#d95926;", "--s8:#d95926;" + _EXTRA_DARK).replace(
@@ -900,11 +949,9 @@ BASE_CSS += _MATRIX_CSS
 RUN_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Run {{ run_id }} · LLM Testing</title><style>{{ css }}</style></head><body>
-<div class="topbar">
-  <div><h1>Run {{ run_id }}{% if manifest.tag %}<span class="tag">{{ manifest.tag }}</span>{% endif %}</h1>
-  <div class="sub">{{ manifest.started }} → {{ manifest.finished or "…" }}{% if env_line %} · {{ env_line }}{% endif %}</div></div>
-  <div class="nav">{{ nav }}</div>
-</div>
+<div class="topbar">{{ brand }}<div class="ttl"><h1>Run {{ run_id }}{% if manifest.tag %}<span class="tag">{{ manifest.tag }}</span>{% endif %}</h1></div>
+<div class="nav">{{ nav }}</div></div>
+<div class="pagebar"><div class="sub">{{ manifest.started }} → {{ manifest.finished or "…" }}{% if env_line %} · {{ env_line }}{% endif %}</div></div>
 
 <div class="tiles">
 {% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}{% if t.sub %}<span class="vsub" title="{{ t.sub_tip }}">{{ t.sub }}</span>{% endif %}</div><div class="k">{{ t.k }}</div></div>
@@ -970,12 +1017,10 @@ generation time (excludes time-to-first-token).</div>
 TASK_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ task_id }} · LLM Testing</title><style>{{ css }}</style></head><body>
-<div class="topbar">
-  <div><h1>{{ title }}<span class="tag">{{ category }} · tier {{ tier }}</span></h1>
-  <div class="sub">{{ task_id }} · scoring: {{ scoring_type }} ·
+<div class="topbar">{{ brand }}<div class="ttl"><h1>{{ title }}<span class="tag">{{ category }} · tier {{ tier }}</span></h1></div>
+<div class="nav">{{ nav }}</div></div>
+<div class="pagebar"><div class="sub">{{ task_id }} · scoring: {{ scoring_type }} ·
    task version {{ task_hash }}</div></div>
-  <div class="nav">{{ nav }}</div>
-</div>
 
 <div class="tiles">
 {% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}{% if t.sub %}<span class="vsub" title="{{ t.sub_tip }}">{{ t.sub }}</span>{% endif %}</div><div class="k">{{ t.k }}</div></div>
@@ -1055,16 +1100,14 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 .stat .d { font-size:11.5px; color:var(--ink-2); margin-top:2px; }
 /* .mx-* / .mxlegend matrix styles now live in BASE_CSS (shared with the model page) */
 </style></head><body>
-<div class="topbar">
-  <div><h1>LLM Testing</h1>
+<div class="topbar">{{ brand }}<div class="ttl"><h1>LLM Testing</h1></div>
+<div class="nav">{{ nav }}</div></div>
+<div class="pagebar"><select id="dsnav" title="switch dataset version"
+    style="background:var(--surface);color:var(--ink);border:1px solid var(--border);
+    border-radius:7px;padding:4px 8px;font:inherit;font-size:12.5px"></select>
   <div class="sub">{% if dataset_label %}{{ dataset_label }} · {% endif %}one
   suite version per dataset · suite v{{ suite_version }}{% if data_asof %} ·
   <strong>data as of {{ data_asof }}</strong> · <a href="feed.xml">feed</a>{% endif %}</div></div>
-  <div class="nav"><select id="dsnav" title="switch dataset version"
-    style="background:var(--surface);color:var(--ink);border:1px solid var(--border);
-    border-radius:7px;padding:4px 8px;font:inherit;font-size:12.5px"></select>
-  {{ nav }}</div>
-</div>
 {% if dataset_caveat %}
 <div class="card" style="border-left:3px solid var(--warn,#c90);background:var(--surface);
   margin:10px 0;padding:10px 14px;font-size:13px">⚠ {{ dataset_caveat }}</div>
@@ -1095,7 +1138,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 </div>
 
 {% if matrix %}
-<h2>Every model, every task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· rows ranked by mean · ± is the 95% band across tasks · <span class="tie" style="color:var(--accent);font-weight:700">≈</span> marks models tied with the leader within noise · hover a cell for the task · <a href="info.html#fail">what the colours mean →</a></span></h2>
+<h2>Every model, every task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· rows ranked by mean · ± is the 95% band across tasks · <span class="tie" style="color:var(--accent);font-weight:700">≈</span> marks models tied with the leader within noise · hover a cell for the task · <a href="info.html#fail">what the colors mean →</a></span></h2>
 <div class="seg" id="mxseg" title="narrow the grid to one end of the suite — rows re-rank by that subset's mean">
   <button type="button" data-mx="all" class="on">All ({{ matrix.n_all }})</button>
   <button type="button" data-mx="hard">◆ Hard ({{ matrix.n_hard }})</button>
@@ -1108,7 +1151,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     <div class="mx-cells">{% for c in matrix.cats %}<div class="mx-grp" style="grid-template-columns:repeat({{ c.n }},15px);gap:3px"><span class="mx-clabel" title="{{ c.key }}" style="grid-column:1/-1">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div>
   </div>
   {% for r in matrix.rows %}
-  <div class="mx-row{% if r.lead %} lead{% endif %}{% if r.partial %} partial{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-frontier="{{ r.m_frontier }}" data-easy="{{ r.m_easy }}"{% if r.partial %} title="only {{ r.cover }} tasks run — ranked below every fully-tested model, because the mean of a partial row is not comparable to a full one"{% endif %}>
+  <div class="mx-row{% if r.lead %} lead{% endif %}{% if r.partial %} partial{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-frontier="{{ r.m_frontier }}" data-easy="{{ r.m_easy }}" data-nobias="{{ r.m_nobias }}"{% if r.partial %} title="only {{ r.cover }} tasks run — ranked below every fully-tested model, because the mean of a partial row is not comparable to a full one"{% endif %}>
     <div class="mx-rail"><span class="rk">{{ r.rank }}</span><span class="nm">{{ r.model }}{% if r.partial %} <span class="pcov">{{ r.cover }}</span>{% endif %}</span><span class="sc">{{ r.score }}{% if r.ci %}<span class="ci" title="95% confidence band across tasks (±1.96·SE)">{{ r.ci }}</span>{% endif %}</span><span class="gp">{% if r.tied %}<span class="tie" title="within the leader's 95% band — not statistically distinguishable on this task set">≈</span>{% endif %}{{ r.gap }}</span></div>
     <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
@@ -1144,16 +1187,28 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
         var cn=hg.querySelector('.cn'); if(cn) cn.textContent=n;
       });
     }
-    var scored=rows.map(function(r){ return {r:r, v:parseFloat(r.dataset[sub])}; });
-    scored.sort(function(a,b){ return (isNaN(b.v)?-1:b.v)-(isNaN(a.v)?-1:a.v); });
-    var lead=scored.length?scored[0].v:NaN, parent=rows.length?rows[0].parentNode:null;
+    var scored=rows.map(function(r){
+      return {r:r, v:parseFloat(r.dataset[sub]),
+              p:r.classList.contains('partial')}; });
+    // A partial row is not comparable to a full one, so it never competes: it
+    // sorts below every complete row, carries no rank, and is not the gap
+    // reference. Without this a 3-of-55 model takes #1 the moment a lens is
+    // clicked, and every gap on the board is then measured from it.
+    scored.sort(function(a,b){
+      if(a.p!==b.p) return a.p?1:-1;
+      return (isNaN(b.v)?-1:b.v)-(isNaN(a.v)?-1:a.v); });
+    var full=scored.filter(function(o){ return !o.p&&!isNaN(o.v); });
+    var lead=full.length?full[0].v:NaN, parent=rows.length?rows[0].parentNode:null;
+    var rk_n=0;
     scored.forEach(function(o,i){
       if(parent&&foot) parent.insertBefore(o.r,foot);
       var sc=o.r.querySelector('.sc'), rk=o.r.querySelector('.rk'), gp=o.r.querySelector('.gp');
+      if(!o.p) rk_n++;
       if(sc) sc.textContent=isNaN(o.v)?'—':o.v.toFixed(3);
-      if(rk) rk.textContent=i+1;
-      if(gp) gp.textContent=(i===0||isNaN(o.v)||isNaN(lead))?'—':'+'+(lead-o.v).toFixed(3).replace(/^0/,'');
-      o.r.classList.toggle('lead', i===0&&!isNaN(o.v));
+      if(rk) rk.textContent=o.p?'—':String(rk_n);
+      if(gp) gp.textContent=(o.p||rk_n===1||isNaN(o.v)||isNaN(lead))?'—'
+        :'+'+(lead-o.v).toFixed(3).replace(/^0/,'');
+      o.r.classList.toggle('lead', !o.p&&rk_n===1&&!isNaN(o.v));
     });
   }
   [].slice.call(seg.querySelectorAll('button')).forEach(function(b){
@@ -1208,6 +1263,7 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
   <button data-f="hard">Hard tasks</button>
   <button data-f="frontier">Frontier tasks</button>
   <button data-f="easy">Easy tasks</button>
+  <button data-f="nobias" title="ranks on the automated checker alone — the two human-graded tasks are rescaled so a full machine pass is 1.0">No Bias</button>
   <button data-f="firsttry">First-try</button>
 </div>
 <div class="seg" data-seg="standings">
@@ -1239,7 +1295,7 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
 <tr{% if r.partial %} data-partial="1"{% endif %} data-kind="{{ r.kind }}" data-w="{{ r.w_v }}" data-kvtok="{{ r.kvtok }}"
     data-kvfixed="{{ r.kvfixed }}" data-native="{{ r.native }}"
     data-pure="{{ r.pure_v }}" data-value="{{ r.value_v }}" data-speed="{{ r.speed_v }}"
-    data-eff="{{ r.eff_v }}" data-hard="{{ r.hard_v }}" data-frontier="{{ r.frontier_v }}" data-easy="{{ r.easy_v }}" data-firsttry="{{ r.firsttry_v }}">
+    data-eff="{{ r.eff_v }}" data-hard="{{ r.hard_v }}" data-frontier="{{ r.frontier_v }}" data-easy="{{ r.easy_v }}" data-nobias="{{ r.nobias_v }}" data-firsttry="{{ r.firsttry_v }}">
 <td class="num">{{ r.rank }}</td>
 <td class="nowrap">{{ r.model }}</td>
 <td class="num lensval" data-sort="{{ r.score_v }}">{{ r.score }}</td>
@@ -1538,6 +1594,7 @@ const RANK_WHAT = {
   hard: 'Ranked by score on the discriminating hard-task subset — cuts through the top-end saturation where everyone scores ~0.99.',
   frontier: 'Ranked by score on the FRONTIER subset — only the tasks where even the top cohort struggles. The sharpest cut, but a small set: expect wide confidence bands and near-ties until more frontier tasks are added.',
   easy: 'Ranked by score on the easy subset — the tasks almost every model gets right. The order here is SUPPOSED to be flat: if a model drops on this lens it is failing the everyday work, not the frontier.',
+  nobias: 'Ranked with every human judgment removed — the automated checker alone, with the two craft-graded tasks rescaled so a full machine pass counts as 1.0. See <a href="info.html#nobias">No Bias</a>.',
   firsttry: 'Ranked by first-try-clean rate: the share of tasks nailed at 1.0 with zero retries.'
 };
 // each lens: the column HEADER label + how to render its value, derived from
@@ -1551,6 +1608,7 @@ const LENS_META = {
   hard:    {label:'Hard score',  fmt:v=>v.toFixed(3)},
   frontier:{label:'Frontier score', fmt:v=>v.toFixed(3)},
   easy:    {label:'Easy score',  fmt:v=>v.toFixed(3)},
+  nobias:  {label:'No Bias',     fmt:v=>v.toFixed(3)},
   firsttry:{label:'First-try',   fmt:v=>(v*100).toFixed(0)+'%'}
 };
 function activeLens(){
@@ -1574,7 +1632,15 @@ function applyRank(){
     cell.textContent = (raw === '' || isNaN(v)) ? '—' : meta.fmt(v);
     cell.setAttribute('data-sort', isNaN(v) ? '' : v);
   });
-  rows.sort((a, b) => val(b) - val(a));           // descending; blanks last
+  // A partial row sorts below every complete one on every lens and carries no
+  // rank. Sorting on value alone lets a 3-of-55 model lead whichever lens it
+  // happens to score well on.
+  const isPart = tr => tr.dataset.partial === '1';
+  rows.sort((a, b) => {
+    const pa = isPart(a), pb = isPart(b);
+    if (pa !== pb) return pa ? 1 : -1;
+    return val(b) - val(a);
+  });
   const parent = rows[0].parentNode;
   rows.forEach(tr => parent.appendChild(tr));      // restack the DOM
   // Renumber the VISIBLE rows with COMPETITION ranking: equal values share a
@@ -1585,15 +1651,21 @@ function applyRank(){
   let shown = 0, rank = 0, prev = null;
   rows.forEach(tr => {
     if (tr.style.display === 'none') return;
+    const cell = tr.querySelector('td');
+    if (isPart(tr)) {
+      cell.textContent = '—';
+      cell.title = 'only part of the suite has run — the mean of a partial row '
+        + 'is not comparable to a full one, so it is not ranked';
+      return;
+    }
     shown++;
     const v = parseFloat(tr.dataset[lens]);
     const key = isNaN(v) ? null : v.toFixed(4);
     if (key === null || key !== prev) rank = shown;   // new value -> real position
     prev = key;
-    const cell = tr.querySelector('td');
     cell.textContent = rank;
     cell.title = (key !== null && rows.filter(r => r.style.display !== 'none'
-      && parseFloat(r.dataset[lens]).toFixed(4) === key).length > 1)
+      && !isPart(r) && parseFloat(r.dataset[lens]).toFixed(4) === key).length > 1)
       ? 'tied on this lens — the models share this score, so any order between '
         + 'them is arbitrary; separate them on speed or cost' : '';
   });
@@ -1662,7 +1734,7 @@ _VERSCMP_JS = r"""<script>
   function slug(n){ return (n.replace(/[^a-zA-Z0-9._-]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase()) || 'model'; }
   function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function shade(v){ if (v==null) return ''; var a=(0.10+0.90*Math.max(0,Math.min(1,v))).toFixed(3); return 'background:rgba(var(--cell-rgb),'+a+')'; }
-  function box(v){ return '<span class="vc-cell" style="'+shade(v)+'">'+(v==null?'—':v.toFixed(2))+'</span>'; }
+  function box(v){ var c='vc-cell'; if (v!=null){ if (v>=0.38) c+=' flip-d'; if (v>=0.53) c+=' flip-l'; } return '<span class="'+c+'" style="'+shade(v)+'">'+(v==null?'—':v.toFixed(2))+'</span>'; }
   function chip(d){ if (d==null) return '<span class="vc-d flat">—</span>'; var c=d>0.005?'up':(d<-0.005?'down':'flat'); return '<span class="vc-d '+c+'">'+(d>0?'+':'')+d.toFixed(2)+'</span>'; }
   function verd(v){ return '<span class="vc-verd '+v+'">'+(v==='na'?'n/a':v)+'</span>'; }
   function catStrip(cats){ return '<div class="vc-cats">'+cats.map(function(c){ return '<div class="vc-catrow"><span class="vc-cat">'+esc(c.cat)+'</span>'+box(c.a)+'→'+box(c.b)+chip(c.delta)+'<span class="vc-note">'+c.n+' task(s)</span></div>'; }).join('')+'</div>'; }
@@ -1782,7 +1854,6 @@ def _avg(vals):
 
 
 def _pct(vals, p: float):
-    """Linear-interpolated percentile."""
     vals = sorted(v for v in vals if v is not None)
     if not vals:
         return None
@@ -1793,8 +1864,6 @@ def _pct(vals, p: float):
 
 
 def _fmt_score(v: float) -> str:
-    """Every score to 3 decimals, so a non-perfect never rounds up to a fake
-    '1.00' and two models near the saturated top stay distinguishable."""
     return f"{v:.3f}"
 
 
@@ -1807,8 +1876,6 @@ def _score_cell(v: float | None) -> str:
 
 
 def _att_per_pass(rs: list[dict]) -> dict:
-    """attempts / perfect-passes. Perfect = score exactly 1.0. Returns the
-    ratio value, a formatted string, and a raw-count context string."""
     attempts = sum(r.get("n_attempts") or 1 for r in rs)
     scored = [r["score"]["score"] for r in rs
               if r["score"].get("status") == "scored"]
@@ -1829,7 +1896,6 @@ def _model_summary(run: dict, model: str) -> dict:
 
 
 def _summarize(rs: list[dict]) -> dict:
-    """Aggregate any set of task results into the summary-row metrics."""
     scored = [r["score"]["score"] for r in rs if r["score"].get("status") == "scored"]
     avg = _avg(scored)
     score_se = score_ci95 = None
@@ -1926,7 +1992,6 @@ def _power_cfg() -> dict:
 
 
 def _energy_usd(energy_wh) -> float:
-    """Measured GPU energy -> money at the configured rate. 0 when unknown."""
     if not energy_wh:
         return 0.0
     rate = _power_cfg().get("cost_per_kwh")
@@ -1936,9 +2001,6 @@ def _energy_usd(energy_wh) -> float:
 
 
 def _energy_cost(energy_wh) -> str:
-    """GPU energy -> money at the directives.yaml rate. Marginal and GPU-only
-    (excludes CPU/RAM/board/PSU) and ignores hardware amortisation — a floor on
-    what the machine pulls, not a utility bill."""
     if not energy_wh:
         return "—"
     cfg = _power_cfg()
@@ -1951,8 +2013,6 @@ def _energy_cost(energy_wh) -> str:
 
 
 def _model_ids() -> dict[str, str]:
-    """name -> the concrete model id it runs (the label vs the thing actually
-    measured — e.g. "claude-cli-sonnet" running claude-sonnet-4-6)."""
     try:
         from .registry import load_models
         return {m.name: m.model for m in load_models(include_disabled=True)}
@@ -1961,7 +2021,6 @@ def _model_ids() -> dict[str, str]:
 
 
 def _leader_key(summaries: dict):
-    """Ranking: score desc, then cost asc, then speed desc."""
     def key(m: str):
         s = summaries[m]
         return (-(s["avg_score_val"] if s["avg_score_val"] is not None else -1),
@@ -1971,8 +2030,6 @@ def _leader_key(summaries: dict):
 
 
 def _pre_v05_caveat(dataset_key: str) -> str:
-    """Honesty banner for archived datasets scored before the v0.5 methodology
-    fixes. Empty for the live set and 0.5+ archives."""
     try:
         parts = tuple(int(x) for x in str(dataset_key).split("."))
     except (ValueError, AttributeError):
@@ -1989,14 +2046,6 @@ def _pre_v05_caveat(dataset_key: str) -> str:
 
 def leaderboard(runs: list[dict] | None = None,
                 tasks_dir: Path | None = None) -> list[dict]:
-    """The canonical standings — every run per model·task aggregated, ranked. One
-    aggregation and ranking key for both the overview and the content pipeline.
-
-    A model that hasn't attempted the whole suite is NOT ranked: its mean isn't
-    comparable, and the tasks it's missing skew toward the ones it failed. Those
-    are still returned with `rank: None` and `partial: True`, shown but not
-    ranked.
-    """
     runs = load_all_runs() if runs is None else runs
     _, hidden = _model_prefs()
     all_models = sorted({res["model"] for r in runs for res in r["results"]}
@@ -2034,9 +2083,6 @@ _MEAN_FIELDS = ("wall_ms", "tokens_in", "tokens_out", "cost_usd",
 
 
 def _runs_badge(n_runs: int, n_scored: int, run_ids: list[str]) -> tuple[str, str]:
-    """The ×N aggregate badge + tooltip. The score is the mean of the SCORED
-    runs only, so when some runs didn't score (crash/spiral/DNF) the badge reads
-    scored/total (e.g. ×2/3) rather than implying all 3 counted toward it."""
     if n_runs <= 1:
         return "", ""
     ids = ", ".join(run_ids)
@@ -2048,17 +2094,6 @@ def _runs_badge(n_runs: int, n_scored: int, run_ids: list[str]) -> tuple[str, st
 
 
 def _aggregate(entries: list[dict]) -> dict:
-    """Every run of one model·task in this dataset, as a single result.
-
-    Testing again does not replace the old number, it flattens into it: the
-    score is the MEAN of every scored run. Unscored runs (crash, spiral, DNF)
-    are left out of the mean, matching _summarize, which counts only
-    status=="scored" toward a model's average — an error must not silently
-    become a 0 here when it isn't one there.
-
-    Shaped exactly like a single result so every consumer reads it unchanged,
-    plus n_runs/score_sigma/run_ids for pages that want to show the spread.
-    """
     import statistics
     newest = entries[-1]
     n_scored = sum(1 for e in entries
@@ -2090,18 +2125,6 @@ def _aggregate(entries: list[dict]) -> dict:
 
 
 def _consistency(model: str, task_data: dict) -> dict:
-    """How reproducible is this model, and where is it least so?
-
-    Mean of the per-task σ over the tasks run more than once, plus the single
-    worst task by name. The old measure was the spread of a model's whole-SUITE
-    average between runs, which answers nothing: it is empty until a model has
-    two runs, and once it has two it compares a 42-task pass against a 5-task
-    re-run of the hard ones and calls the difference "inconsistency". Spread is
-    only meaningful against the SAME task.
-
-    A task run 3× that never moved (σ 0.000) is a real result and must not read
-    the same as one never repeated ("—").
-    """
     import statistics
     wobble = sorted(
         ((e["score_sigma"], tid) for tid, info in task_data.items()
@@ -2130,11 +2153,6 @@ def _consistency(model: str, task_data: dict) -> dict:
 
 
 def collect_task_data(runs: list[dict]) -> dict[str, dict]:
-    """task_id -> aggregated result per model + full history, across all runs.
-
-    `agg` is the basis for every page. A model·task measured more than once in a
-    dataset aggregates (see _aggregate) — it is not the newest run.
-    """
     data: dict[str, dict] = {}
     per: dict[tuple[str, str], list[dict]] = {}
     for r in runs:
@@ -2159,8 +2177,6 @@ def _task_defs(tasks_dir: Path | None = None) -> dict:
 
 
 def _model_prefs() -> tuple[dict, set]:
-    """(color overrides, hidden models) from the registry yamls. Historical
-    models with no yaml keep defaults: auto color, shown."""
     try:
         from .registry import load_models
         models = load_models(include_disabled=True)
@@ -2173,7 +2189,6 @@ def _model_prefs() -> tuple[dict, set]:
 
 
 def _hex_to_hsl(hexc: str) -> tuple[float, float, float] | None:
-    """'#rrggbb' -> (h 0-360, s 0-100, l 0-100), or None if unparseable."""
     h = (hexc or "").lstrip("#")
     if len(h) == 3:
         h = "".join(c * 2 for c in h)
@@ -2199,11 +2214,6 @@ def _hex_to_hsl(hexc: str) -> tuple[float, float, float] | None:
 def _model_colors(order: list[str], overrides: dict,
                   families: dict | None = None,
                   family_colors: dict | None = None) -> dict[str, str]:
-    """One color per model, used by every chart. A per-model yaml override wins.
-    Otherwise, with `families` given, colour BY FAMILY: a manual family colour
-    shades across its members; a family (or no-family singleton) without one gets
-    an auto golden-angle hue clear of the manual hues. Without `families`, fall
-    back to the fixed palette slots (historical data)."""
     colors = {}
     if families is not None:
         family_colors = family_colors or {}
@@ -2263,9 +2273,6 @@ def _model_colors(order: list[str], overrides: dict,
 
 
 def load_versions() -> list[tuple]:
-    """Every dataset version (archives + live), chronological, each as
-    (key, task_data, tdefs). The shared basis for every cross-version view —
-    load it ONCE and pass it down; it reads all archives + live runs."""
     from .archive import list_archives
     specs = []
     for a in list_archives():
@@ -2288,17 +2295,40 @@ def load_versions() -> list[tuple]:
     return out
 
 
+def covered_models(task_data: dict, tids=None) -> set[str]:
+    """Models with a scored cell for EVERY task in the set.
+
+    An aggregate over a set of tasks is only comparable between models that
+    ran the whole set: a mean over the 3 tasks a model happened to finish is
+    not the same quantity as a mean over 55.
+    """
+    ids = list(task_data if tids is None else tids)
+    ids = [t for t in ids if t in task_data]
+    if not ids:
+        return set()
+    seen: dict[str, int] = {}
+    for tid in ids:
+        for m, e in task_data[tid]["agg"].items():
+            if (e["score"].get("status") == "scored"
+                    and e["score"].get("score") is not None):
+                seen[m] = seen.get(m, 0) + 1
+    return {m for m, n in seen.items() if n >= len(ids)}
+
+
 def version_rankings(versions: list[tuple] | None = None) -> list[dict]:
-    """Leaderboard rank per model for every version. Ranks are comparable across
-    versions, scores aren't. Feeds the bump chart. Returns
-    [{key, n_models, ranks: {model: {rank, score}}}]."""
     versions = versions if versions is not None else load_versions()
     _, hidden = _model_prefs()
     out = []
     for key, task_data, _tdefs in versions:
+        full = covered_models(task_data)
         scores: dict[str, list[float]] = {}
+        skipped: set[str] = set()
         for info in task_data.values():
             for m, e in info["agg"].items():
+                if m not in full:
+                    if m not in hidden:
+                        skipped.add(m)
+                    continue
                 if m in hidden or e["score"].get("status") != "scored":
                     continue
                 scores.setdefault(m, []).append(e["score"]["score"])
@@ -2312,7 +2342,8 @@ def version_rankings(versions: list[tuple] | None = None) -> list[dict]:
                 rank = i + 1
             prev = round(s, 4)
             ranks[m] = {"rank": rank, "score": s}
-        out.append({"key": key, "n_models": len(ranks), "ranks": ranks})
+        out.append({"key": key, "n_models": len(ranks), "ranks": ranks,
+                    "n_partial_excluded": len(skipped)})
     return out
 
 
@@ -2330,8 +2361,6 @@ def _verdict(delta) -> str:
 
 
 def _model_scores(model: str, task_data: dict, tdefs: dict) -> dict:
-    """{tid: (score, content_hash, category)} for a model's SCORED tasks in a
-    version — the raw material for a like-for-like version diff."""
     out = {}
     for tid, info in task_data.items():
         e = info["agg"].get(model)
@@ -2347,11 +2376,6 @@ def _model_scores(model: str, task_data: dict, tdefs: dict) -> dict:
 
 
 def version_diff(model, tdA, tdefsA, tdB, tdefsB, key_a="", key_b=""):
-    """One model, version A -> B. Compares only tasks the model was scored on in
-    BOTH versions, split into 'identical' (same content_hash — a true
-    like-for-like) and 'changed' (same id, edited test — delta is not
-    trustworthy). Headline numbers use identical tasks only. Returns None if the
-    model isn't present in both versions."""
     A = _model_scores(model, tdA, tdefsA)
     B = _model_scores(model, tdB, tdefsB)
     if not A or not B:
@@ -2394,10 +2418,6 @@ def version_diff(model, tdA, tdefsA, tdB, tdefsB, key_a="", key_b=""):
 
 
 def family_version_diff(family, members, tdA, tdefsA, tdB, tdefsB, key_a="", key_b=""):
-    """A whole family, version A -> B. Rolls up each member's version_diff over
-    the members present in BOTH versions (a new member never counts as
-    improvement), pooling identical-task scores for the family/category numbers.
-    Returns None if no member spans both versions."""
     mrows, pool = [], []
     added_m, dropped_m = [], []
     for m in sorted(members):
@@ -2443,9 +2463,6 @@ def family_version_diff(family, members, tdA, tdefsA, tdB, tdefsB, key_a="", key
 
 
 def _all_pairs(present: list[tuple], diff_fn) -> dict:
-    """Every version pair (a<b) among `present` [(key, td, tdefs)...] -> diff,
-    keyed 'a|b'. Empty/None diffs are dropped so the picker only offers real
-    comparisons."""
     pairs = {}
     for i in range(len(present)):
         for j in range(i + 1, len(present)):
@@ -2458,7 +2475,6 @@ def _all_pairs(present: list[tuple], diff_fn) -> dict:
 
 
 def model_version_payload(model: str, versions: list[tuple]) -> dict:
-    """{versions:[keys the model appears in], pairs:{'a|b': version_diff}}."""
     present = [(k, td, tdefs) for (k, td, tdefs) in versions
                if _model_scores(model, td, tdefs)]
     pairs = _all_pairs(present, lambda *a: version_diff(model, *a))
@@ -2474,8 +2490,6 @@ def family_version_payload(family: str, members: set, versions: list[tuple]) -> 
 
 
 def _family_of_map(versions: list[tuple]) -> dict:
-    """model name -> family, for every model across all versions (registry yaml
-    wins; else inferred from the name)."""
     from .registry import infer_family, load_models
     reg = {m.name: m for m in load_models(include_disabled=True)}
     names = {mm for _k, td, _t in versions for info in td.values()
@@ -2489,8 +2503,6 @@ def _family_of_map(versions: list[tuple]) -> dict:
 
 def bump_chart(versions: list[dict], colors: dict[str, str],
                width=1120) -> str:
-    """Rank-trajectory (bump) chart across suite versions. Solid = present in
-    every version, faded = partial coverage."""
     if len(versions) < 2:
         return ""
     models = sorted({m for v in versions for m in v["ranks"]})
@@ -2659,7 +2671,7 @@ def build_task_report(task_id: str, info: dict, tdef,
     } for e in reversed(info["history"])]
 
     return _env.from_string(TASK_TEMPLATE).render(
-        nav=_nav("../"),
+        nav=_nav("../"), brand=_brand("../"),
         sort_js=_SORT_JS, focus_js=_FOCUS_JS,
         files_col=(_RUNS_BASE == config.RUNS_DIR),
         css=BASE_CSS, task_id=task_id,
@@ -2748,7 +2760,7 @@ def build_run_report(run: dict, tdefs: dict | None = None) -> str:
         "recovered": ar["retries"]["recovered"], "fatal": ar["retries"]["fatal"],
     }
     return _env.from_string(RUN_TEMPLATE).render(
-        nav=_nav("../"),
+        nav=_nav("../"), brand=_brand("../"),
         sort_js=_SORT_JS,
         css=BASE_CSS, run_id=run["run_id"], manifest=run["manifest"],
         env_line=html.escape(env_line), run_rollup=run_rollup,
@@ -2758,14 +2770,12 @@ def build_run_report(run: dict, tdefs: dict | None = None) -> str:
 MODEL_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ model }} · LLM Testing</title><style>{{ css }}</style></head><body>
-<div class="topbar">
-  <div><h1>{{ model }}</h1>
-  <div class="sub">{{ where }} · {{ dataset_label or "live dataset" }} ·
+<div class="topbar">{{ brand }}<div class="ttl"><h1>{{ model }}</h1></div>
+<div class="nav">{{ nav }}</div></div>
+<div class="pagebar"><div class="sub">{{ where }} · {{ dataset_label or "live dataset" }} ·
   aggregated result per task across {{ n_runs }} run(s)
   {% for l in model_links %}<a class="reflink" href="{{ l.url }}" target="_blank"
     rel="noopener">{{ l.short }}</a>{% endfor %}</div></div>
-  <div class="nav">{{ nav }}</div>
-</div>
 
 <div class="tiles">
 {% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}{% if t.sub %}<span class="vsub" title="{{ t.sub_tip }}">{{ t.sub }}</span>{% endif %}</div><div class="k">{{ t.k }}</div></div>
@@ -2773,7 +2783,7 @@ MODEL_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 {% if detail_rows %}
 <h2>Model details — what we tested</h2>
-<div class="card" style="padding:6px 4px"><table>
+<div class="card"><table>
 {% for d in detail_rows %}
 <tr><td class="small" style="width:230px;color:var(--muted)">{{ d.k }}</td><td>{{ d.v }}</td></tr>
 {% endfor %}
@@ -2835,7 +2845,7 @@ excluded set live in <code>directives.yaml</code> · <code>assess:</code>.</div>
 
 {% if verscmp %}
 <h2>Version-over-version</h2>
-<div class="card">
+<div class="card vc-wrap">
   <div class="vc-pick">
     <span>compare this model:</span>
     <label>from<select id="vc-a"></select></label>
@@ -2899,9 +2909,6 @@ open the model's transcripts and workspaces on the results server.</div>
 
 
 def _effort_label(e: dict) -> str:
-    """The per-task 'tries' cell, disambiguated by tier: an agentic task's number
-    is turns in the tool-use loop (which is why it can read 5 while retries are
-    0), a single-shot task's is the first try plus any retries."""
     turns = e.get("turns") or 1
     retries = e.get("n_retries") or 0
     if (e.get("tier") or 1) >= 2:
@@ -2923,17 +2930,6 @@ def _with_short(links: list[dict]) -> list[dict]:
 
 def _model_links(model: str, mo=None, *, local: bool | None = None,
                  publisher: str = "") -> list[dict]:
-    """External reference links for a model — Hugging Face for open weights,
-    OpenRouter for gateway-served ones.
-
-    The exact repo/slug lives only in the model yaml, which the public build does
-    NOT ship (the yamls carry private endpoints). So the yaml, when present, gives
-    a DIRECT link; without it we fall back to a search built from the report's own
-    model name and the publisher recorded in the run data — both of which always
-    ship. The links therefore widen from a direct hit to a search in the public
-    build rather than disappearing, which is what happened when this depended on
-    the yaml alone. `short` is the compact header form; `label` the long one.
-    """
     from urllib.parse import quote
 
     if not isinstance(model, str):
@@ -2970,9 +2966,15 @@ def _model_links(model: str, mo=None, *, local: bool | None = None,
     return _with_short([hf, orr] if is_local else [orr, hf])
 
 
+def _cli_effort_default() -> str | None:
+    from .runner import _cli_effort_default as _d
+    try:
+        return _d()
+    except Exception:
+        return None
+
+
 def _model_detail_rows(mo, mi: dict, fp, hosts: list) -> list[dict]:
-    """(label, value) rows describing the exact model as tested — id, quant, max
-    context, arch, VRAM, the generation budget it ran under, price, gateway host."""
     rows = []
     add = lambda k, v: rows.append({"k": k, "v": v})
     if mo:
@@ -3056,6 +3058,28 @@ def _model_detail_rows(mo, mi: dict, fp, hosts: list) -> list[dict]:
                 "work, so each task category draws from the profile above that "
                 "matches it. A category with no matching profile uses the base "
                 "row.</div>")
+        if mo.effort_settable:
+            lvl = mo.effort_as_tested
+            if lvl == "inherited":
+                amb = _cli_effort_default()
+                shown = (f'<b>not set by the harness</b> — inherited from the '
+                         f'CLI session'
+                         + (f", currently <code>{html.escape(amb)}</code>"
+                            if amb else ""))
+                note = ("This transport takes <code>--effort</code> "
+                        f"({', '.join(mo.EFFORT_LEVELS)}), and the harness does "
+                        "not pass it, so the level is whatever the operator's "
+                        "CLI configuration says at the moment of the run. Runs "
+                        "recorded before this was tracked do not state their "
+                        "level at all, so those scores cannot be pinned to one.")
+            else:
+                shown = f"<b><code>{html.escape(lvl)}</code></b>"
+                note = ("Passed explicitly as <code>--effort</code>, so the run "
+                        "does not depend on the operator's CLI configuration.")
+            add("Reasoning effort (as tested)", shown
+                + '<div class="note" style="font-size:11.5px;margin-top:2px">'
+                + note + " <a href=\"../info.html#effort\">How this is "
+                "decided</a>.</div>")
         if mo.sampling_source:
             src = html.escape(str(mo.sampling_source))
             add("Sampling reference",
@@ -3078,18 +3102,10 @@ def _model_detail_rows(mo, mi: dict, fp, hosts: list) -> list[dict]:
 
 
 def _cat_code(tids: list[str]) -> str:
-    """Short matrix column-header code for a category = its shared task-id prefix
-    (ag, py, ctx, web, rs, if, hl, math, ext, tool), uppercased. Keeps the header
-    from overflowing a narrow 2-task column group the way the full name does; the
-    full category name rides in the cell's title."""
     return tids[0].split("-")[0].upper() if tids else ""
 
 
 def _mx_cell(entry, tdef, acfg, suspect, href):
-    """One model×task matrix cell — fill = score ramp, colour = failure TYPE
-    (assess.classify), so the shade never disagrees with the diagnosis. Shared by
-    the overview, the model page's run-matrix, and the discriminate hard-matrix.
-    `href` is where the cell links; tips are keyed off the task id."""
     from . import assess as _assess
     tid = tdef.id
     if entry is None:
@@ -3112,10 +3128,6 @@ def _mx_cell(entry, tdef, acfg, suspect, href):
 
 
 def _mirror_detail_row(entry: dict | None) -> dict | None:
-    """The 'Held-out mirror' detail row for one model, or None if the mirror has
-    not been run against it. Absence is left silent here — the info page carries
-    the coverage statement, and a row saying 'not measured' on every model page
-    would be noise rather than disclosure."""
     if not entry:
         return None
     d = entry["delta"]
@@ -3131,7 +3143,7 @@ def _mirror_detail_row(entry: dict | None) -> dict | None:
                   f'<span style="color:{col}">({entry.get("band", "flat")})</span>'
                   '<div class="note" style="font-size:11.5px;margin-top:2px">'
                   'The same task shapes regenerated at a different seed and never '
-                  'published, so a memorised instance cannot help. Positive means '
+                  'published, so a memorized instance cannot help. Positive means '
                   'this model did better on the <em>published</em> instance. One '
                   f'task differing moves this by {entry.get("one_task", 0):.3f}, so '
                   '<b>flat</b> is within one task\'s worth and the expected result '
@@ -3141,13 +3153,6 @@ def _mirror_detail_row(entry: dict | None) -> dict | None:
 
 
 def _confirmed_row(entry: dict | None) -> dict | None:
-    """The 'Sampling confirmed received' row for a local model.
-
-    `sampling_used` on a cell is what the harness INTENDED to send. This row is
-    the provider's own account of what arrived, read from LM Studio's server log —
-    a different claim, and the one that matters, because every configuration bug
-    this suite has shipped lived in the gap between the two.
-    """
     if not entry or not entry.get("total"):
         return None
     ok, bad, none = entry["confirmed"], entry["mismatched"], entry["unlogged"]
@@ -3354,13 +3359,41 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
             import json as _json
             verscmp = _json.dumps(payload).replace("</", "<\\/")
     return _env.from_string(MODEL_TEMPLATE).render(
-        nav=_nav("../"),
+        nav=_nav("../"), brand=_brand("../"),
         sort_js=_SORT_JS, verscmp=verscmp, verscmp_js=_VERSCMP_JS,
         css=BASE_CSS, model=html.escape(model), slug_q=quote(model),
         where=where, dataset_label=dataset_label, n_runs=len(my_runs),
         tiles=tiles, cats=cats, task_rows=task_rows, run_rows=run_rows,
         runmatrix=runmatrix,
         detail_rows=detail_rows, model_links=model_links, asmt=asmt)
+
+
+def machine_only_score(entry: dict, tdef) -> float | None:
+    cap = float((getattr(tdef, "scoring", None) or {}).get("automated_max", 1.0))
+    s = entry.get("score") or {}
+    if s.get("status") != "scored":
+        return None
+    raw = s.get("machine_score")
+    if raw is None:
+        raw = s.get("score")
+    if raw is None:
+        return None
+    if cap <= 0:
+        return None
+    return min(1.0, raw / cap)
+
+
+def machine_only_means(task_data: dict, tdefs: dict) -> dict[str, float]:
+    per: dict[str, list[float]] = {}
+    for tid, info in task_data.items():
+        tdef = tdefs.get(tid)
+        if tdef is None:
+            continue
+        for model, entry in info["agg"].items():
+            v = machine_only_score(entry, tdef)
+            if v is not None:
+                per.setdefault(model, []).append(v)
+    return {m: sum(v) / len(v) for m, v in per.items() if v}
 
 
 def build_index(runs: list[dict], tasks_dir: Path | None = None,
@@ -3446,15 +3479,12 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
     _free_tier = {m for m in all_models
                   if str(_ids.get(m, "")).endswith(":free")}
 
-    def _fit_rows_for(subset: list[str]):
-        """One ACTIONABLE line per category instead of a wall of names.
+    _cat_task_n = {c: sum(1 for t in tdefs.values() if t.category == c)
+                   for c in all_cats}
 
-        Listing 35 "top" models is not a recommendation, and when the whole
-        field ties at 1.00 a score ranking is arbitrary — so the picks are
-        tie-aware: among everything that clears the capable bar, name the
-        cheapest and the fastest (the axes that actually decide it), show how
-        many tie at the top, and collapse the rest behind a disclosure."""
-        fr = task_fit({m: by_model.get(m, []) for m in subset}, all_cats)
+    def _fit_rows_for(subset: list[str]):
+        fr = task_fit({m: by_model.get(m, []) for m in subset}, all_cats,
+                      _cat_task_n)
         rows = []
         for row in fr["rows"]:
             cls = row["classes"]
@@ -3468,9 +3498,6 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                     and abs(v - best_v) < 1e-9]
 
             def _pick(cands, key, reverse=False):
-                """Cheapest/fastest among the capable — tie-broken by SCORE, so a
-                pack of $0 models (free APIs + locals billed as electricity)
-                yields the best of them rather than an arbitrary one."""
                 vals = [(m, summaries[m].get(key)) for m in cands
                         if summaries[m].get(key) is not None]
                 if not vals:
@@ -3523,7 +3550,10 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
     tps_max = max(((s["tps_val"] or 0) for s in summaries.values()),
                   default=0) or 1
     speed_rows = []
-    for m in all_models:
+    _n_full = len(tdefs) or 1
+    _full_cov = [m for m in all_models
+                 if len(by_model.get(m, [])) >= _n_full]
+    for m in _full_cov:
         s = summaries[m]
         where = "local" if s["local"] else "cloud / CLI"
         if s.get("quant"):
@@ -3628,10 +3658,12 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             "hard_v": (f"{hard_mean[m]:.4f}" if m in hard_mean else ""),
             "frontier_v": (f"{frontier_mean[m]:.4f}" if m in frontier_mean else ""),
             "easy_v": (f"{easy_mean[m]:.4f}" if m in easy_mean else ""),
+            "nobias_v": (f"{nobias_mean[m]:.4f}" if m in nobias_mean else ""),
         }
 
     _dstats = discrimination_stats(runs, tdefs)
     _hardened_set = set(_dstats["hard_subset"]) | set(_dstats["frontier_subset"])
+    nobias_mean = machine_only_means(task_data, tdefs)
     hard_mean = {h["model"]: h["mean"] for h in _dstats["hard_rank"]}
     easy_mean = {h["model"]: h["mean"] for h in _dstats["easy_rank"]}
     frontier_mean = {h["model"]: h["mean"] for h in _dstats["frontier_rank"]}
@@ -3651,7 +3683,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                   for m in incomplete]
 
     points = []
-    for m in all_models:
+    for m in complete:
         graded = [e for e in by_model.get(m, [])
                   if e["score"].get("status") == "scored" and e["tokens_out"]]
         if graded:
@@ -3662,6 +3694,8 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                 "color": slot.get(m, "var(--accent)"),
             })
     frontier = scatter(sorted(points, key=lambda p: p["x"]))
+    _plotted = {p["label"] for p in points}
+    legend_html = chart_legend([e for e in legend if e["model"] in _plotted])
 
     def _vpt(m, x, xdisp):
         s = summaries[m]
@@ -3737,9 +3771,10 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         -_cover[m] if _cover[m] < _n_suite else 0,
         -(summaries[m]["avg_score_val"]
           if summaries[m]["avg_score_val"] is not None else -1.0), m))
-    _lead_v = next((summaries[m]["avg_score_val"] for m in _mrank
+    _full = [m for m in _mrank if _cover[m] >= _n_suite]
+    _lead_v = next((summaries[m]["avg_score_val"] for m in _full
                     if summaries[m]["avg_score_val"] is not None), None)
-    _lead_m = next((m for m in _mrank
+    _lead_m = next((m for m in _full
                     if summaries[m]["avg_score_val"] is not None), None)
     _lead_ci = summaries[_lead_m]["score_ci95"] if _lead_m else None
     _flag_of = {r["tid"]: r["flag"] for r in _dstats["rows"]}
@@ -3759,7 +3794,11 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         return sum(xs) / len(xs) if xs else None
 
     matrix_rows = []
+    _rk = 0
     for i, m in enumerate(_mrank):
+        _partial = _cover[m] < _n_suite
+        if not _partial:
+            _rk += 1
         agg = summaries[m]["avg_score_val"]
         groups = [[{**_mcell(task_data[tid]["agg"].get(m), tdefs[tid], m),
                     "sub": _sub_of[tid], "fr": "1" if _fr_of[tid] else ""}
@@ -3767,27 +3806,34 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         ci = summaries[m]["score_ci95"]
         if agg is None:
             score_s, gap_s, ci_s, tied = "—", "", "", False
+        elif _partial:
+            score_s = f"{agg:.3f}"
+            ci_s = "" if ci is None else "±" + f"{ci:.3f}".lstrip("0")
+            gap_s, tied = "—", False
         else:
             score_s = f"{agg:.3f}"
-            gap_s = ("—" if (i == 0 or _lead_v is None
+            gap_s = ("—" if (_rk == 1 or _lead_v is None
                              or abs(agg - _lead_v) < 1e-9)
                      else "+" + f"{_lead_v - agg:.3f}".lstrip("0"))
             ci_s = "" if ci is None else "±" + f"{ci:.3f}".lstrip("0")
-            tied = (i != 0 and _lead_v is not None and ci is not None
+            tied = (_rk != 1 and _lead_v is not None and ci is not None
                     and _lead_ci is not None
                     and (agg + ci) >= (_lead_v - _lead_ci))
         _mh, _me = _sub_mean(m, _hard_ids), _sub_mean(m, _easy_ids)
         _mf = _sub_mean(m, _frontier_ids)
+        _mn = nobias_mean.get(m)
         matrix_rows.append({
-            "rank": i + 1, "model": _mlink(m), "score": score_s,
+            "rank": ("—" if _partial else _rk), "model": _mlink(m),
+            "score": score_s,
             "ci": ci_s, "tied": tied,
-            "gap": gap_s, "lead": (i == 0 and agg is not None),
-            "partial": _cover[m] < _n_suite,
+            "gap": gap_s, "lead": (not _partial and _rk == 1 and agg is not None),
+            "partial": _partial,
             "cover": f"{_cover[m]}/{_n_suite}",
             "m_all": ("" if agg is None else f"{agg:.6f}"),
             "m_hard": ("" if _mh is None else f"{_mh:.6f}"),
             "m_easy": ("" if _me is None else f"{_me:.6f}"),
             "m_frontier": ("" if _mf is None else f"{_mf:.6f}"),
+            "m_nobias": ("" if _mn is None else f"{_mn:.6f}"),
             "groups": groups})
 
     matrix_foot = []
@@ -3855,7 +3901,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                            "d": "run the suite to populate"})
 
     return _env.from_string(INDEX_TEMPLATE).render(
-        nav=_nav(""), public_nav=_PUBLIC_NAV,
+        nav=_nav(""), brand=_brand(""), public_nav=_PUBLIC_NAV,
         sort_js=_SORT_JS,
         css=BASE_CSS, tiles=tiles, runs=runs_view, run_ids=run_ids,
         mast_eyebrow=mast_eyebrow, mast_stats=mast_stats, matrix=matrix,
@@ -3877,10 +3923,6 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
 
 
 def _changelog_for_version(md: str, version: str) -> str:
-    """Trim CHANGELOG.md to the CURRENT dataset's major.minor. Live reports show
-    exactly one dataset, so an end user on v0.6 has no use for the v0.5 / v0.4
-    history — those live in their own archived reports. Keeps the preamble and
-    `## Unreleased`, keeps every `## <major.minor>.x` section, drops older minors."""
     mm = ".".join(version.split(".")[:2])
     out, keep = [], True
     for ln in md.splitlines():
@@ -3895,8 +3937,6 @@ def _changelog_for_version(md: str, version: str) -> str:
 
 
 def _md_to_html(md: str) -> str:
-    """Minimal markdown -> HTML for CHANGELOG.md. Deliberately tiny — we author
-    the file, so we control the subset and need no third-party dependency."""
     def inline(s: str) -> str:
         s = html.escape(s)
         s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
@@ -3962,7 +4002,7 @@ CATEGORY_BLURBS = {
         "they demand deep thought but reward a model that simply reads the spec.",
     "reasoning": "Deduction under interference: irrelevant numbers, precise "
         "instructions, and 'twisted classics' — famous puzzles with one premise "
-        "changed. Those punish a memorised answer and reward actually reading.",
+        "changed. Those punish a memorized answer and reward actually reading.",
     "agentic": "Tier 2. The model gets tools and a private workspace and must "
         "explore, edit, and verify its own work. Scored on the WORKSPACE it "
         "leaves behind — not on what it claims it did — so a model that talks a "
@@ -4089,7 +4129,7 @@ CAVEATS = [
      "them."),
     ("Timing-scored tasks are calibrated, not absolute.",
      "ag-006 grades an <em>algorithmic</em> speedup, and the naive solution is "
-     "orders of magnitude slower than the optimised one. But an absolute "
+     "orders of magnitude slower than the optimized one. But an absolute "
      "wall-clock budget would measure how busy the machine was rather than how "
      "good the model was — we learned that the hard way when a correct 0.3s "
      "submission scored <strong>zero</strong> on a loaded box. The budget now "
@@ -4124,9 +4164,9 @@ CHART_GUIDE = [
      "dot is <strong>dominated</strong> — some other model scores at least as "
      "high while costing less or running faster, so it is never the rational "
      "pick. Hover shows every model under the cursor."),
-    ("Colours and dots",
-     "Every chart on the overview shares <strong>one colour per model</strong>, "
-     "so a model is the same colour everywhere. Charts are dots rather than "
+    ("Colors and dots",
+     "Every chart on the overview shares <strong>one color per model</strong>, "
+     "so a model is the same color everywhere. Charts are dots rather than "
      "lines because runs are discrete measurements, not a continuous signal — "
      "connecting them would imply a trend that isn't there."),
 ]
@@ -4155,11 +4195,9 @@ INFO_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 .pill { font-size:11px; border:1px solid var(--border); border-radius:999px;
   padding:1px 8px; color:var(--ink-dim); }
 </style></head><body>
-<div class="topbar">
-  <div><h1>LLM Testing</h1>
-  <div class="sub">what the tests do · what the numbers mean · changelog</div></div>
-  <div class="nav">{{ nav }}</div>
-</div>
+<div class="topbar">{{ brand }}<div class="ttl"><h1>LLM Testing</h1></div>
+<div class="nav">{{ nav }}</div></div>
+<div class="pagebar"><div class="sub">what the tests do · what the numbers mean · changelog</div></div>
 <div class="wrap info">
 
 <div class="toc">
@@ -4236,6 +4274,60 @@ recorded next to the result, so a craft score always shows its reasons.</p>
 would be a checker nobody can reproduce. Capping the machine at mechanics keeps
 the other {{ n_tasks - human_graded|length }} tasks fully automatic and honest
 about it.</p>
+
+<h2 id="effort">Reasoning effort — the setting we were not controlling</h2>
+<p>Claude models here run through the <code>claude</code> CLI, which exposes a
+<strong>reasoning effort</strong> control — <code>--effort</code>, taking
+<code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code> or
+<code>max</code>. It changes how long the model thinks before answering, and on a
+benchmark that is not a cosmetic setting.</p>
+<p><strong>The harness was not passing it.</strong> The CLI therefore fell back to
+whatever the operator's own configuration said —
+<code>effortLevel</code> in a <code>settings.json</code> that lives outside this
+repository, is not versioned with it, and was not recorded in any run. So for the
+Claude models: <strong>the effort level that produced their scores is not
+reconstructible from the data</strong>, and if that file changed between runs, two
+Claude numbers on this site are not strictly comparable. That is stated here rather
+than left for someone to find.</p>
+<p>What changed: every run now <strong>records</strong> the level it used, per cell
+and in its manifest, and a level set in a model's yaml is passed explicitly so the
+run no longer depends on ambient configuration. Each Claude model's page carries a
+<em>Reasoning effort (as tested)</em> row reading either the explicit level or
+<em>inherited</em>, and <em>inherited</em> means exactly what it says.</p>
+<p><strong>How the level gets chosen.</strong> The same rule as every other knob on
+this site: only what a provider documents, and only what the transport can actually
+deliver. No other model in the fleet exposes an equivalent — an OpenAI reasoning
+model takes no such parameter through the gateway, and a local model has no notion
+of it — so effort is a <em>Claude-only</em> dimension and cannot be equalized across
+the board. Raising it for Claude and leaving everyone else at their default would
+buy Claude thinking time the others were never offered, which is why the level is
+disclosed per model instead of tuned for a better number.</p>
+<p class="small muted">One limit worth stating: that the flag exists and is accepted
+is verified from the CLI's own help. Whether it measurably changes output in
+non-interactive <code>-p</code> mode has not yet been tested here, so no level is
+set in any model's yaml until it has been — declaring a value that turns out to be
+ignored would be the same fiction as a temperature a provider silently drops.</p>
+
+<h3 id="nobias">The "No Bias" lens — the same data with every human judgment removed</h3>
+<p>A craft score is set by a person, which makes it the one number on this site
+that another person could reasonably disagree with. So the overview carries a
+<strong>No Bias</strong> option in its <em>Ranked by</em> control that takes the
+human out entirely and ranks on <strong>what the automated checker measured, and
+nothing else</strong>.</p>
+<p>It does not drop the two tasks — dropping them would quietly shrink the suite
+and change what is being compared. Instead each one is <strong>rescaled to its own
+machine ceiling</strong>: a submission that passed every mechanical check scores
+{{ human_graded[0].cap }} today and counts as <strong>1.000</strong> under this
+lens, and one that passed half its checks counts as 0.500. Every other task is
+already fully automatic, so its number does not move at all.</p>
+<p>Two things to hold onto when reading it. This lens is <strong>not the headline
+number and is not more correct</strong> — craft is a real part of what a render
+task measures, and a coin with mirrored lettering passes every mechanical check
+there is, which is the whole reason a person looks at it. And it is not a claim
+that the reviewer got anything wrong: the machine's own number is kept beside
+every human score precisely so this view can be computed at all. It answers one
+narrow question — <em>how would the board look if only the checker had a vote?</em>
+— and leaves the published ranking alone.</p>
 {% endif %}
 
 <h2 id="tiers">Tiers</h2>
@@ -4359,6 +4451,12 @@ no sampling parameters whatsoever — behind a gateway an unsupported one is
 <em>dropped rather than refused</em>, so it would silently never apply. Each of
 those is marked <b>not settable</b> on the model's own page, with the reason,
 instead of showing a number that never reached the model.</li>
+<li><b>Reasoning effort</b> — the Claude CLI takes <code>--effort</code>
+(low / medium / high / xhigh / max), and it is the one setting on this site that
+was <strong>never ours to begin with</strong>. See <a href="#effort">Reasoning
+effort</a> below: the harness has not been passing it, so every Claude score was
+produced at whatever the operator's CLI was configured to, and older runs do not
+record which. No other provider in the fleet exposes an equivalent control.</li>
 <li><b>Other sampling</b> (top_p, top_k, min_p, penalties, seed) — <em>not sent
 at all</em> unless a model's page lists it. An unsent knob runs at the provider's
 own default; we do not substitute a house value silently.</li>
@@ -4437,7 +4535,7 @@ puzzle and change the constraint that matters (the reversed river-crossing, the
 Monty <em>Fall</em> variant). A model regurgitating the well-known answer scores
 <em>zero</em> — the memorized response is now the wrong one. That is a
 contamination detector, not just a question.</li>
-<li><strong>Behaviour over recall.</strong> The one-shot-app and agentic tasks
+<li><strong>Behavior over recall.</strong> The one-shot-app and agentic tasks
 are graded on what the model <em>builds</em> — a Playwright suite drives the
 generated app, a pytest checker runs the model's code. You cannot memorize your
 way through "make this maze solvable"; the artifact either works or it doesn't.</li>
@@ -4463,14 +4561,14 @@ cost the auditability that makes the public data worth anything. So instead the
 public set stays fully open, and a <strong>private variant of the same task</strong>
 is held back: identical shape, identical checker, <strong>regenerated at a
 different seed</strong>, never published. A model that scores markedly higher on
-the published instance than on the unpublished one has memorised
+the published instance than on the unpublished one has memorized
 <em>that instance</em>.</p>
 <p><strong>Coverage, stated honestly:</strong> {{ mirror.n_mirrorable }} of
 {{ mirror.n_public }} tasks can be re-seeded and {{ mirror.n_built }} have a
 variant built. The rest are hand-written app specs, agent workspaces or fixed
 prompts with no generator behind them — they cannot be re-rolled, so
 <strong>this check says nothing about them</strong>. It covers the long-context
-and reasoning tasks, which is where a memorised payload would pay off most.</p>
+and reasoning tasks, which is where a memorized payload would pay off most.</p>
 {% if mirror.delta %}
 <div class="card" style="margin:12px 0">
 <table><thead><tr><th data-type="text">Model</th><th class="num">tasks</th>
@@ -4503,7 +4601,7 @@ and verified different from their public counterparts, but no model has been run
 against them, so <strong>no contamination claim is made in either direction</strong>
 — this section will fill in with real numbers rather than a reassurance.</p>
 {% endif %}
-<p class="small">What this catches and what it doesn't: it detects memorisation of
+<p class="small">What this catches and what it doesn't: it detects memorization of
 the published <em>instance</em>. A model that genuinely learned the skill from the
 published task scores the same on both — and should. That is learning, not
 cheating, and the delta is designed to read it as such.</p>
@@ -4598,7 +4696,7 @@ here is a snapshot of the day the model was registered.</p>
 <h3>Local models are not free — they just bill you differently</h3>
 <p>No money goes to a provider, so a local model's <code>$</code> column is ~0.
 The wall socket still charges you. The harness samples the GPU throughout every
-local run, so this is <strong>measured, not modelled</strong>: peak/average power,
+local run, so this is <strong>measured, not modeled</strong>: peak/average power,
 and total watt-hours. The <strong>Power cost</strong> column turns that into money
 at your rate — currently <code>{{ power_rate }}</code> per kWh, set in
 <code>directives.yaml</code> (change it and the next report regeneration picks it
@@ -4610,7 +4708,7 @@ local models:</p>
 and cooling — so it is a <em>lower bound</em> on what the machine actually pulls
 from the wall, not a utility bill.</li>
 <li><strong>It is marginal, and ignores the hardware.</strong> It says nothing
-about the cost of the GPU itself. Amortised over any realistic life, the card
+about the cost of the GPU itself. Amortized over any realistic life, the card
 dwarfs the electricity it will ever burn running this suite. A local model is
 cheap <em>per run</em>; it was not cheap to own.</li>
 </ul>
@@ -4798,7 +4896,7 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
             mirror_ctx = None
 
     return _env.from_string(INFO_TEMPLATE).render(
-        nav=_nav(""),
+        nav=_nav(""), brand=_brand(""),
         css=BASE_CSS,
         suite_version=version,
         suite_series=".".join(version.split(".")[:2]),
@@ -4830,7 +4928,6 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
 
 
 def _pearson(a: dict, b: dict) -> float | None:
-    """Correlation of two model->score vectors over the models they share."""
     import statistics as st
     keys = set(a) & set(b)
     if len(keys) < 8:
@@ -4846,9 +4943,6 @@ def _pearson(a: dict, b: dict) -> float | None:
 
 
 def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
-    """How well each task separates models. Per task: mean, spread (sd),
-    ceiling/floor rates, and the top-vs-bottom-cohort gap. Plus redundant task
-    clusters and the frontier-compression headline."""
     import statistics as st
     from itertools import combinations
 
@@ -4922,17 +5016,6 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
         [means[m] for m in ranked]))}
 
     def _rank_on(subset: list[str]) -> list[dict]:
-        """Rank models on one task subset; delta = shift vs the global rank.
-
-        Only models that scored EVERY task in the subset are ranked. The same rule
-        the leaderboard and the overview matrix already apply suite-wide: the mean
-        of a partial row is not comparable to a full one, so a model with half the
-        subset would out-rank a complete one purely by having skipped the tasks it
-        loses on. Partial models are still listed — below every ranked one, most
-        coverage first, marked with what they actually completed — rather than
-        dropped, because "not measured here" is information too.
-
-        Both sides use competition ranks, so a tie can never fabricate a move."""
         bucket: dict[str, list[float]] = {}
         for tid in subset:
             for m, e in td[tid]["agg"].items():
@@ -4987,17 +5070,6 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
 
 
 def _competition_ranks(values: list[float], places: int = 4) -> list[int]:
-    """Standard competition ranking (1224) for an ALREADY-SORTED value list.
-
-    Equal values share a rank and the next distinct value skips to its true
-    position: [1.0, 1.0, 1.0, 0.9] -> [1, 1, 1, 4]. Using row position instead
-    would number tied models 1..n and then report the later ones as having
-    dropped, which asserts a difference their scores do not contain.
-
-    Ties are decided at `places` decimals — the precision the tables print — so
-    two numbers shown as equal always rank as equal, and float noise below the
-    displayed precision never splits a tie.
-    """
     out: list[int] = []
     prev = None
     for i, v in enumerate(values):
@@ -5012,12 +5084,6 @@ def _competition_ranks(values: list[float], places: int = 4) -> list[int]:
 
 def task_tiers(runs: list[dict] | None = None,
                tdefs: dict | None = None) -> dict[str, str]:
-    """{task_id: 'hard' | 'frontier' | 'easy'} — the overview's difficulty
-    lenses, derived from discrimination_stats. Middling tasks (no clean pattern)
-    and tasks with too little data to classify are absent. This is the single
-    source of truth the /run page and the discriminate page both read, so a
-    task's tier can never disagree between pages. Dynamic: a tier can shift as
-    scores accumulate."""
     runs = load_all_runs() if runs is None else runs
     tdefs = _task_defs() if tdefs is None else tdefs
     ds = discrimination_stats(runs, tdefs)
@@ -5032,9 +5098,6 @@ def task_tiers(runs: list[dict] | None = None,
 
 
 def hardened_ids(tiers: dict[str, str] | None = None) -> list[str]:
-    """The hardened repeat-run set = Hard ∪ Frontier (the tasks worth the cost
-    of 3× repeat runs). Replaces the old hand-curated config.HARDENED_TASKS with
-    the live, auto-derived tiers."""
     tiers = task_tiers() if tiers is None else tiers
     return sorted(t for t, v in tiers.items() if v in ("hard", "frontier"))
 
@@ -5067,12 +5130,10 @@ DISCRIMINATE_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="u
   border:1px solid var(--warn); color:var(--warn); vertical-align:middle;
   opacity:1; }
 </style></head><body>
-<div class="topbar">
-  <div><h1>LLM Testing</h1>
-  <div class="sub">{% if dataset_label %}{{ dataset_label }} · {% endif %}task
+<div class="topbar">{{ brand }}<div class="ttl"><h1>LLM Testing</h1></div>
+<div class="nav">{{ nav }}</div></div>
+<div class="pagebar"><div class="sub">{% if dataset_label %}{{ dataset_label }} · {% endif %}task
   discrimination · suite v{{ suite_version }}</div></div>
-  <div class="nav">{{ nav }}</div>
-</div>
 <div class="wrap">
 <p class="note">A leaderboard tells you who won; this tells you <b>which tasks the
 answer actually depends on</b>. A task everyone aces (or everyone fails)
@@ -5288,7 +5349,7 @@ def build_discriminate_page(runs: list[dict], tdefs: dict,
 
     return _env.from_string(DISCRIMINATE_TEMPLATE).render(
         hard=hard, easy=easy, frontier=frontier,
-        nav=_nav(""),
+        nav=_nav(""), brand=_brand(""),
         sort_js=_SORT_JS, css=BASE_CSS, tiles=tiles, rows=trows,
         clusters=clusters, legend=legend,
         top_models=", ".join(d["top_models"]),
@@ -5300,8 +5361,6 @@ def build_discriminate_page(runs: list[dict], tdefs: dict,
 
 
 def family_stats(runs: list[dict], tdefs: dict) -> dict:
-    """Group models by family (yaml `family:` or inferred), with each member's
-    suite mean, where it runs, and (for local models) its GGUF weight size."""
     from . import gguf
     from .registry import infer_family, load_models
 
@@ -5354,8 +5413,6 @@ def family_stats(runs: list[dict], tdefs: dict) -> dict:
 
 
 def _size_score_svg(points: list[dict], colors: dict, width=1000, height=360) -> str:
-    """Score (y) vs VRAM-GB (x) for local models, with the Pareto frontier — the
-    best score achievable at each VRAM budget. One dot per model."""
     pts = [p for p in points if p.get("x") and p.get("y") is not None]
     if not pts:
         return ""
@@ -5418,12 +5475,10 @@ FAMILY_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 .pill2 { font-size:11px; border:1px solid var(--accent); color:var(--accent);
   border-radius:999px; padding:1px 8px; }
 </style></head><body>
-<div class="topbar">
-  <div><h1>LLM Testing</h1>
-  <div class="sub">{% if dataset_label %}{{ dataset_label }} · {% endif %}model
+<div class="topbar">{{ brand }}<div class="ttl"><h1>LLM Testing</h1></div>
+<div class="nav">{{ nav }}</div></div>
+<div class="pagebar"><div class="sub">{% if dataset_label %}{{ dataset_label }} · {% endif %}model
   families · suite v{{ suite_version }}</div></div>
-  <div class="nav">{{ nav }}</div>
-</div>
 <div class="wrap">
 <p class="note">Models grouped by lineage — so you can read a family's
 <b>size↔capability ladder</b> and see how a small local model stacks up against
@@ -5434,7 +5489,7 @@ name — a model placed in <b>No-family</b> doesn't appear here.</p>
 
 {% if verscmp %}
 <h2>Version-over-version</h2>
-<div class="card">
+<div class="card vc-wrap">
   <div class="vc-pick">
     <label>family<select id="vc-fam"></select></label>
     <label>from<select id="vc-a"></select></label>
@@ -5532,24 +5587,37 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
             "cov": ("" if mm["coverage"] >= 0.999 else " partial"),
         }
 
+    def _full(v):
+        return [x for x in v if x.get("coverage", 0) >= 0.999] or []
+
     multi = {f: v for f, v in fams.items() if len(v) > 1}
     singles = sorted(f for f, v in fams.items() if len(v) == 1)
     fam_cards = []
-    for f in sorted(multi, key=lambda f: -max(x["score"] for x in multi[f])):
+
+    def _card_key(f):
+        got = _full(multi[f])
+        return -max((x["score"] for x in got), default=-1)
+
+    for f in sorted(multi, key=_card_key):
         members = multi[f]
         has_both = len({x["local"] for x in members}) > 1
+        got = _full(members)
         fam_cards.append({
             "name": f, "n": len(members),
-            "span": f"{min(x['score'] for x in members):.3f}–"
-                    f"{max(x['score'] for x in members):.3f}",
+            "span": (f"{min(x['score'] for x in got):.3f}–"
+                     f"{max(x['score'] for x in got):.3f}" if got else "—"),
             "both": has_both, "rows": [fmt(x) for x in members],
         })
 
-    champs = sorted(
-        ({"name": f, "best": max(v, key=lambda x: x["score"])["score"],
-          "leader": _mlink(max(v, key=lambda x: x["score"])["model"]),
-          "n": len(v)} for f, v in fams.items()),
-        key=lambda c: -c["best"])
+    champs = []
+    for f, v in fams.items():
+        got = _full(v)
+        if not got:
+            continue
+        top = max(got, key=lambda x: x["score"])
+        champs.append({"name": f, "best": top["score"],
+                       "leader": _mlink(top["model"]), "n": len(got)})
+    champs.sort(key=lambda c: -c["best"])
     for c in champs:
         c["best"] = f"{c['best']:.3f}"
 
@@ -5584,7 +5652,7 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
             verscmp = _json.dumps({k: blob[k] for k in sorted(blob)}
                                   ).replace("</", "<\\/")
     return _env.from_string(FAMILY_TEMPLATE).render(
-        nav=_nav(""),
+        nav=_nav(""), brand=_brand(""),
         sort_js=_SORT_JS, scatter_js=_SCATTER_HOVER_JS,
         verscmp=verscmp, verscmp_js=_VERSCMP_JS,
         css=BASE_CSS, fam_cards=fam_cards, champs=champs,
@@ -5596,11 +5664,9 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
 COMPARE_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Compare · LLM Testing</title><style>{{ css }}</style></head><body>
-<div class="topbar">
-  <div><h1>Head to head</h1>
-  <div class="sub">two models, every task, side by side · {{ dataset_label or "live dataset" }}</div></div>
-  <div class="nav">{{ nav }}</div>
-</div>
+<div class="topbar">{{ brand }}<div class="ttl"><h1>Head to head</h1></div>
+<div class="nav">{{ nav }}</div></div>
+<div class="pagebar"><div class="sub">two models, every task, side by side · {{ dataset_label or "live dataset" }}</div></div>
 
 <div class="cmp-pick">
   <select id="selA" class="cmp-sel"></select>
@@ -5609,7 +5675,7 @@ COMPARE_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8"
 </div>
 
 <div id="cmp-head" class="cmp-head"></div>
-<h2>Per-task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· swatch ink ramps with the score · Δ colours the winner · grouped by category</span></h2>
+<h2>Per-task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· swatch ink ramps with the score · Δ colors the winner · grouped by category</span></h2>
 <div id="cmp-grid"></div>
 
 <script>const D = {{ data_json|safe }};</script>
@@ -5727,13 +5793,6 @@ function render(){
 
 
 def build_feed(runs: list[dict], tdefs: dict) -> str:
-    """Atom feed of 'model first tested' events, newest first (G6 freshness).
-
-    Every entry's date is a RUN date, not the wall clock, so the feed is a pure
-    function of the data: it only changes when a new model actually lands, and
-    the shipped reports stay byte-stable between publishes. That is also the
-    honest 'last updated' for a benchmark — when the data moved, not when the
-    generator last ran."""
     from xml.sax.saxutils import escape
 
     task_data = {tid: info for tid, info in collect_task_data(runs).items()
@@ -5784,10 +5843,6 @@ def build_feed(runs: list[dict], tdefs: dict) -> str:
 
 
 def special_summary() -> dict:
-    """Read the spiral-probe results in special/ (experimental, never counted)
-    into a per-cell and per-model rollup. Shared by the operator's interactive
-    /special and the public static page, so both read the same numbers. Pure
-    data — no run controls, no job state."""
     import re
     import statistics
     from .tasks import load_tasks
@@ -5884,12 +5939,6 @@ def special_summary() -> dict:
 
 
 def special_turns_summary() -> dict:
-    """Read the turn-budget probe results in special/ (tag turns@<N>, experimental,
-    never counted): for each agentic cell re-run at a raised turn cap, whether the
-    extra steps let it CONVERGE to a pass or it stayed stuck. The turn-count analog
-    of special_summary — separate because more time and more turns are different
-    remedies. A per-model verdict of 'genuinely stuck' means the cap was never the
-    real limit; 'turn-limited' means more steps were all it needed."""
     import re
     import statistics
     from . import assess
@@ -5979,14 +6028,6 @@ def special_turns_summary() -> dict:
 
 
 def special_budget_summary() -> dict:
-    """Read the token-budget probe results in special/ (tag budget@<N>).
-
-    The question: did a bigger budget let the model SPEAK, and if it spoke, was it
-    right? Those are two separate outcomes and the verdict keeps them apart —
-    "spoke, still wrong" is a capability failure the original 0.0 was accidentally
-    right about; "still mute" means the model never converges however much room it
-    gets; "converted" means the published 0.0 measured our ceiling, not the model.
-    """
     import re
     import statistics
     from . import assess
@@ -6081,18 +6122,18 @@ SPECIAL_STATIC_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset=
   font-family:var(--mono); }
 tr.grp td { font-weight:700; color:var(--ink); background:var(--surface); padding-top:8px; }
 </style></head><body>
-<div class="topbar">
-  <div><h1>Special — experiments</h1>
-  <div class="sub">read-only findings · {{ dataset_label or "live dataset" }}</div></div>
-  <div class="nav">{{ nav }}</div>
-</div>
+<div class="topbar">{{ brand }}<div class="ttl"><h1>Special — experiments</h1></div>
+<div class="nav">{{ nav }}</div></div>
+<div class="pagebar"><div class="sub">read-only findings · {{ dataset_label or "live dataset" }}</div></div>
 <div class="exp"><b>EXPERIMENTAL — not part of any dataset.</b> These runs count
 toward <b>nothing</b> — not the leaderboard, not discrimination, not any model's
-score. A scratchpad for probes into how models behave at the edges.</div>
+score. A scratchpad for probes into how models behave at the edges. Every probe
+run ships with the repository under <code>special/</code>, one directory per run,
+with the same per-cell <code>metrics.json</code>, <code>score.json</code> and
+transcript as a scored run — so every number below can be checked against the
+calls that produced it.</div>
 
-{% if not rows %}
-<p class="muted">No experimental results yet.</p>
-{% else %}
+{% if rows %}
 <h2>Spiral / rumination window probe</h2>
 <p class="small muted">How long each model takes to <em>start answering</em>
 (time-to-first-answer-token) on the tasks where it hit the suite's no-output
@@ -6149,29 +6190,212 @@ test (what the model must fit in when it counts). <b>first answer</b> = slowest
 time-to-first-answer in the probe. <b>vs official</b>: "over" means it can't
 start answering inside the test's real budget; "fits" means it can.</p>
 {% endif %}
+
+{% if turns.models %}
+<h2>Turn-budget probe <span class="muted" style="font-weight:400">· agentic loops</span></h2>
+<p class="small muted">An agentic task ends when the tool-use loop runs out of
+turns, which is our cap and not the model's ability. These cells were re-run with
+a raised cap to find out which it was. <b>turn-limited</b> = every probed cell
+passed once the cap moved, so the recorded 0 was our limit.</p>
+<table class="sp-tbl"><tr><th>Model</th><th class="n">cells probed</th>
+<th class="n">converged</th><th class="n">score</th><th>verdict</th></tr>
+{% for m in turns.models %}
+<tr><td>{{ m.model }}</td><td class="n">{{ m.probed }}</td>
+<td class="n">{{ m.converged }}/{{ m.probed }}</td>
+<td class="n">{% if m.score_avg is none %}—{% else %}{{ m.score_avg }}{% endif %}</td>
+<td>{{ m.verdict }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+{% if budget.models %}
+<h2>Token-budget probe <span class="muted" style="font-weight:400">· the model never got to speak</span></h2>
+<p class="small muted">A thinking model can spend its whole output budget in the
+think channel and emit almost nothing a checker can read. Scoring that 0 records
+"cannot do the task" when what was seen is "was not given room to say so". These
+cells were re-run with the ceiling raised. <b>budget-limited</b> = every probed
+cell passed at a larger budget, so the published 0 was our ceiling;
+<b>speaks but wrong</b> = it needed room and was still wrong.</p>
+<table class="sp-tbl"><tr><th>Model</th><th class="n">cells probed</th>
+<th class="n">spoke</th><th class="n">converted</th><th class="n">score</th>
+<th>verdict</th></tr>
+{% for m in budget.models %}
+<tr><td>{{ m.model }}</td><td class="n">{{ m.probed }}</td>
+<td class="n">{{ m.spoke }}/{{ m.probed }}</td>
+<td class="n">{{ m.converted }}/{{ m.probed }}</td>
+<td class="n">{% if m.score_avg is none %}—{% else %}{{ m.score_avg }}{% endif %}</td>
+<td>{{ m.verdict }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+{% if th_rows %}
+<h2>Thinking-off probe <span class="muted" style="font-weight:400">· what does reasoning buy, and what does it cost?</span></h2>
+<p class="small muted">Most models reason by default and nothing in a scored run
+controls that. Each cell below was run <b>twice in the same job</b> — reasoning
+on, then off — so the pair is matched on sampling and task content. Nothing here
+touches a model's score.</p>
+<p class="small muted"><b>Read the verdict, not the token saving.</b>
+<span style="color:#3a3">free saving</span> = the score held and the tokens
+dropped, so reasoning was paid for and unused on that test.
+<span style="color:#c33">thinking required</span> = disabling it cost score, so
+reasoning is load-bearing. <span style="color:#96c">not applied</span> = the
+provider accepted the flag and kept reasoning anyway, so that row measures
+nothing about reasoning — only about the provider.
+<span style="color:var(--muted)">nothing to disable</span> = the model barely
+reasoned on that test to begin with, so whether the flag landed cannot be read
+from the tokens; that is our blind spot, not the provider's fault.</p>
+<table class="sp-tbl"><tr><th>Model</th><th>Test</th><th class="n">n</th>
+<th class="n">score on→off</th><th class="n">output tokens</th>
+<th class="n">tok saved</th><th class="n">reasoning on→off</th>
+<th class="n">cost saved</th><th>verdict</th></tr>
+{% for r in th_rows %}
+<tr><td>{{ r.model }}</td><td>{{ r.task }}</td>
+<td class="n">{{ [r.n_on, r.n_off]|min }}</td>
+<td class="n">{{ "%.2f"|format(r.score_on) }}→{{ "%.2f"|format(r.score_off) }}</td>
+<td class="n">{{ r.out_on|round|int }}→{{ r.out_off|round|int }}</td>
+<td class="n">{% if r.out_saved_pct is none %}—{% else %}{{ r.out_saved_pct }}%{% endif %}</td>
+<td class="n">{{ r.reas_on|round|int }}→{{ r.reas_off|round|int }}</td>
+<td class="n">{% if not r.cost_on %}—{% else %}{{ ((1 - r.cost_off / r.cost_on) * 100)|round|int }}%{% endif %}</td>
+<td>{{ r.verdict }}</td></tr>
+{% endfor %}
+</table>
+
+{% if th_cost.models %}
+<h2>Thinking-off cost analysis <span class="muted" style="font-weight:400">· counted only where the score held</span></h2>
+<p class="small muted">A saving bought by getting the answer wrong is not a
+saving, so cost is credited only on cells verdicted <b>free saving</b>. A
+provider that ignored the flag earns none of it while still being billed for the
+calls. These figures are for these tests only and are <b>not</b> extrapolated to
+the suite — the candidates were chosen for being mechanical, which is exactly
+where the saving is largest.</p>
+<table class="sp-tbl"><tr><th>Model</th><th class="n">cells</th>
+<th class="n">flag applied</th><th class="n">free saving</th>
+<th class="n">thinking required</th><th class="n">cost saved where free</th>
+<th class="n">%</th><th class="n">probe cost</th></tr>
+{% for m in th_cost.models %}
+<tr><td>{{ m.model }}</td><td class="n">{{ m.cells }}</td>
+<td class="n">{{ m.applied }}/{{ m.cells }}</td>
+<td class="n" style="color:#3a3">{{ m.free }}</td>
+<td class="n" style="color:#c33">{{ m.required }}</td>
+<td class="n">${{ "%.5f"|format(m.free_cost_saved) }}</td>
+<td class="n">{% if m.free_cost_saved_pct is none %}—{% else %}{{ m.free_cost_saved_pct }}%{% endif %}</td>
+<td class="n muted">${{ "%.5f"|format(m.probe_cost) }}</td></tr>
+{% endfor %}
+</table>
+<p class="small muted">Across {{ th_cost.total.cells }} paired cell(s):
+<b>{{ th_cost.total.free }}</b> free saving, <b>{{ th_cost.total.required }}</b>
+thinking required, <b>{{ th_cost.total.cells - th_cost.total.applied }}</b> where
+the provider did not apply the flag. Saved
+<b>${{ "%.5f"|format(th_cost.total.free_cost_saved) }}</b> of
+${{ "%.5f"|format(th_cost.total.free_cost_on) }} on the cells that held their
+score{% if th_cost.total.free_cost_saved_pct is not none %}
+(<b>{{ th_cost.total.free_cost_saved_pct }}%</b>){% endif %}. Measuring it cost
+<b>${{ "%.5f"|format(th_cost.total.probe_cost) }}</b>{% if th_cost.total.payback_runs is not none %},
+so the probe pays for itself after <b>{{ th_cost.total.payback_runs }}</b> sweeps
+of these tests{% endif %}. A row below n={{ th_cost.n_floor }} reads "needs
+repeats": the token delta is stable at one trial, a score delta is not.</p>
+{% endif %}
+
+{% if th_support %}
+<h2>Which providers can even be asked <span class="muted" style="font-weight:400">· measured, not read off a capability list</span></h2>
+<p class="small muted">Support is tested per provider rather than trusted:
+several models advertise a reasoning parameter and then refuse to disable it, and
+at least one accepts the flag, returns success, and keeps reasoning anyway. A
+provider that refuses is skipped with nothing written — never scored 0. Local
+models are excluded on measurement: LM Studio accepts a parameter that does not
+exist and left reasoning unchanged, so an unsupported knob there cannot be
+detected by asking.</p>
+<table class="sp-tbl"><tr><th>Model</th><th>Verdict</th><th>What the provider did</th></tr>
+{% for s in th_support %}
+<tr><td>{{ s.model }}</td><td>{{ s.verdict }}</td>
+<td class="muted">{{ s.detail }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<h2>Which tests were eligible <span class="muted" style="font-weight:400">· and why these</span></h2>
+<p class="small muted">Only mechanical work is a fair candidate. Derivation tasks
+are excluded because reasoning <em>is</em> the task there, and the app-building
+tasks because their output is dominated by code, so reasoning is a small fraction
+of it.</p>
+<table class="sp-tbl"><tr><th>Test</th><th>Why it was a candidate</th></tr>
+{% for tid, why in th_candidates.items() %}
+<tr><td>{{ tid }}</td><td class="muted">{{ why }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+{% if not any_output %}
+<p class="muted">No experimental results yet.</p>
+{% endif %}
 <div class="css-tie" style="color:var(--accent)"></div>
 </body></html>"""
 
 
+PROBE_KINDS = ("spiral", "turns", "budget", "thinking")
+
+
+def probe_counts() -> dict:
+    """Trials already on record per probe, as {kind: {model: {task: n}}}.
+
+    Read by both the /special selection UI and the job that runs the probe, so
+    what the page greys out and what actually runs cannot drift apart. A
+    thinking trial is a PAIR, so its count is the smaller of the two legs — a
+    cell with 3 on-legs and 1 off-leg has one usable trial, not three.
+    """
+    from . import thinking
+    out: dict = {k: {} for k in PROBE_KINDS}
+
+    def put(kind, model, task, n):
+        out[kind].setdefault(model, {})[task] = n
+
+    for r in special_summary().get("rows") or []:
+        put("spiral", r["model"], r["task"], r.get("trials") or 0)
+    for r in special_turns_summary().get("rows") or []:
+        put("turns", r["model"], r["task"], r.get("trials") or 0)
+    for r in special_budget_summary().get("rows") or []:
+        put("budget", r["model"], r["task"], r.get("trials") or 0)
+    for r in thinking.results():
+        put("thinking", r["model"], r["task"],
+            min(r.get("n_on") or 0, r.get("n_off") or 0))
+    return out
+
+
+def probe_missing(kind: str, model: str, tasks, target: int,
+                  counts: dict | None = None) -> dict:
+    """How many more trials each task needs to reach target."""
+    have = (counts if counts is not None else probe_counts()).get(kind, {})
+    have = have.get(model, {})
+    return {t: max(0, int(target) - int(have.get(t, 0))) for t in tasks}
+
+
 def build_special_page(dataset_label: str = "") -> str:
+    from . import thinking
     d = special_summary()
     prev = None
     for r in d["rows"]:
         r["show_model"] = (r["model"] != prev)
         prev = r["model"]
+    turns = special_turns_summary()
+    budget = special_budget_summary()
+    th_rows = [dict(r, verdict=thinking.verdict(r)) for r in thinking.results()]
+    th_cost = thinking.cost_rollup()
+    th_support = thinking.load_support()
     return _env.from_string(SPECIAL_STATIC_TEMPLATE).render(
-        nav=_nav(""), css=BASE_CSS, dataset_label=dataset_label, **d)
+        nav=_nav(""), brand=_brand(""), css=BASE_CSS, dataset_label=dataset_label,
+        turns=turns, budget=budget, th_rows=th_rows, th_cost=th_cost,
+        th_support=sorted(
+            ({"model": k, **v} for k, v in th_support.items()),
+            key=lambda s: (s.get("verdict") != "honoured", s["model"])),
+        th_candidates=thinking.CANDIDATES,
+        any_output=bool(d["rows"] or turns.get("rows") or budget.get("rows")
+                        or th_rows),
+        **d)
 
 
 def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
                        dataset_key: str = "live") -> str:
-    """Head-to-head: pick any two models, see every task side by side.
-
-    All the per-model, per-task numbers are embedded once as JSON and the page
-    renders client-side, so a static host needs no server — the two dropdowns
-    just re-read the blob. Scores are the same aggregated means the leaderboard
-    uses, and the swatch ramp mirrors the overview matrix so a cell reads the
-    same everywhere."""
     import json as _json
 
     _, hidden = _model_prefs()
@@ -6182,6 +6406,8 @@ def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         for m, e in info["agg"].items():
             if m not in hidden:
                 by_model.setdefault(m, []).append(e)
+    _full = covered_models(task_data)
+    by_model = {m: rs for m, rs in by_model.items() if m in _full}
     summaries = {m: _summarize(rs) for m, rs in by_model.items()}
 
     ranked = sorted(summaries, key=lambda m: (
@@ -6229,16 +6455,13 @@ def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
     payload = {"models": ranked, "data": data, "cats": cat_list}
     data_json = _json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
     return _env.from_string(COMPARE_TEMPLATE).render(
-        nav=_nav(""), css=BASE_CSS, data_json=data_json,
+        nav=_nav(""), brand=_brand(""), css=BASE_CSS, data_json=data_json,
         dataset_label=dataset_label, dataset_key=dataset_key)
 
 
 def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
                  dataset_label: str = "", dataset_key: str = "live",
                  tasks_dir: Path | None = None, public_nav: bool = False) -> Path:
-    """Render a complete report site for one dataset. Defaults to live runs/ +
-    current tasks; archive.render_dataset points it at an archived snapshot.
-    `public_nav=True` drops the operator-only control links (public export)."""
     global _RUNS_BASE, _PUBLIC_NAV
     runs_dir = runs_dir or config.RUNS_DIR
     out_dir = out_dir or config.REPORTS_DIR

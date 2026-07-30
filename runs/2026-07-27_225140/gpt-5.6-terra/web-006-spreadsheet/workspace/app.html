@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini Spreadsheet</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 600px;
+      min-height: 400px;
+      background: #f3f6fa;
+      color: #172033;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    .app {
+      width: 100%;
+      min-width: 600px;
+      min-height: 400px;
+      padding: 22px;
+    }
+    .panel {
+      width: min(100%, 980px);
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #cfd8e5;
+      border-radius: 10px;
+      box-shadow: 0 4px 18px rgba(28, 47, 76, 0.09);
+      padding: 18px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 22px;
+    }
+    .hint {
+      margin: 0 0 16px;
+      color: #586579;
+      font-size: 13px;
+    }
+    .sheet-wrap {
+      overflow-x: auto;
+      border: 1px solid #c9d3e0;
+      border-radius: 6px;
+    }
+    table {
+      width: 100%;
+      min-width: 760px;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    th, td {
+      border: 1px solid #d7dee8;
+      height: 34px;
+      padding: 0;
+    }
+    th {
+      background: #edf2f8;
+      color: #38475d;
+      font-size: 13px;
+      font-weight: 700;
+      text-align: center;
+    }
+    th.corner, th.row-head {
+      width: 42px;
+    }
+    input.cell {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      outline: 0;
+      padding: 6px 8px;
+      color: #172033;
+      background: #fff;
+      font-size: 14px;
+    }
+    input.cell:focus {
+      background: #fffde8;
+      box-shadow: inset 0 0 0 2px #3578e5;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 0;
+      border-radius: 5px;
+      background: #276bd0;
+      color: white;
+      font-weight: 700;
+      padding: 10px 16px;
+      cursor: pointer;
+    }
+    button:hover { background: #1f5cad; }
+    .csv-area {
+      flex: 1 1 420px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 12px;
+      color: #586579;
+      font-weight: 700;
+    }
+    textarea {
+      width: 100%;
+      min-height: 72px;
+      resize: vertical;
+      border: 1px solid #c9d3e0;
+      border-radius: 5px;
+      padding: 8px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="panel">
+      <h1>Mini Spreadsheet</h1>
+      <p class="hint">Enter values or formulas such as <strong>=A1*2+B2</strong>. Click a calculated cell to edit its formula.</p>
+
+      <div class="sheet-wrap">
+        <table id="spreadsheet" aria-label="Spreadsheet">
+          <thead>
+            <tr id="columnHeaders">
+              <th class="corner" scope="col"></th>
+            </tr>
+          </thead>
+          <tbody id="sheetBody"></tbody>
+        </table>
+      </div>
+
+      <div class="actions">
+        <button id="export" type="button">Export CSV</button>
+        <div class="csv-area">
+          <label for="csv">Computed CSV output</label>
+          <textarea id="csv" aria-label="Computed CSV output"></textarea>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+
+      const COLS = "ABCDEFGHIJ".split("");
+      const ROWS = Array.from({ length: 10 }, (_, i) => i + 1);
+      const raws = Object.create(null);
+      const displays = Object.create(null);
+      const inputs = Object.create(null);
+
+      function keyFor(col, row) {
+        return col + row;
+      }
+
+      function isValidCell(reference) {
+        return /^[A-J](10|[1-9])$/.test(reference);
+      }
+
+      function normalizeRef(reference) {
+        return String(reference).toUpperCase();
+      }
+
+      function createGrid() {
+        const headerRow = document.getElementById("columnHeaders");
+        const body = document.getElementById("sheetBody");
+
+        COLS.forEach(function (col) {
+          const th = document.createElement("th");
+          th.scope = "col";
+          th.textContent = col;
+          headerRow.appendChild(th);
+        });
+
+        ROWS.forEach(function (row) {
+          const tr = document.createElement("tr");
+          const rowHeader = document.createElement("th");
+          rowHeader.className = "row-head";
+          rowHeader.scope = "row";
+          rowHeader.textContent = row;
+          tr.appendChild(rowHeader);
+
+          COLS.forEach(function (col) {
+            const cellKey = keyFor(col, row);
+            const td = document.createElement("td");
+            const input = document.createElement("input");
+
+            input.type = "text";
+            input.className = "cell";
+            input.id = "cell-" + cellKey;
+            input.setAttribute("aria-label", "Cell " + cellKey);
+            input.autocomplete = "off";
+            input.spellcheck = false;
+
+            raws[cellKey] = "";
+            displays[cellKey] = "";
+            inputs[cellKey] = input;
+
+            input.addEventListener("focus", function () {
+              input.value = raws[cellKey];
+              input.select();
+            });
+
+            input.addEventListener("input", function () {
+              raws[cellKey] = input.value;
+              recalculate();
+            });
+
+            input.addEventListener("blur", function () {
+              raws[cellKey] = input.value;
+              recalculate();
+            });
+
+            input.addEventListener("keydown", function (event) {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                input.blur();
+              }
+            });
+
+            td.appendChild(input);
+            tr.appendChild(td);
+          });
+
+          body.appendChild(tr);
+        });
+      }
+
+      function formatNumber(number) {
+        if (!Number.isFinite(number)) return "#ERR";
+        if (Object.is(number, -0)) return "0";
+        return String(number);
+      }
+
+      function tokenize(expression) {
+        const tokens = [];
+        let i = 0;
+
+        while (i < expression.length) {
+          const rest = expression.slice(i);
+          const ch = expression[i];
+
+          if (/\s/.test(ch)) {
+            i++;
+            continue;
+          }
+
+          const numberMatch = rest.match(/^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/);
+          if (numberMatch) {
+            tokens.push({ type: "number", value: Number(numberMatch[0]) });
+            i += numberMatch[0].length;
+            continue;
+          }
+
+          const refMatch = rest.match(/^[A-Za-z]+\d+/);
+          if (refMatch) {
+            tokens.push({ type: "ref", value: refMatch[0].toUpperCase() });
+            i += refMatch[0].length;
+            continue;
+          }
+
+          if ("+-*/()".includes(ch)) {
+            tokens.push({ type: ch, value: ch });
+            i++;
+            continue;
+          }
+
+          throw new Error("Invalid token");
+        }
+
+        return tokens;
+      }
+
+      function recalculate() {
+        const state = Object.create(null);
+        const result = Object.create(null);
+        const stack = [];
+        const cycleCells = new Set();
+
+        function plainAsNumber(text) {
+          if (text === "") return { kind: "num", value: 0 };
+          const trimmed = text.trim();
+          if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)) {
+            const value = Number(trimmed);
+            if (Number.isFinite(value)) return { kind: "num", value: value };
+          }
+          return { kind: "err", code: "ERR" };
+        }
+
+        function evaluateFormula(formula) {
+          let tokens;
+          let index = 0;
+
+          try {
+            tokens = tokenize(formula.slice(1));
+          } catch (e) {
+            return { kind: "err", code: "ERR" };
+          }
+
+          function current() {
+            return tokens[index] || null;
+          }
+
+          function consume(type) {
+            const token = current();
+            if (!token || token.type !== type) throw new Error("Expected " + type);
+            index++;
+            return token;
+          }
+
+          function numericReference(reference) {
+            if (!isValidCell(reference)) return { kind: "err", code: "ERR" };
+            const referenced = evaluateCell(reference);
+
+            if (referenced.kind === "num") return referenced;
+            if (referenced.kind === "plain") return plainAsNumber(referenced.value);
+            return { kind: "err", code: referenced.code === "CYCLE" ? "CYCLE" : "ERR" };
+          }
+
+          function operate(left, operator, right) {
+            if (left.kind === "err") return left;
+            if (right.kind === "err") return right;
+
+            let value;
+            if (operator === "+") value = left.value + right.value;
+            if (operator === "-") value = left.value - right.value;
+            if (operator === "*") value = left.value * right.value;
+            if (operator === "/") {
+              if (right.value === 0) return { kind: "err", code: "ERR" };
+              value = left.value / right.value;
+            }
+
+            if (!Number.isFinite(value)) return { kind: "err", code: "ERR" };
+            return { kind: "num", value: value };
+          }
+
+          function parsePrimary() {
+            const token = current();
+            if (!token) throw new Error("Missing value");
+
+            if (token.type === "number") {
+              index++;
+              return { kind: "num", value: token.value };
+            }
+
+            if (token.type === "ref") {
+              index++;
+              return numericReference(token.value);
+            }
+
+            if (token.type === "(") {
+              index++;
+              const value = parseExpression();
+              consume(")");
+              return value;
+            }
+
+            throw new Error("Invalid primary");
+          }
+
+          function parseUnary() {
+            const token = current();
+            if (token && token.type === "+") {
+              index++;
+              return parseUnary();
+            }
+            if (token && token.type === "-") {
+              index++;
+              const value = parseUnary();
+              if (value.kind === "err") return value;
+              return { kind: "num", value: -value.value };
+            }
+            return parsePrimary();
+          }
+
+          function parseTerm() {
+            let value = parseUnary();
+            while (current() && (current().type === "*" || current().type === "/")) {
+              const operator = current().type;
+              index++;
+              value = operate(value, operator, parseUnary());
+            }
+            return value;
+          }
+
+          function parseExpression() {
+            let value = parseTerm();
+            while (current() && (current().type === "+" || current().type === "-")) {
+              const operator = current().type;
+              index++;
+              value = operate(value, operator, parseTerm());
+            }
+            return value;
+          }
+
+          try {
+            if (tokens.length === 0) throw new Error("Empty formula");
+            const value = parseExpression();
+            if (index !== tokens.length) throw new Error("Trailing tokens");
+            return value;
+          } catch (e) {
+            return { kind: "err", code: "ERR" };
+          }
+        }
+
+        function evaluateCell(cellKey) {
+          if (state[cellKey] === "done") return result[cellKey];
+
+          if (state[cellKey] === "visiting") {
+            const cycleStart = stack.indexOf(cellKey);
+            for (let i = cycleStart; i < stack.length; i++) {
+              cycleCells.add(stack[i]);
+            }
+            return { kind: "err", code: "CYCLE" };
+          }
+
+          state[cellKey] = "visiting";
+          stack.push(cellKey);
+
+          const raw = raws[cellKey];
+          let value;
+
+          if (raw.startsWith("=")) {
+            value = evaluateFormula(raw);
+          } else {
+            value = { kind: "plain", value: raw };
+          }
+
+          stack.pop();
+
+          if (cycleCells.has(cellKey)) {
+            value = { kind: "err", code: "CYCLE" };
+          } else if (value.kind === "err" && value.code === "CYCLE") {
+            value = { kind: "err", code: "ERR" };
+          }
+
+          state[cellKey] = "done";
+          result[cellKey] = value;
+          return value;
+        }
+
+        COLS.forEach(function (col) {
+          ROWS.forEach(function (row) {
+            const cellKey = keyFor(col, row);
+            evaluateCell(cellKey);
+          });
+        });
+
+        COLS.forEach(function (col) {
+          ROWS.forEach(function (row) {
+            const cellKey = keyFor(col, row);
+            const raw = raws[cellKey];
+            const value = result[cellKey];
+
+            if (!raw.startsWith("=")) {
+              displays[cellKey] = raw;
+            } else if (value.kind === "num") {
+              displays[cellKey] = formatNumber(value.value);
+            } else if (value.kind === "err" && value.code === "CYCLE") {
+              displays[cellKey] = "#CYCLE";
+            } else {
+              displays[cellKey] = "#ERR";
+            }
+
+            if (document.activeElement !== inputs[cellKey]) {
+              inputs[cellKey].value = displays[cellKey];
+            }
+          });
+        });
+      }
+
+      function csvEscape(value) {
+        const text = String(value);
+        if (/[",\r\n]/.test(text)) {
+          return '"' + text.replace(/"/g, '""') + '"';
+        }
+        return text;
+      }
+
+      function exportCSV() {
+        recalculate();
+        const lines = ROWS.map(function (row) {
+          return COLS.map(function (col) {
+            return csvEscape(displays[keyFor(col, row)]);
+          }).join(",");
+        });
+        document.getElementById("csv").value = lines.join("\n");
+      }
+
+      function requireCell(cell) {
+        const key = normalizeRef(cell);
+        if (!isValidCell(key)) throw new Error("Invalid cell reference: " + cell);
+        return key;
+      }
+
+      createGrid();
+      recalculate();
+
+      document.getElementById("export").addEventListener("click", exportCSV);
+
+      window.sheet = {
+        set: function (cell, text) {
+          const key = requireCell(cell);
+          raws[key] = String(text);
+          recalculate();
+        },
+        get: function (cell) {
+          const key = requireCell(cell);
+          recalculate();
+          return displays[key];
+        },
+        raw: function (cell) {
+          const key = requireCell(cell);
+          return raws[key];
+        }
+      };
+    })();
+  </script>
+</body>
+</html>

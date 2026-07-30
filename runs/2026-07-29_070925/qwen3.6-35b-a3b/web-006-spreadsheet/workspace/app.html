@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f0f2f5; padding: 20px; margin: 0; }
+  #app { display: inline-block; min-width: 600px; min-height: 400px; background: #ffffff; border: 1px solid #ccc; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 10px; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 15px; user-select: none; }
+  th, td { border: 1px solid #ccc; text-align: center; font-size: 13px; color: #333; }
+  th { background: #e9ecef; padding: 4px; font-weight: 600; position: sticky; z-index: 1; }
+  td:first-child, th:first-child { background: #f8f9fa; width: 35px; min-width: 35px; text-align: center; }
+  td { padding: 0; height: 28px; position: relative; }
+  input.cell-input {
+    width: 100%; height: 100%; border: none; outline: none; padding: 2px 4px;
+    font-family: inherit; font-size: 13px; background: transparent; cursor: text;
+    transition: background 0.15s, box-shadow 0.15s;
+  }
+  input.cell-input:focus { background: #eef6ff; box-shadow: inset 0 0 0 2px #0d6efd; border-color: transparent; }
+  input.cell-input.display-mode { cursor: default; color: #212529; }
+  #controls { display: flex; gap: 12px; align-items: center; padding-top: 10px; border-top: 1px solid #eee; }
+  button#export {
+    padding: 6px 14px; background: #0d6efd; color: white; border: none; border-radius: 4px;
+    cursor: pointer; font-weight: 500; font-size: 13px;
+  }
+  button#export:hover { background: #0b5ed7; }
+  textarea#csv {
+    width: 280px; height: 60px; border: 1px solid #ccc; border-radius: 4px;
+    padding: 6px; font-family: monospace; font-size: 12px; resize: vertical;
+  }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <table id="grid">
+    <thead id="thead"></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <div id="controls">
+    <button id="export">Export CSV</button>
+    <textarea id="csv" readonly placeholder="CSV output will appear here..."></textarea>
+  </div>
+</div>
+
+<script>
+(function() {
+  const COLS = 'ABCDEFGHIJ';
+  const ROWS_MAX = 10;
+  const raw = {};
+  const computedVal = {};
+  let editingCell = null;
+
+  // --- Grid Initialization ---
+  const thead = document.getElementById('thead');
+  const tbody = document.getElementById('tbody');
+  const firstRow = document.createElement('tr');
+  const cornerTh = document.createElement('th');
+  firstRow.appendChild(cornerTh);
+  for (let c = 0; c < COLS.length; c++) {
+    const th = document.createElement('th');
+    th.textContent = COLS[c];
+    firstRow.appendChild(th);
+  }
+  thead.appendChild(firstRow);
+
+  for (let r = 1; r <= ROWS_MAX; r++) {
+    const tr = document.createElement('tr');
+    const rowTh = document.createElement('th');
+    rowTh.textContent = r;
+    tr.appendChild(rowTh);
+    for (let c = 0; c < COLS.length; c++) {
+      const colLetter = COLS[c];
+      const cellId = `${colLetter}${r}`;
+      const td = document.createElement('td');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'cell-input display-mode';
+      input.id = `cell-${cellId}`;
+      input.dataset.cell = cellId;
+      
+      // Events
+      input.addEventListener('focus', onFocus);
+      input.addEventListener('blur', onBlur);
+      input.addEventListener('keydown', onKeyDown);
+      
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+
+  // --- Core Logic ---
+  function getBounds(ref) {
+    const col = ref.charCodeAt(0) - 65;
+    const row = parseInt(ref.slice(1), 10);
+    return { valid: col >= 0 && col < COLS.length && row >= 1 && row <= ROWS_MAX, col, row };
+  }
+
+  function evaluateFormula(rawStr, getVal) {
+    let expr = rawStr.slice(1);
+    // Validate all cell references first
+    const refMatches = expr.match(/[A-J](?:[1-9]|10)/g) || [];
+    for (const ref of refMatches) {
+      const val = getVal(ref);
+      if (val === '#CYCLE' || val === '#ERR') return val;
+      if (!getBounds(ref).valid) return '#ERR';
+    }
+    
+    // Safe replacement and evaluation
+    expr = expr.replace(/[A-J](?:[1-9]|10)/g, ref => {
+      const v = getVal(ref);
+      if (v === '#CYCLE' || v === '#ERR') return '0'; // Should not happen due to validation above
+      const n = Number(v);
+      return isNaN(n) ? '0' : String(n);
+    });
+    
+    expr = expr.replace(/[^0-9+\-*/().\s]/g, '');
+    if (!expr.trim()) return '0';
+    
+    try {
+      const res = new Function(`return ${expr}`)();
+      return isFinite(res) ? String(res) : '#ERR';
+    } catch (e) {
+      return '#ERR';
+    }
+  }
+
+  function resolve(cellId, chain) {
+    if (chain.has(cellId)) return '#CYCLE';
+    
+    const r = raw[cellId] || '';
+    let val;
+    
+    if (r.startsWith('=')) {
+      val = evaluateFormula(r, ref => resolve(ref, chain));
+    } else {
+      const t = r.trim();
+      val = isNaN(Number(t)) && t !== '' ? t : (Number(t) || 0);
+    }
+    
+    computedVal[cellId] = val;
+    return val;
+  }
+
+  function propagate(startCell, chain = new Set()) {
+    if (chain.has(startCell)) return;
+    chain.add(startCell);
+    
+    const newVal = resolve(startCell, chain);
+    updateUI(startCell, newVal);
+    
+    // Find dependents and propagate forward
+    const r = raw[startCell] || '';
+    const refMatches = r.match(/[A-J](?:[1-9]|10)/g) || [];
+    for (const ref of refMatches) {
+      if (getBounds(ref).valid) {
+        propagate(ref, chain);
+      }
+    }
+  }
+
+  function updateUI(cellId, value) {
+    const el = document.getElementById(`cell-${cellId}`);
+    if (!el) return;
+    if (editingCell === cellId) {
+      // If currently editing, we keep raw text visible, but store computed in dataset for sync
+      el.dataset.computed = value;
+    } else {
+      el.value = value;
+    }
+  }
+
+  function onFocus(e) {
+    const cellId = e.target.dataset.cell;
+    editingCell = cellId;
+    e.target.classList.remove('display-mode');
+    e.target.classList.add('editing-mode');
+    e.target.value = raw[cellId] || '';
+    e.target.focus(); // Ensure cursor placement if needed
+  }
+
+  function onBlur(e) {
+    if (editingCell !== null) commit(editingCell);
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commit(e.target.dataset.cell);
+    } else if (e.key === 'Tab') {
+      commit(e.target.dataset.cell);
+    }
+  }
+
+  function commit(cellId) {
+    const el = document.getElementById(`cell-${cellId}`);
+    if (!el) return;
+    
+    const newVal = el.value;
+    if (raw[cellId] !== newVal) {
+      raw[cellId] = newVal;
+      propagate(cellId);
+    }
+    
+    editingCell = null;
+    el.classList.add('display-mode');
+    el.classList.remove('editing-mode');
+  }
+
+  function refreshAllDisplays() {
+    for (let c = 0; c < COLS.length; c++) {
+      for (let r = 1; r <= ROWS_MAX; r++) {
+        const cellId = `${COLS[c]}${r}`;
+        if (!editingCell || editingCell !== cellId) {
+          updateUI(cellId, computedVal[cellId]);
+        }
+      }
+    }
+  }
+
+  // --- Export CSV ---
+  document.getElementById('export').addEventListener('click', () => {
+    let csv = '';
+    for (let r = 1; r <= ROWS_MAX; r++) {
+      const rowVals = [];
+      for (let c = 0; c < COLS.length; c++) {
+        const cellId = `${COLS[c]}${r}`;
+        let val = computedVal[cellId] || '';
+        // Escape CSV if needed (simple quotes if contains comma/quote/newline)
+        if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+          val = `"${val.replace(/"/g, '""')}"`;
+        }
+        rowVals.push(val);
+      }
+      csv += rowVals.join(',') + '\n';
+    }
+    document.getElementById('csv').value = csv.trim();
+  });
+
+  // --- Scripting API ---
+  window.sheet = {
+    set: function(cellId, value) {
+      const el = document.getElementById(`cell-${cellId}`);
+      if (el && editingCell === cellId) commit(cellId); // Commit any ongoing edit first
+      raw[cellId] = value;
+      propagate(cellId);
+    },
+    get: function(cellId) {
+      return computedVal[cellId];
+    },
+    raw: function(cellId) {
+      return raw[cellId] || '';
+    }
+  };
+
+})();
+</script>
+</body>
+</html>

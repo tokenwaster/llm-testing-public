@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: Arial, sans-serif;
+  padding: 16px;
+  background: #f0f2f5;
+  min-width: 640px;
+  min-height: 500px;
+}
+h1 { font-size: 17px; color: #222; margin-bottom: 10px; }
+.toolbar { margin-bottom: 10px; }
+#export {
+  padding: 6px 16px;
+  background: #1a73e8;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+#export:hover { background: #1558b0; }
+.grid-wrap {
+  display: inline-block;
+  overflow: auto;
+  border: 1px solid #bbb;
+  background: #fff;
+  min-width: 600px;
+  min-height: 300px;
+}
+table { border-collapse: collapse; }
+th {
+  background: #e8eaf6;
+  border: 1px solid #c0c2c8;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  color: #333;
+  min-width: 80px;
+  user-select: none;
+}
+th.corner { min-width: 38px; }
+td { border: 1px solid #ddd; padding: 0; }
+td.rh {
+  background: #e8eaf6;
+  border: 1px solid #c0c2c8;
+  padding: 0 8px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+  min-width: 38px;
+  user-select: none;
+}
+input.cell {
+  display: block;
+  width: 80px;
+  height: 26px;
+  border: none;
+  outline: none;
+  padding: 2px 5px;
+  font-size: 13px;
+  font-family: Arial, sans-serif;
+  background: transparent;
+  color: #111;
+}
+input.cell:focus {
+  background: #fff9c4;
+  box-shadow: inset 0 0 0 2px #1a73e8;
+  position: relative;
+  z-index: 1;
+}
+.csv-wrap { margin-top: 12px; }
+.csv-wrap label { display: block; font-size: 12px; color: #555; margin-bottom: 4px; }
+#csv {
+  width: 100%;
+  min-width: 600px;
+  height: 130px;
+  font-family: monospace;
+  font-size: 11px;
+  border: 1px solid #ccc;
+  padding: 6px;
+  resize: vertical;
+  background: #fafafa;
+  color: #222;
+}
+</style>
+</head>
+<body>
+<h1>Mini Spreadsheet</h1>
+<div class="toolbar"><button id="export">Export CSV</button></div>
+<div class="grid-wrap"><table id="grid"></table></div>
+<div class="csv-wrap">
+  <label for="csv">CSV Output</label>
+  <textarea id="csv" spellcheck="false"></textarea>
+</div>
+
+<script>
+(function () {
+  const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  const ROWS = [1,2,3,4,5,6,7,8,9,10];
+
+  /* ── Build table ── */
+  const tbl = document.getElementById('grid');
+  const thead = tbl.createTHead();
+  const hrow = thead.insertRow();
+  const corner = document.createElement('th');
+  corner.className = 'corner';
+  hrow.appendChild(corner);
+  COLS.forEach(c => {
+    const th = document.createElement('th');
+    th.textContent = c;
+    hrow.appendChild(th);
+  });
+  const tbody = tbl.createTBody();
+  ROWS.forEach(r => {
+    const tr = tbody.insertRow();
+    const rh = tr.insertCell();
+    rh.className = 'rh';
+    rh.textContent = r;
+    COLS.forEach(c => {
+      const td = tr.insertCell();
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'cell';
+      inp.id = `cell-${c}${r}`;
+      inp.autocomplete = 'off';
+      inp.spellcheck = false;
+      td.appendChild(inp);
+    });
+  });
+
+  /* ── Data store ── */
+  const store = Object.create(null);
+  const getRaw = id => store[id] || '';
+  const setRaw = (id, v) => { store[id] = v; };
+
+  /* ── Tokeniser ── */
+  function tokenize(expr) {
+    const toks = [];
+    let i = 0;
+    while (i < expr.length) {
+      const ch = expr[i];
+      if (ch === ' ' || ch === '\t') { i++; continue; }
+      if ('+-*/()'.includes(ch)) { toks.push(ch); i++; continue; }
+      if (/[\d.]/.test(ch)) {
+        let s = '';
+        while (i < expr.length && /[\d.]/.test(expr[i])) s += expr[i++];
+        const n = parseFloat(s);
+        if (isNaN(n)) return null;
+        toks.push({ t: 'n', v: n });
+        continue;
+      }
+      if (/[A-Ja-j]/.test(ch)) {
+        let s = ch.toUpperCase(); i++;
+        while (i < expr.length && /\d/.test(expr[i])) s += expr[i++];
+        toks.push({ t: 'r', v: s });
+        continue;
+      }
+      return null;
+    }
+    return toks;
+  }
+
+  /* ── Evaluator ── */
+  function evalCell(id, vis) {
+    const raw = getRaw(id);
+    if (!raw.startsWith('=')) return raw;   // plain text / empty
+    if (vis.has(id)) return '#CYCLE';
+
+    const vis2 = new Set(vis);
+    vis2.add(id);
+
+    const expr = raw.slice(1).trim();
+    if (!expr) return '#ERR';
+
+    const toks = tokenize(expr);
+    if (!toks) return '#ERR';
+
+    let p = 0;
+    const pk  = () => toks[p];
+    const eat = () => toks[p++];
+
+    function addSub() {
+      let v = mulDiv();
+      if (typeof v === 'string') return v;
+      while (p < toks.length && (pk() === '+' || pk() === '-')) {
+        const op = eat();
+        const r = mulDiv();
+        if (typeof r === 'string') return r;
+        v = op === '+' ? v + r : v - r;
+      }
+      return v;
+    }
+
+    function mulDiv() {
+      let v = unary();
+      if (typeof v === 'string') return v;
+      while (p < toks.length && (pk() === '*' || pk() === '/')) {
+        const op = eat();
+        const r = unary();
+        if (typeof r === 'string') return r;
+        if (op === '/') { if (r === 0) return '#ERR'; v = v / r; }
+        else v = v * r;
+      }
+      return v;
+    }
+
+    function unary() {
+      if (p < toks.length && pk() === '-') {
+        eat();
+        const v = primary();
+        return typeof v === 'string' ? v : -v;
+      }
+      if (p < toks.length && pk() === '+') eat();
+      return primary();
+    }
+
+    function primary() {
+      if (p >= toks.length) return '#ERR';
+      const tok = pk();
+
+      if (tok === '(') {
+        eat();
+        const v = addSub();
+        if (typeof v === 'string') return v;
+        if (p >= toks.length || pk() !== ')') return '#ERR';
+        eat();
+        return v;
+      }
+
+      if (typeof tok === 'object' && tok.t === 'n') { eat(); return tok.v; }
+
+      if (typeof tok === 'object' && tok.t === 'r') {
+        eat();
+        const col = tok.v[0];
+        const row = parseInt(tok.v.slice(1), 10);
+        if (!COLS.includes(col) || row < 1 || row > 10) return '#ERR';
+        const rv = evalCell(`${col}${row}`, vis2);
+        if (rv === '#CYCLE' || rv === '#ERR') return rv;
+        if (rv === '' || rv == null) return 0;
+        const n = parseFloat(rv);
+        return isNaN(n) ? '#ERR' : n;
+      }
+
+      return '#ERR';
+    }
+
+    const result = addSub();
+    if (p !== toks.length) return '#ERR';
+    if (typeof result === 'string') return result;
+    if (!isFinite(result)) return '#ERR';
+    // Trim floating-point noise
+    return String(parseFloat(result.toPrecision(12)));
+  }
+
+  const getDisplay = id => evalCell(id, new Set());
+
+  /* ── Recalculate all visible cells ── */
+  function recalcAll() {
+    const active = document.activeElement;
+    ROWS.forEach(r => COLS.forEach(c => {
+      const id = `${c}${r}`;
+      const inp = document.getElementById(`cell-${id}`);
+      if (inp && inp !== active) inp.value = getDisplay(id);
+    }));
+  }
+
+  /* ── Cell event wiring ── */
+  let suppressBlur = false;
+
+  ROWS.forEach(r => COLS.forEach(c => {
+    const id = `${c}${r}`;
+    const inp = document.getElementById(`cell-${id}`);
+
+    inp.addEventListener('focus', () => {
+      inp.value = getRaw(id);
+    });
+
+    inp.addEventListener('blur', () => {
+      if (suppressBlur) return;
+      setRaw(id, inp.value);
+      recalcAll();
+    });
+
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+    });
+  }));
+
+  /* ── Export CSV ── */
+  document.getElementById('export').addEventListener('click', () => {
+    const lines = ROWS.map(r =>
+      COLS.map(c => {
+        const v = getDisplay(`${c}${r}`);
+        return /[,"\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+      }).join(',')
+    );
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  /* ── Public scripting API ── */
+  window.sheet = {
+    set(id, val) {
+      const inp = document.getElementById(`cell-${id}`);
+      if (inp && inp === document.activeElement) {
+        suppressBlur = true;
+        inp.blur();
+        suppressBlur = false;
+      }
+      setRaw(id, String(val));
+      recalcAll();
+    },
+    get(id)  { return getDisplay(id); },
+    raw(id)  { return getRaw(id); }
+  };
+
+  recalcAll();
+})();
+</script>
+</body>
+</html>

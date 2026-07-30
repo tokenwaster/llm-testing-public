@@ -1,14 +1,3 @@
-"""LM Studio lifecycle control: model states via the /api/v0 REST API, and
-explicit load / unload via the `lms` CLI.
-
-Used by the runner so local timing is honest and deterministic:
-  1. `lms unload --all`  — clear VRAM/RAM of every other model
-  2. `lms load <key>`    — explicit pre-load, measured as preload_ms
-  3. warm-up ping        — verifies serving; its latency is the *warm* baseline
-
-Also reads LM Studio's own server log to CONFIRM what the server received, which
-is a different claim from what we sent — see confirm_sampling.
-"""
 
 import json
 import os
@@ -44,8 +33,6 @@ def _api_root(base_url: str) -> str:
 
 
 def model_states(base_url: str, key_env: str | None = None) -> dict[str, str] | None:
-    """{model_id: 'loaded' | 'not-loaded'} for every model DOWNLOADED in LM
-    Studio (llm/vlm only), or None if the v0 API is unreachable."""
     key = os.environ.get(key_env) if key_env else None
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
@@ -61,8 +48,6 @@ def model_states(base_url: str, key_env: str | None = None) -> dict[str, str] | 
 
 
 def model_info(base_url: str, key_env: str | None, model_id: str) -> dict | None:
-    """Identity of the model FILE (quantization, arch, max context) from the
-    v0 API — the model-side analogue of task content-hashing."""
     key = os.environ.get(key_env) if key_env else None
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
@@ -97,16 +82,6 @@ def unload_all(progress=print) -> bool:
 
 def load_model(model_id: str, progress=print,
                context_length: int = 0, gpu_offload: str = "max") -> float | None:
-    """Explicitly load a model; returns wall-clock load time in ms, or None
-    if lms is unavailable or the load failed (caller falls back to JIT).
-
-    gpu_offload: "max" (force every layer onto the GPU — fast, for contexts that
-    fit), "off", or a "0".."1" ratio — passed as `--gpu <value>`. "auto" (or "")
-    means OMIT the flag, i.e. lms's own default auto-fit — lms rejects a literal
-    `--gpu auto` ("not a number"). Use "auto" for contexts that overflow VRAM, so
-    lms parks the excess on the CPU and the task COMPLETES instead of "max"
-    forcing a shared-memory spill; use "max" (with batch-sized context via
-    context_buckets) so the whole model sits on the GPU when it fits."""
     exe = lms_exe()
     if not exe:
         return None
@@ -128,17 +103,6 @@ def load_model(model_id: str, progress=print,
 
 
 def received_requests(days: set[str] | None = None) -> list[dict]:
-    """What the SERVER says it received: [{ts, model, body}], ts naive LOCAL time.
-
-    The harness records `sampling_used` — what it intended to send. That is not
-    the same claim as "the provider got it", and every configuration bug this
-    suite has shipped lived in exactly that gap. LM Studio logs each request's
-    full body, so the gap is closable from the server's own account rather than
-    from ours.
-
-    `days` filters to "YYYY-MM-DD" keys (the log file names), so a report render
-    reads only the days its runs actually span.
-    """
     out: list[dict] = []
     if not SERVER_LOG_DIR.is_dir():
         return out
@@ -188,7 +152,6 @@ _SAMPLING_KEYS_SEEN = ("temperature", "top_p", "top_k", "min_p", "top_a", "seed"
 
 
 def _num_eq(a, b) -> bool:
-    """JSON renders 1.0 as 1, so compare numerically, not by type."""
     if a is None or b is None:
         return a is b
     try:
@@ -198,7 +161,6 @@ def _num_eq(a, b) -> bool:
 
 
 def _match(expected: dict, body: dict) -> list[str]:
-    """Differences between what we meant to send and what arrived ([] = clean)."""
     diffs = []
     for k, v in (expected or {}).items():
         if k not in body:
@@ -213,16 +175,6 @@ def _match(expected: dict, body: dict) -> list[str]:
 
 
 def confirm_sampling(runs_dir=None, models=None) -> dict:
-    """Per LOCAL model: were its cells' sampling values actually RECEIVED?
-
-    Joins each attempt's `t_start` to the nearest request the server logged for
-    that model at or after it. Returns
-    {model: {confirmed, mismatched, unlogged, total, details}} where a detail is
-    (task, [difference, ...]).
-
-    `unlogged` is not a failure — LM Studio's logs rotate and predate this check,
-    so an old cell simply has no record. Only `mismatched` is a finding.
-    """
     from . import config
     from .registry import load_models
     runs_dir = runs_dir or config.RUNS_DIR

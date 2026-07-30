@@ -1,21 +1,3 @@
-"""Reference-verify web-012-coin. Run from anywhere:
-
-    python tasks-refs/web-012-coin/verify.py
-
-Expects, through the real scoring lane:
-    app.html            -> 0.800  the reference. NOT 1.0: automated_max caps
-                                  the machine at mechanics; craft is human.
-    traps/app_empty     -> 0.000  a no-op earns nothing
-    traps/app_flat      -> 0.062  perfect site, dead render. Keeps ONE point,
-                                  for exposing the API, which it really does.
-                                  Everything else is gated on a live coin (see
-                                  _alive) because this is a render task wearing
-                                  a website: four tiles and a badge are not the
-                                  deliverable.
-    traps/app_sameface  -> 0.800  documented limit: whether the two faces show
-                                  DIFFERENT motifs is not decidable from pixels
-                                  (see test_both_faces_are_struck).
-"""
 import shutil
 import sys
 import tempfile

@@ -1,12 +1,3 @@
-"""CLI entry point.
-
-    python -m harness add lmstudio             # auto-register every LM Studio model
-    python -m harness add claude [alias]       # register Claude via CLI (no API key)
-    python -m harness list                     # show models & tasks
-    python -m harness run [--models a,b] [--tasks pat] [--tier N] [--tag note]
-    python -m harness serve [--port N]         # results site + run control panel
-    python -m harness report                   # regenerate static HTML only
-"""
 
 import argparse
 import fnmatch
@@ -96,9 +87,6 @@ def cmd_run(args) -> int:
 
 
 def _resolve_serve_port(args) -> int:
-    """CLI --port wins for this run; with --save it becomes the persisted
-    default; with neither, use the saved default (else this build's). Shared by the
-    public viewer and the operator control server."""
     if args.port is not None:
         if getattr(args, "save", False):
             config.save_setting("serve_port", args.port)
@@ -109,8 +97,6 @@ def _resolve_serve_port(args) -> int:
 
 
 def cmd_serve(args) -> int:
-    """Read-only results website. The private operator layer (_control_cli)
-    overrides this with the full run/watch/manage control panel when present."""
     from .viewer import serve
     serve(port=_resolve_serve_port(args))
     return 0
@@ -148,16 +134,12 @@ def cmd_archive(args) -> int:
 
 
 def cmd_prices(args) -> int:
-    """Re-read gateway list prices into the model yamls (catches drift, and a
-    :free promo that has ended). Never rewrites already-recorded run costs."""
     from .prices import refresh
     refresh(apply=args.apply)
     return 0
 
 
 def cmd_rescore(args) -> int:
-    """Re-run checkers against SAVED workspaces (no model calls) — for when a
-    checker bug or environment issue graded good outputs wrongly."""
     from .rescore import RunInProgress, rescore
     try:
         rescore(args.tasks, force=args.force)
@@ -168,8 +150,6 @@ def cmd_rescore(args) -> int:
 
 
 def cmd_prune(args) -> int:
-    """Delete individual task RESULTS from runs (e.g. results produced under a
-    since-fixed unfair config). Dry-run by default; --yes to actually delete."""
     import fnmatch as _fn
     import shutil as _sh
 

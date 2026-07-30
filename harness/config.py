@@ -1,4 +1,3 @@
-"""Paths and constants. Everything is relative to the project root."""
 
 import json
 import os
@@ -29,14 +28,12 @@ def load_settings() -> dict:
 
 
 def save_setting(key: str, value) -> None:
-    """Persist one preference to settings.local.json (merges with existing)."""
     s = load_settings()
     s[key] = value
     SETTINGS_FILE.write_text(json.dumps(s, indent=2) + "\n", encoding="utf-8")
 
 
 def serve_port() -> int:
-    """The saved default serve port, else this build's built-in default."""
     p = load_settings().get("serve_port")
     try:
         return int(p) if p else default_serve_port()
@@ -45,9 +42,6 @@ def serve_port() -> int:
 
 
 def suite_version() -> str:
-    """Current test-suite version (major.minor.patch) from SUITE_VERSION.
-    Minor/major bumps mean tests or methodology changed — archive the old
-    runs first. Patch bumps are non-methodology fixes."""
     try:
         return (ROOT / "SUITE_VERSION").read_text(encoding="utf-8").strip()
     except OSError:
@@ -55,8 +49,6 @@ def suite_version() -> str:
 
 
 def _load_dotenv() -> None:
-    """Minimal .env loader (KEY=VALUE) so keys travel with the project. Real
-    environment variables win over .env values."""
     env_file = ROOT / ".env"
     if not env_file.exists():
         return
@@ -81,19 +73,6 @@ PRIVATE_RUNS_DIR = PRIVATE_DIR / "runs"
 
 
 def mirror_seed_offset() -> int:
-    """The seed shift that turns a public task into its private variant.
-
-    Deliberately NOT a constant in this file. The generators in `tasks-refs/` are
-    published, and they are deterministic in SEED — so a published offset is a
-    complete recipe for regenerating the exact private variants, and the held-out
-    set stops being held out. Publish the method, keep the key: this function
-    ships, the number does not.
-
-    Read from `MIRROR_SEED_OFFSET` (env or .env) or `settings.local.json` — both
-    gitignored and absent from the export allowlist. Minted once and persisted if
-    neither carries it, so a given operator's variants stay reproducible while
-    two operators do not share a private set.
-    """
     for raw in (os.environ.get("MIRROR_SEED_OFFSET"),
                 load_settings().get("mirror_seed_offset")):
         try:
@@ -109,15 +88,6 @@ REPORTS_DIR = ROOT / "reports"
 
 
 def resolve_run_data(rel: str):
-    """Map a /data/<run-id>/… browse path to the runs root that actually holds
-    it: live runs/ first, then archive/<ver>/runs/.
-
-    Archived-dataset report pages link to /data for their own runs, but those
-    live under archive/<ver>/runs, not the live runs/. Resolving only against the
-    live tree 404s every one of those links. The run id (first path segment) is a
-    timestamp and unique across versions, so the correct root is unambiguous.
-    Returns (root, cleaned_rel) or None if no tree owns that run id.
-    """
     rel = (rel or "").strip("/")
     first = rel.split("/", 1)[0] if rel else ""
     if not first or (RUNS_DIR / first).exists():
@@ -148,7 +118,6 @@ CATEGORY_SAMPLING_PROFILE = {
 
 
 def sampling_profile_for(category: str) -> str:
-    """Which named profile a task category draws from ('' if unmapped)."""
     return CATEGORY_SAMPLING_PROFILE.get(category or "", "")
 DEFAULT_AGENT_MAX_TURNS = 15
 CLAUDE_SPIRAL_S = 300
@@ -172,17 +141,6 @@ NEW_TASKS = (
 )
 
 def hardened_completion(counts: dict[str, int], hard_ids) -> dict:
-    """How many times the hardened set has been fully swept for one model.
-
-    `counts` maps hardened-task id -> number of scored runs of that task. A full
-    run and a hardened-only set each score every hardened task once, so the
-    number of COMPLETE sweeps is the minimum count across the hardened tasks;
-    any task with more than that minimum means an extra sweep is partway done.
-
-    `hard_todo` is the tasks lagging at that minimum WHEN a sweep is partway done
-    — running exactly those once lifts the minimum and completes the next sweep.
-    It is empty when nothing is in progress (all equal), so there's nothing to
-    click to 'finish'."""
     hard_ids = list(hard_ids)
     per = [counts.get(t, 0) for t in hard_ids]
     done = min(per) if per else 0

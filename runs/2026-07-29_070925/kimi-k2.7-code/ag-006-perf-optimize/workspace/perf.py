@@ -1,0 +1,41 @@
+from collections import Counter
+
+
+def common_elements(a, b):
+    set_b = set(b)
+    seen = set()
+    out = []
+    for x in a:
+        if x in set_b and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return sorted(out)
+
+
+def fib(n):
+    if n < 2:
+        return n
+    prev, curr = 0, 1
+    for _ in range(2, n + 1):
+        prev, curr = curr, prev + curr
+    return curr
+
+
+def count_pairs(nums, target):
+    counts = Counter()
+    result = 0
+    for x in nums:
+        complement = target - x
+        result += counts.get(complement, 0)
+        counts[x] = counts.get(x, 0) + 1
+    return result
+
+
+def dedupe_keep_order(items):
+    seen = set()
+    out = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out

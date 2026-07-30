@@ -1,10 +1,3 @@
-"""A checker deadline must reap the whole tree, not just the direct child.
-
-Checkers spawn (pytest, ag-006's timed workloads, Playwright's node+Chromium),
-and a venv python.exe is a launcher shim, so killing one process leaves the real
-interpreter running. Orphans steal the CPU that ag-006 and the webapp lane
-calibrate their budgets against, corrupting the scores of tasks that run later.
-"""
 
 import os
 import subprocess
@@ -29,7 +22,6 @@ while True:
 
 
 def _spinners_alive() -> int:
-    """Count live probe grandchildren, by command line."""
     if os.name == "nt":
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -79,7 +71,6 @@ def test_run_capped_leaves_a_normal_process_alone():
 
 
 def test_run_capped_reports_a_crash_rather_than_a_timeout():
-    """A non-zero exit must not be mistaken for a deadline kill."""
     res = run_capped([sys.executable, "-c", "raise SystemExit(3)"], timeout=30)
     assert res.timed_out is False
     assert res.returncode == 3
@@ -93,8 +84,6 @@ def test_terminate_tree_is_safe_on_an_already_dead_process():
 
 
 def test_the_scoring_lane_uses_the_capped_runner():
-    """The checker deadline is the one that fires on real leaks — every pytest
-    and webapp task in the suite goes through it."""
     import inspect
 
     from harness import scoring

@@ -1,12 +1,3 @@
-"""API interface registry — the endpoints the harness can discover and
-register cloud models from. Managed on the /backend page; stored in
-interfaces.yaml at the project root.
-
-Built-in surfaces (LM Studio, Claude CLI) are not stored here — they have
-their own discovery flows. This registry covers OpenAI-compatible APIs
-(OpenRouter, Ollama cloud, OpenAI, Groq, DeepSeek, custom endpoints) and
-the Anthropic API.
-"""
 
 import os
 
@@ -98,7 +89,6 @@ def save_interfaces(interfaces: list[dict]) -> None:
 
 
 def set_env_key(key_env: str, value: str) -> None:
-    """Persist an API key into .env (gitignored) and the live process."""
     env_file = config.ROOT / ".env"
     lines = []
     if env_file.exists():
@@ -114,9 +104,6 @@ def key_status(key_env: str | None) -> bool:
 
 
 def list_remote_models(iface: dict) -> list[dict]:
-    """Query an interface's model catalog. Returns [{id, in_price, out_price}]
-    with per-Mtok pricing when the endpoint publishes it (OpenRouter does).
-    Raises RuntimeError with a human-readable message on failure."""
     base = (iface.get("base_url") or "").rstrip("/")
     if not base:
         raise RuntimeError("interface has no base_url")
@@ -153,9 +140,6 @@ def list_remote_models(iface: dict) -> list[dict]:
 
 
 def endpoint_quants(model_id: str) -> dict[str, str]:
-    """OpenRouter: map of upstream host -> quantization for one model, from
-    the public endpoints API. Lets runs record WHICH precision actually
-    served them (hosts differ: official often 'unknown', others fp8/fp4)."""
     try:
         r = httpx.get(f"https://openrouter.ai/api/v1/models/{model_id}/endpoints",
                       timeout=15)
@@ -172,20 +156,6 @@ def add_api_model(iface: dict, model_id: str,
                   in_price: float = 0.0, out_price: float = 0.0,
                   progress=print, enabled: bool = True,
                   name: str | None = None):
-    """Write a model yaml for a cloud model served by this interface.
-    Never overwrites an existing registration.
-
-    `name` overrides the id-derived suite name. It is needed whenever the SAME
-    model is reachable through two interfaces — Moonshot serves "kimi-k3" under
-    the same id OpenRouter does — because the suite name is the aggregation key,
-    so registering both under one name would silently pool two different routes
-    (and quants) into a single identity.
-
-    If the caller supplies no price (adding a model by typing its id rather than
-    picking it out of the fetched catalog), look the price up from the
-    interface's catalog instead of silently registering it at $0 — a $0 model
-    wins every "cheapest" recommendation and quietly poisons cost reporting.
-    A genuinely free model reports 0 there too, so the result stays correct."""
     from .discover import _slug
     name = _slug(name or model_id)
     path = config.MODELS_DIR / f"{name}.yaml"

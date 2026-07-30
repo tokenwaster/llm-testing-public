@@ -1,13 +1,3 @@
-"""Testing a model·task twice in a dataset fleshes the number out.
-
-The score is the MEAN of every scored run, not the newest. Latest-wins made a
-re-run replace what came before, so three trials of 1.0/0.5/0.0 reported 0.0 —
-one sample, worst purely by run order — while the σ column described the spread
-of three samples the headline had thrown away.
-
-Unscored runs (crash, spiral, DNF) stay out of the mean, matching _summarize,
-which counts only status=="scored" toward a model's average.
-"""
 
 import pytest
 
@@ -30,7 +20,6 @@ def _run(run_id, entries):
 
 
 def test_one_run_is_unchanged():
-    """The whole existing dataset is n=1; the mean of one value is that value."""
     agg = _aggregate([_entry("r1", 0.75)])
     assert agg["score"]["score"] == 0.75
     assert agg["n_runs"] == 1
@@ -50,8 +39,6 @@ def test_runs_badge_plain_when_every_run_scored():
 
 
 def test_runs_badge_shows_scored_over_total_when_some_didnt_score():
-    """The mean is over the SCORED runs only, so ×2/3 must not imply all 3
-    counted toward the number."""
     badge, title = _runs_badge(3, 2, ["a", "b", "c"])
     assert badge == "×2/3"
     assert "2 scored of 3 runs" in title and "1 unscored" in title
@@ -65,7 +52,6 @@ def test_three_runs_average_rather_than_replace():
 
 
 def test_a_fourth_run_moves_the_aggregate_again():
-    """'Test more than once and it just keeps fleshing out the aggregate.'"""
     three = _aggregate([_entry("r1", 1.0), _entry("r2", 1.0), _entry("r3", 1.0)])
     four = _aggregate([_entry("r1", 1.0), _entry("r2", 1.0), _entry("r3", 1.0),
                        _entry("r4", 0.0)])
@@ -89,8 +75,6 @@ def test_sigma_reports_the_spread():
 
 
 def test_an_unscored_run_stays_out_of_the_mean():
-    """_summarize excludes status!="scored" from a model's average, so a failed
-    trial must not silently become a 0 here when it isn't one there."""
     agg = _aggregate([_entry("r1", 1.0), _entry("r2", None, status="error")])
     assert agg["score"]["score"] == 1.0
     assert agg["n_scored"] == 1
@@ -112,8 +96,6 @@ def test_the_newest_scored_record_supplies_the_prose():
 
 
 def test_cost_and_wall_average_so_a_retest_is_not_more_expensive():
-    """Re-testing must not make a model look slower or pricier: these describe
-    ONE pass, so they mean rather than accumulate."""
     agg = _aggregate([_entry("r1", 1.0, cost_usd=2.0, wall_ms=100),
                       _entry("r2", 1.0, cost_usd=4.0, wall_ms=300)])
     assert agg["cost_usd"] == 3.0
@@ -153,9 +135,6 @@ def test_means(scores, expect):
 
 
 def test_summarize_reports_a_confidence_band_across_tasks():
-    """The headline score carries a 95% band (±1.96·SE across tasks) so the
-    reader can tell a real ordering from noise. Needs >=2 scored tasks; the band
-    shrinks as scores tighten and vanishes for a single task."""
     from harness.report import _summarize
 
     rs = [_entry(f"r{i}", s) for i, s in enumerate([1.0, 0.0, 1.0, 0.0])]

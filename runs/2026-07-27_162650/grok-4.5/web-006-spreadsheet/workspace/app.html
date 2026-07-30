@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    padding: 16px;
+    background: #f0f2f5;
+    min-width: 600px;
+    min-height: 400px;
+  }
+  h1 { font-size: 18px; margin-bottom: 12px; color: #333; }
+  .toolbar { margin-bottom: 12px; display: flex; gap: 8px; align-items: flex-start; }
+  button#export {
+    padding: 8px 16px;
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  button#export:hover { background: #1d4ed8; }
+  #csv {
+    width: 100%;
+    min-height: 80px;
+    margin-top: 12px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    resize: vertical;
+  }
+  .sheet-wrap {
+    overflow: auto;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: white;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  table {
+    border-collapse: collapse;
+    table-layout: fixed;
+    min-width: 100%;
+  }
+  th, td {
+    border: 1px solid #e2e8f0;
+    width: 80px;
+    height: 28px;
+    padding: 0;
+  }
+  th {
+    background: #f8fafc;
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+    user-select: none;
+  }
+  th.row-hdr { width: 40px; min-width: 40px; }
+  td input {
+    width: 100%;
+    height: 100%;
+    border: none;
+    outline: none;
+    padding: 2px 6px;
+    font-size: 13px;
+    font-family: ui-monospace, monospace;
+    background: transparent;
+    text-align: right;
+  }
+  td input:focus {
+    background: #eff6ff;
+    outline: 2px solid #2563eb;
+    outline-offset: -2px;
+    text-align: left;
+  }
+  td input.err { color: #dc2626; }
+  td input.cycle { color: #dc2626; }
+</style>
+</head>
+<body>
+  <h1>Mini Spreadsheet</h1>
+  <div class="toolbar">
+    <button id="export" type="button">Export CSV</button>
+  </div>
+  <div class="sheet-wrap">
+    <table id="grid"></table>
+  </div>
+  <textarea id="csv" placeholder="CSV export appears here" readonly></textarea>
+
+<script>
+(function () {
+  const COLS = 'ABCDEFGHIJ'.split('');
+  const ROWS = 10;
+  const rawData = {};
+  const inputs = {};
+  let editing = null;
+
+  function cellId(col, row) { return col + row; }
+
+  function buildGrid() {
+    const table = document.getElementById('grid');
+    const thead = document.createElement('thead');
+    const hr = document.createElement('tr');
+    const corner = document.createElement('th');
+    corner.className = 'row-hdr';
+    hr.appendChild(corner);
+    COLS.forEach(c => {
+      const th = document.createElement('th');
+      th.textContent = c;
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    for (let r = 1; r <= ROWS; r++) {
+      const tr = document.createElement('tr');
+      const rh = document.createElement('th');
+      rh.className = 'row-hdr';
+      rh.textContent = r;
+      tr.appendChild(rh);
+      COLS.forEach(c => {
+        const td = document.createElement('td');
+        const inp = document.createElement('input');
+        const id = cellId(c, r);
+        inp.id = 'cell-' + id;
+        inp.setAttribute('data-cell', id);
+        inp.autocomplete = 'off';
+        inp.spellcheck = false;
+        rawData[id] = '';
+        inputs[id] = inp;
+
+        inp.addEventListener('focus', () => {
+          editing = id;
+          inp.value = rawData[id];
+          inp.classList.remove('err', 'cycle');
+          inp.select();
+        });
+        inp.addEventListener('blur', () => {
+          if (editing === id) {
+            commit(id, inp.value);
+            editing = null;
+          }
+        });
+        inp.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            inp.blur();
+          } else if (e.key === 'Escape') {
+            inp.value = rawData[id];
+            inp.blur();
+          }
+        });
+
+        td.appendChild(inp);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+  }
+
+  // Tokenizer
+  function tokenize(formula) {
+    const s = formula.startsWith('=') ? formula.slice(1) : formula;
+    const tokens = [];
+    let i = 0;
+    while (i < s.length) {
+      const ch = s[i];
+      if (/\s/.test(ch)) { i++; continue; }
+      if ('+-*/()'.includes(ch)) {
+        tokens.push({ type: ch });
+        i++;
+        continue;
+      }
+      if (/[0-9.]/.test(ch)) {
+        let num = '';
+        while (i < s.length && /[0-9.]/.test(s[i])) { num += s[i++]; }
+        const v = parseFloat(num);
+        if (isNaN(v)) throw new Error('bad number');
+        tokens.push({ type: 'num', value: v });
+        continue;
+      }
+      if (/[A-Ja-j]/.test(ch)) {
+        let ref = '';
+        while (i < s.length && /[A-Ja-j]/.test(s[i])) { ref += s[i++].toUpperCase(); }
+        let row = '';
+        while (i < s.length && /[0-9]/.test(s[i])) { row += s[i++]; }
+        if (!row) throw new Error('bad ref');
+        const r = parseInt(row, 10);
+        if (r < 1 || r > ROWS || ref.length !== 1 || !COLS.includes(ref)) throw new Error('bad ref');
+        tokens.push({ type: 'ref', value: ref + r });
+        continue;
+      }
+      throw new Error('bad char');
+    }
+    return tokens;
+  }
+
+  // Recursive descent parser -> AST
+  // expr = term ((+|-) term)*
+  // term = factor ((*|/) factor)*
+  // factor = number | ref | (expr) | unary +/-
+  function parse(tokens) {
+    let pos = 0;
+    function peek() { return tokens[pos]; }
+    function consume(t) {
+      if (!peek() || (t && peek().type !== t)) throw new Error('syntax');
+      return tokens[pos++];
+    }
+
+    function parseExpr() {
+      let node = parseTerm();
+      while (peek() && (peek().type === '+' || peek().type === '-')) {
+        const op = consume().type;
+        const right = parseTerm();
+        node = { type: 'bin', op, left: node, right };
+      }
+      return node;
+    }
+    function parseTerm() {
+      let node = parseFactor();
+      while (peek() && (peek().type === '*' || peek().type === '/')) {
+        const op = consume().type;
+        const right = parseFactor();
+        node = { type: 'bin', op, left: node, right };
+      }
+      return node;
+    }
+    function parseFactor() {
+      if (!peek()) throw new Error('syntax');
+      if (peek().type === '+') { consume(); return parseFactor(); }
+      if (peek().type === '-') {
+        consume();
+        return { type: 'unary', op: '-', arg: parseFactor() };
+      }
+      if (peek().type === 'num') {
+        return { type: 'num', value: consume().value };
+      }
+      if (peek().type === 'ref') {
+        return { type: 'ref', value: consume().value };
+      }
+      if (peek().type === '(') {
+        consume('(');
+        const n = parseExpr();
+        consume(')');
+        return n;
+      }
+      throw new Error('syntax');
+    }
+
+    const ast = parseExpr();
+    if (pos < tokens.length) throw new Error('syntax');
+    return ast;
+  }
+
+  function depsOf(ast, set) {
+    if (!ast) return;
+    if (ast.type === 'ref') set.add(ast.value);
+    if (ast.type === 'bin') { depsOf(ast.left, set); depsOf(ast.right, set); }
+    if (ast.type === 'unary') depsOf(ast.arg, set);
+  }
+
+  function getDeps(raw) {
+    if (!raw || !raw.startsWith('=')) return new Set();
+    try {
+      const ast = parse(tokenize(raw));
+      const s = new Set();
+      depsOf(ast, s);
+      return s;
+    } catch {
+      return new Set();
+    }
+  }
+
+  // Build dependency graph and detect cycles; evaluate all
+  function recalculate() {
+    const ids = Object.keys(rawData);
+    const deps = {};
+    const parsed = {}; // id -> {kind:'val'|'formula'|'empty'|'text', ast?, num?, text?}
+
+    ids.forEach(id => {
+      const raw = rawData[id];
+      deps[id] = new Set();
+      if (raw === '' || raw == null) {
+        parsed[id] = { kind: 'empty' };
+      } else if (raw.startsWith('=')) {
+        try {
+          const ast = parse(tokenize(raw));
+          const d = new Set();
+          depsOf(ast, d);
+          deps[id] = d;
+          parsed[id] = { kind: 'formula', ast };
+        } catch {
+          parsed[id] = { kind: 'error' };
+        }
+      } else {
+        const n = parseFloat(raw);
+        if (raw.trim() !== '' && !isNaN(n) && /^-?\d/.test(raw.trim())) {
+          parsed[id] = { kind: 'num', value: n };
+        } else {
+          // plain text — try number more loosely
+          if (raw.trim() !== '' && !isNaN(Number(raw))) {
+            parsed[id] = { kind: 'num', value: Number(raw) };
+          } else {
+            parsed[id] = { kind: 'text', value: raw };
+          }
+        }
+      }
+    });
+
+    // Cycle detection via DFS (only among formula cells that reference)
+    const WHITE = 0, GRAY = 1, BLACK = 2;
+    const color = {};
+    ids.forEach(id => { color[id] = WHITE; });
+    const inCycle = new Set();
+
+    function dfs(u, path) {
+      color[u] = GRAY;
+      path.push(u);
+      for (const v of deps[u]) {
+        if (!rawData.hasOwnProperty(v)) continue;
+        if (color[v] === GRAY) {
+          // mark cycle
+          const idx = path.indexOf(v);
+          for (let i = idx; i < path.length; i++) inCycle.add(path[i]);
+        } else if (color[v] === WHITE) {
+          dfs(v, path);
+        }
+      }
+      path.pop();
+      color[u] = BLACK;
+    }
+    ids.forEach(id => {
+      if (color[id] === WHITE) dfs(id, []);
+    });
+
+    // Also propagate: if a cell depends on a cycle cell (transitively), show #CYCLE
+    // Spec: "Circular references display exactly #CYCLE in every cell of the cycle."
+    // Only cells in the cycle itself.
+
+    const values = {}; // id -> computed number or null
+    const display = {}; // id -> display string
+    const status = {}; // ok | err | cycle
+
+    ids.forEach(id => {
+      if (inCycle.has(id)) {
+        status[id] = 'cycle';
+        display[id] = '#CYCLE';
+      }
+    });
+
+    function evalAst(ast, stack) {
+      if (ast.type === 'num') return ast.value;
+      if (ast.type === 'unary') {
+        const v = evalAst(ast.arg, stack);
+        return -v;
+      }
+      if (ast.type === 'bin') {
+        const l = evalAst(ast.left, stack);
+        const r = evalAst(ast.right, stack);
+        switch (ast.op) {
+          case '+': return l + r;
+          case '-': return l - r;
+          case '*': return l * r;
+          case '/': return r === 0 ? NaN : l / r;
+        }
+      }
+      if (ast.type === 'ref') {
+        const ref = ast.value;
+        if (!rawData.hasOwnProperty(ref)) throw new Error('bad ref');
+        return valueOf(ref, stack);
+      }
+      throw new Error('bad ast');
+    }
+
+    function valueOf(id, stack) {
+      if (status[id] === 'cycle') throw new Error('cycle');
+      if (status[id] === 'err') throw new Error('err');
+      if (values.hasOwnProperty(id)) return values[id];
+      if (stack.has(id)) {
+        // cycle during eval
+        throw new Error('cycle');
+      }
+      const p = parsed[id];
+      if (p.kind === 'empty') {
+        values[id] = 0;
+        return 0;
+      }
+      if (p.kind === 'num') {
+        values[id] = p.value;
+        return p.value;
+      }
+      if (p.kind === 'text') {
+        // non-numeric text in formula context counts... empty is 0; text is error when used as number?
+        // Spec: "Non-numeric plain text displays as itself; empty cells count as 0 inside formulas."
+        // Using non-numeric text in a formula -> probably #ERR
+        throw new Error('text');
+      }
+      if (p.kind === 'error') throw new Error('err');
+      if (p.kind === 'formula') {
+        stack.add(id);
+        try {
+          const v = evalAst(p.ast, stack);
+          if (typeof v !== 'number' || !isFinite(v)) throw new Error('nan');
+          values[id] = v;
+          stack.delete(id);
+          return v;
+        } catch (e) {
+          stack.delete(id);
+          throw e;
+        }
+      }
+      values[id] = 0;
+      return 0;
+    }
+
+    ids.forEach(id => {
+      if (status[id] === 'cycle') return;
+      const p = parsed[id];
+      if (p.kind === 'empty') {
+        display[id] = '';
+        values[id] = 0;
+        status[id] = 'ok';
+      } else if (p.kind === 'num') {
+        display[id] = formatNum(p.value);
+        values[id] = p.value;
+        status[id] = 'ok';
+      } else if (p.kind === 'text') {
+        display[id] = p.value;
+        status[id] = 'ok';
+        // no numeric value
+      } else if (p.kind === 'error') {
+        display[id] = '#ERR';
+        status[id] = 'err';
+      } else if (p.kind === 'formula') {
+        try {
+          const v = valueOf(id, new Set());
+          display[id] = formatNum(v);
+          status[id] = 'ok';
+        } catch (e) {
+          if (e.message === 'cycle' || inCycle.has(id)) {
+            display[id] = '#CYCLE';
+            status[id] = 'cycle';
+          } else {
+            display[id] = '#ERR';
+            status[id] = 'err';
+          }
+        }
+      }
+    });
+
+    // Update DOM
+    ids.forEach(id => {
+      if (editing === id) return;
+      const inp = inputs[id];
+      inp.value = display[id] != null ? display[id] : '';
+      inp.classList.remove('err', 'cycle');
+      if (status[id] === 'err') inp.classList.add('err');
+      if (status[id] === 'cycle') inp.classList.add('cycle');
+    });
+
+    // store for get()
+    window.__sheetDisplay = display;
+    window.__sheetStatus = status;
+  }
+
+  function formatNum(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return '#ERR';
+    // Avoid ugly floats
+    if (Number.isInteger(n)) return String(n);
+    const s = parseFloat(n.toPrecision(10));
+    return String(s);
+  }
+
+  function commit(id, text) {
+    rawData[id] = text;
+    recalculate();
+  }
+
+  function setCell(ref, text) {
+    const id = ref.toUpperCase();
+    if (!rawData.hasOwnProperty(id)) return;
+    rawData[id] = String(text);
+    if (editing === id) {
+      inputs[id].value = rawData[id];
+    }
+    recalculate();
+  }
+
+  function getCell(ref) {
+    const id = ref.toUpperCase();
+    if (editing === id) {
+      // while editing, displayed might be raw — but get should be DISPLAYED computed
+      // Spec: get -> the DISPLAYED string
+    }
+    if (window.__sheetDisplay && window.__sheetDisplay.hasOwnProperty(id)) {
+      return window.__sheetDisplay[id];
+    }
+    return '';
+  }
+
+  function rawCell(ref) {
+    const id = ref.toUpperCase();
+    return rawData.hasOwnProperty(id) ? rawData[id] : '';
+  }
+
+  document.getElementById('export').addEventListener('click', () => {
+    const lines = [];
+    for (let r = 1; r <= ROWS; r++) {
+      const cells = [];
+      for (const c of COLS) {
+        const id = cellId(c, r);
+        let v = '';
+        if (window.__sheetDisplay && window.__sheetDisplay.hasOwnProperty(id)) {
+          v = window.__sheetDisplay[id];
+        }
+        // CSV escape if needed
+        if (/[",\n]/.test(v)) {
+          v = '"' + v.replace(/"/g, '""') + '"';
+        }
+        cells.push(v);
+      }
+      lines.push(cells.join(','));
+    }
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  buildGrid();
+  recalculate();
+
+  window.sheet = {
+    set: setCell,
+    get: getCell,
+    raw: rawCell
+  };
+})();
+</script>
+</body>
+</html>

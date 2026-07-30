@@ -1,5 +1,3 @@
-"""The discrimination analysis behind the /discriminate page and the fit
-cohort split."""
 import types
 
 from harness.registry import infer_family
@@ -73,7 +71,6 @@ def test_family_stats_groups_and_scores():
 
 
 def _subset_fixture():
-    """Five tasks with a real spread, so they land in one subset together."""
     tdefs = {f"t{i}": types.SimpleNamespace(tier=1, scoring_type="answer",
                                             category="reasoning")
              for i in range(5)}
@@ -122,7 +119,6 @@ def test_partial_rows_sort_below_every_ranked_one():
 
 
 def test_an_unranked_model_reports_no_rank_move():
-    """A shift measured against a rank it never held is a number about nothing."""
     runs, tdefs = _subset_fixture()
     d = discrimination_stats(runs, tdefs)
     for key in ("hard_rank", "easy_rank", "frontier_rank"):

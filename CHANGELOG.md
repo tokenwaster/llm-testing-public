@@ -26,6 +26,121 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+## 0.7.1 — probes, partial-row honesty, and one page shell
+
+### Thinking-off probe: what does reasoning buy, and what does it cost?
+Most of the fleet reasons by default and nothing in a scored run controlled that.
+The probe runs **both legs in one job** — reasoning on, then off — so the pair is
+matched on sampling and task content, into `special/`, counting toward nothing. A
+task id is the aggregation key, so two conditions under one model name would
+blend into one mean; this is why it is a probe and not a config.
+
+Candidates are the nine mechanical tasks (extraction, format compliance, tool
+selection, grounded lookup, needle recall). Derivation tasks are excluded because
+reasoning *is* the task there — measured: both gpt-5.6 variants honoured the flag
+on a three-step money problem, saved ~80% of output, and answered **$32 instead
+of $25.60**, an even split.
+
+**First result, 36 paired cells at n=3 across 6 models:** 19 *free saving*, 8
+*thinking required*, 6 *not applied*, 3 *nothing to disable*, and 79.1% of cost
+saved on the cells that held their score. `if-002-constraint-stack` needs
+reasoning for 4 of 6 models and `ext-002-nested-normalize` for 4 — reasoning is
+load-bearing on constraint tracking and structural work, and paid for and unused
+on format compliance and grounded lookup.
+
+**Support is measured, never read off a capability list.** Five models advertise
+`reasoning` in `supported_parameters` and answer *HTTP 400 "reasoning is
+mandatory for this endpoint"*; kimi-k3 accepts the flag, returns 200, and applies
+about 40% of it. A refusing provider is skipped with nothing written, never
+scored 0, and the verdict is now remembered so the picker greys it out instead of
+rediscovering the refusal every run. Local models are excluded on evidence: LM
+Studio left reasoning byte-identical under `enable_thinking=false`, treated
+`/no_think` as prose, and returns 200 for a parameter that does not exist.
+
+`not applied` was originally covering two different things — a provider that kept
+reasoning, and a baseline that barely reasoned so compliance cannot be read from
+the tokens at all. The second blamed the provider for our blind spot; it now
+reads **nothing to disable**.
+
+### A partial model earns no inferred outcome, anywhere
+Sorting partial rows last was not enough. Surveyed every aggregate with a 3-of-55
+model as the probe and found six surfaces presenting its mean as comparable: it
+ranked **#1 in both v0.6 and v0.7** cross-version standings, was named **top and
+value pick for agentic** on 3 of 8 tasks, plotted on the efficiency frontier, led
+its family, showed a **"Cost / run" 100× too cheap** beside real full-suite
+costs, and was offered on the compare page, which declares a winner on
+whole-suite score, cost and speed.
+
+`covered_models()` is now the single rule: an aggregate over a set of tasks is
+only comparable between models that ran **that whole set**. Coverage is judged
+against the set being aggregated, not always the suite — so task fit requires the
+complete category, and a model that finished all 8 agentic tasks still ranks
+there. Measurements are untouched: the standings and matrix still show partial
+rows, last and unranked, and the per-task pages still show real scores for tasks
+the model did run.
+
+Related: the client-side lens re-sort ignored partial rows entirely, so clicking
+**any** lens — including *All* — put a 3-cell model at #1, gave it the leader
+highlight, and made every gap on the board measure from it. Hard and Frontier
+only *looked* correct because that model had no data for those subsets.
+
+### Every probe on one page, and Run tops up instead of piling on
+`/special` is four self-contained groups — window, turns, token budget, thinking
+— each collapsed, 519px against 10,535 expanded. Each cell carries an
+`n/target` badge and greys out at target, a whole model row greys when all of its
+cells are done, and *Select remaining* ticks exactly what is short. Target is
+each probe's own trials input, so raising it to 5 reopens cells finished at 3.
+
+**Run now tops up.** Pass *i* re-runs only tasks still needing more than *i*
+trials, so a cell at target costs nothing and pressing Run twice is a no-op
+rather than silently doubling the trial count. The count comes from one function
+that both the page and the job read, so what is greyed cannot drift from what
+runs.
+
+### One header and one measure, on every page
+The two sides of the site never matched because operator pages carry a
+**completely separate stylesheet** and never imported `BASE_CSS`. Measured: bar
+heights 33/97/115px with the nav sitting up to **85px lower** on some pages, and
+public model pages at 96px because a long sub-line wrapped and pushed the nav
+onto a second row. Widths were set in ten places — 980, 1100×5, 1200×2, 1480 —
+with `_OP_CHROME` forcing 1200 over all of them, which is why Run was narrower
+than the overview.
+
+`HEADER_CSS` is now the one declaration for both, injected into the operator
+pages after their own `<style>`. The header is brand + title + nav at a fixed
+56px and nothing else: sub-lines, three dataset pickers and the Stop-run button
+(which was nested *inside* an `<h1>`) moved to `.pagebar` below. Measured after,
+17 page types × 4 widths: one geometry, one measure, no controls in any header,
+no hidden nav links.
+
+The suite now carries the **Token Waster** brand — an inlined SVG on a square
+32px footprint using `currentColor`, so it themes both ways and needs no
+per-page path from `models/` or `tasks/`.
+
+### The special page's output is public, with the evidence behind it
+`special.html` rendered only the window probe; the turns and budget summaries
+were already in the public module and simply never drawn. All four probes now
+publish there, controls excluded. `special/` leaves the export deny-list, so
+every probe run ships with the same per-cell `metrics.json`, `score.json` and
+transcript as a scored run — the numbers can be checked against the calls that
+produced them. `thinking.py` becomes public for the same reason `mirror.py` is.
+
+### laguna-s-2.1 moved to LM Studio; laguna-s-2.1 is throttled out
+`laguna-xs-2.1` now serves from LM Studio. The name is unchanged so the hosted
+history still links through the version-over-version table, and nothing blends:
+all 87 hosted cells are frozen in the 0.5/0.6 archives. `context_length` stays
+unset — copying the peers' 96000 ceiling looked right and truncates the 64k task.
+`supports_tools` stays true although LM Studio omits `tool_use` from this model's
+capabilities, because it emits a well-formed tool call when asked and 8 agentic
+tasks ride on that flag.
+
+Separately, `laguna-s-2.1` (a different model) is **49% rate-limited** — 24 of 49
+calls across every dataset. It has one endpoint, Poolside itself, so there is no
+host to route around; `is_byok: false` means the shared OpenRouter quota is the
+ceiling. Every 429 arrives with no `Retry-After`, so the backoff is blind. It has
+never reached a non-agentic task, because `ag-*` sorts first and three
+consecutive refusals abandon the model — 4 cells completed, all 1.0.
+
 ### The private held-out mirror is reachable, and refuses a variant it cannot grade
 The mirror measures contamination instead of asserting immunity: the public set
 stays fully open (a correct reply in `runs/` *is* the answer key, so hiding tasks

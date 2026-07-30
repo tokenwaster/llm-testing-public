@@ -1,11 +1,3 @@
-"""Generator + reference for ctx-011-multihop-deep-32k (v0.6 long-context overhaul).
-
-Answering needs a 4-hop chain (project -> squad -> cell -> hub -> zone) whose
-links are scattered at random through ~1,300 shuffled lines, most of them decoy
-links for other entities. A big window doesn't help: you must actually follow
-the chain, and every wrong turn lands on a plausible decoy. Answer computed by
-construction.
-"""
 
 import random
 from pathlib import Path

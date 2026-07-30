@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conway's Game of Life</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --grid-line: #1f2733;
+    --accent: #58e6a8;
+    --accent-dim: #2ea070;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    background: radial-gradient(ellipse at 50% 0%, #131a24 0%, var(--bg) 70%);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    padding: 24px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 1.4rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  h1 span { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: normal; font-size: 0.9rem; }
+  #life {
+    width: 480px;
+    height: 480px;
+    max-width: 92vw;
+    max-height: 92vw;
+    background: var(--panel);
+    border: 1px solid var(--grid-line);
+    border-radius: 10px;
+    box-shadow: 0 0 40px rgba(88, 230, 168, 0.08), 0 8px 30px rgba(0,0,0,0.5);
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--grid-line);
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-size: 0.95rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: transform 0.08s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  button:hover {
+    border-color: var(--accent-dim);
+    color: var(--accent);
+    transform: translateY(-1px);
+  }
+  button:active { transform: translateY(1px); }
+  #play.running {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #06251a;
+    font-weight: 600;
+  }
+  .status {
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .status b { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Game of Life <span>· click or drag to paint</span></h1>
+  <canvas id="life"></canvas>
+  <div class="controls">
+    <button id="step">⏭ Step</button>
+    <button id="play">▶ Play</button>
+    <button id="random">🎲 Random</button>
+    <button id="clear">🧹 Clear</button>
+  </div>
+  <div class="status">generation <b id="gen">0</b> · population <b id="pop">0</b></div>
+
+<script>
+(function () {
+  const W = 60, H = 60;
+  const canvas = document.getElementById('life');
+  const ctx = canvas.getContext('2d');
+  const genEl = document.getElementById('gen');
+  const popEl = document.getElementById('pop');
+
+  const DPR = window.devicePixelRatio || 1;
+  const CSS_SIZE = 480;
+  canvas.width = CSS_SIZE * DPR;
+  canvas.height = CSS_SIZE * DPR;
+  const cell = canvas.width / W;
+
+  let grid = new Uint8Array(W * H);
+  let next = new Uint8Array(W * H);
+  let age = new Uint16Array(W * H); // how long each cell has been alive, for pretty colors
+  let generation = 0;
+
+  function idx(x, y) { return y * W + x; }
+  function inBounds(x, y) { return x >= 0 && x < W && y >= 0 && y < H; }
+
+  function draw() {
+    ctx.fillStyle = '#161b22';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // faint grid lines
+    ctx.strokeStyle = '#1f2733';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 1; x < W; x++) {
+      ctx.moveTo(x * cell, 0); ctx.lineTo(x * cell, canvas.height);
+    }
+    for (let y = 1; y < H; y++) {
+      ctx.moveTo(0, y * cell); ctx.lineTo(canvas.width, y * cell);
+    }
+    ctx.stroke();
+
+    let pop = 0;
+    const pad = Math.max(1, cell * 0.12);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        if (grid[idx(x, y)]) {
+          pop++;
+          // newborns glow bright green, elders cool toward teal-blue
+          const a = Math.min(age[idx(x, y)], 30);
+          const hue = 150 + a * 3;          // 150 → 240
+          const light = 62 - a * 0.6;       // 62% → 44%
+          ctx.fillStyle = `hsl(${hue}, 85%, ${light}%)`;
+          ctx.beginPath();
+          const r = Math.max(1, (cell - pad * 2) * 0.22);
+          const px = x * cell + pad, py = y * cell + pad, s = cell - pad * 2;
+          ctx.roundRect(px, py, s, s, r);
+          ctx.fill();
+        }
+      }
+    }
+    genEl.textContent = generation;
+    popEl.textContent = pop;
+  }
+
+  function step() {
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx, ny = y + dy;
+            if (inBounds(nx, ny) && grid[idx(nx, ny)]) n++;
+          }
+        }
+        const alive = grid[idx(x, y)];
+        next[idx(x, y)] = alive ? (n === 2 || n === 3 ? 1 : 0) : (n === 3 ? 1 : 0);
+      }
+    }
+    const tmp = grid; grid = next; next = tmp;
+    for (let i = 0; i < grid.length; i++) age[i] = grid[i] ? age[i] + 1 : 0;
+    generation++;
+    draw();
+  }
+
+  function clear() {
+    grid.fill(0);
+    age.fill(0);
+    generation = 0;
+    draw();
+  }
+
+  function randomize() {
+    for (let i = 0; i < grid.length; i++) {
+      grid[i] = Math.random() < 0.28 ? 1 : 0;
+      age[i] = 0;
+    }
+    generation = 0;
+    draw();
+  }
+
+  // --- painting ---
+  let painting = false;
+  let paintValue = 1;
+
+  function cellFromEvent(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / rect.width * W);
+    const y = Math.floor((e.clientY - rect.top) / rect.height * H);
+    return [x, y];
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    canvas.setPointerCapture(e.pointerId);
+    const [x, y] = cellFromEvent(e);
+    if (!inBounds(x, y)) return;
+    painting = true;
+    paintValue = grid[idx(x, y)] ? 0 : 1; // drag paints the opposite of the first cell
+    grid[idx(x, y)] = paintValue;
+    age[idx(x, y)] = 0;
+    draw();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!painting) return;
+    const [x, y] = cellFromEvent(e);
+    if (!inBounds(x, y)) return;
+    if (grid[idx(x, y)] !== paintValue) {
+      grid[idx(x, y)] = paintValue;
+      age[idx(x, y)] = 0;
+      draw();
+    }
+  });
+  window.addEventListener('pointerup', () => { painting = false; });
+
+  // --- play/pause ---
+  let timer = null;
+  const playBtn = document.getElementById('play');
+
+  function setRunning(run) {
+    if (run && !timer) {
+      timer = setInterval(step, 90);
+      playBtn.textContent = '⏸ Pause';
+      playBtn.classList.add('running');
+    } else if (!run && timer) {
+      clearInterval(timer);
+      timer = null;
+      playBtn.textContent = '▶ Play';
+      playBtn.classList.remove('running');
+    }
+  }
+
+  playBtn.addEventListener('click', () => setRunning(!timer));
+  document.getElementById('step').addEventListener('click', () => { setRunning(false); step(); });
+  document.getElementById('random').addEventListener('click', randomize);
+  document.getElementById('clear').addEventListener('click', () => { setRunning(false); clear(); });
+
+  // --- public API ---
+  window.life = {
+    w: W,
+    h: H,
+    get(x, y) { return inBounds(x, y) ? grid[idx(x, y)] : 0; },
+    set(x, y, v) {
+      if (!inBounds(x, y)) return;
+      grid[idx(x, y)] = v ? 1 : 0;
+      age[idx(x, y)] = 0;
+      draw();
+    },
+    step,
+    clear,
+  };
+
+  // seed something fun to watch: a glider gun-ish scatter of gliders
+  function glider(x, y) {
+    [[1,0],[2,1],[0,2],[1,2],[2,2]].forEach(([dx,dy]) => {
+      if (inBounds(x+dx, y+dy)) grid[idx(x+dx, y+dy)] = 1;
+    });
+  }
+  glider(4, 4); glider(20, 10); glider(38, 6); glider(10, 30); glider(45, 40);
+  draw();
+})();
+</script>
+</body>
+</html>

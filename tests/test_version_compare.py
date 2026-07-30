@@ -1,11 +1,3 @@
-"""Version-over-version compare: the numbers must be like-for-like or nothing.
-
-A model or family only compares on tasks it was scored on in BOTH versions, and
-the headline delta uses only 'identical' tasks (same content_hash) — a task
-whose test was edited between versions is shown but flagged, never folded into
-the verdict, because a lower score there might be a harder test. For families,
-a member new in the later version must never register as improvement.
-"""
 
 from harness import report
 
@@ -15,7 +7,6 @@ def _tdef(tid, cat, h):
 
 
 def _td(scores):
-    """{tid: {model: score}} -> task_data-shaped {tid: {'agg': {model: {...}}}}."""
     d = {}
     for tid, per in scores.items():
         d[tid] = {"agg": {m: {"score": {"status": "scored", "score": s}}

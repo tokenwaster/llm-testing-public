@@ -1,11 +1,3 @@
-"""robust_rmtree: tolerate Windows file locks / read-only files during delete.
-
-The /run delete-run and delete-result endpoints used a bare shutil.rmtree,
-which on Windows crashed the request-handler thread (WinError 32 lock /
-WinError 5 read-only) and dumped a traceback to the console. robust_rmtree
-clears read-only bits, retries transient locks with backoff, and reports
-failure as a bool so the endpoint returns a clean 409 instead of crashing.
-"""
 import os
 import stat
 
@@ -74,9 +66,6 @@ def test_rescore_proceeds_when_all_runs_finished(tmp_path, monkeypatch):
 
 
 def test_hash_dir_ignores_bytecode(tmp_path):
-    """Bytecode is not content. rglob("*") swept __pycache__ in, so running a
-    task's checker changed the task's identity - 33 of v0.5's 39 tasks logged
-    two or three hashes for content that never moved."""
     from harness.util import hash_dir
     (tmp_path / "checker.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "meta.yaml").write_text("id: t\n", encoding="utf-8")

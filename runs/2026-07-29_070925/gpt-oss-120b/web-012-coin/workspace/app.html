@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WastedToken Mint</title>
+<style>
+  body{
+    margin:0;
+    font-family:Arial,Helvetica,sans-serif;
+    background:#111;
+    color:#eee;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+  }
+  #coin-hero{
+    width:400px;
+    height:400px;
+    margin:20px 0;
+    background:#222;
+    border-radius:8px;
+    box-shadow:0 0 20px rgba(0,0,0,0.5);
+  }
+  .section{
+    max-width:900px;
+    width:100%;
+    padding:0 20px;
+  }
+  .about{
+    margin-bottom:40px;
+    line-height:1.5;
+  }
+  .grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:20px;
+  }
+  .edition{
+    background:#222;
+    padding:10px;
+    border-radius:8px;
+    text-align:center;
+    position:relative;
+  }
+  .edition canvas{
+    width:180px;
+    height:180px;
+    background:#111;
+    border-radius:4px;
+    margin-bottom:10px;
+  }
+  .edition button{
+    padding:8px 12px;
+    background:#28a745;
+    border:none;
+    color:#fff;
+    cursor:pointer;
+    border-radius:4px;
+  }
+  .edition button:disabled{
+    background:#555;
+    cursor:default;
+  }
+  .badge{
+    position:absolute;
+    top:8px;
+    left:50%;
+    transform:translateX(-50%);
+    background:#c00;
+    color:#fff;
+    padding:2px 6px;
+    font-size:12px;
+    border-radius:3px;
+  }
+</style>
+</head>
+<body>
+<canvas id="coin-hero"></canvas>
+
+<div class="section about">
+  <h1>WastedToken Mint</h1>
+  <p>
+    At WastedToken Mint we craft limited‑edition, collectible challenge coins that
+    commemorate the greatest feats of perseverance and wit. Each token is struck
+    from premium alloys, finished with a mirror‑polished metallic sheen, and
+    bears a unique emblem of the WastedToken legacy. Whether you’re a seasoned
+    collector or a newcomer to the realm of physical crypto memorabilia,
+    our coins are designed to be displayed, treasured, and, of course, challenged.
+  </p>
+</div>
+
+<div class="section">
+  <h2>Our Collection</h2>
+  <div class="grid">
+    <div class="edition" data-edition="bronze" data-state="available">
+      <canvas class="edition-canvas"></canvas>
+      <button class="buy">Add to cart</button>
+    </div>
+    <div class="edition" data-edition="silver" data-state="available">
+      <canvas class="edition-canvas"></canvas>
+      <button class="buy">Add to cart</button>
+    </div>
+    <div class="edition" data-edition="gold" data-state="sold-out">
+      <canvas class="edition-canvas"></canvas>
+      <div class="badge">SOLD OUT</div>
+    </div>
+    <div class="edition" data-edition="black" data-state="coming-soon">
+      <canvas class="edition-canvas"></canvas>
+      <div class="badge">Minting Next Season: Winter</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ---------- SHADER SOURCE ----------
+  const vertexSrc = `#version 300 es
+  in vec2 a_position;
+  out vec2 v_uv;
+  void main(){
+    v_uv = a_position * 0.5 + 0.5;
+    gl_Position = vec4(a_position,0.0,1.0);
+  }`;
+
+  const fragmentSrc = `#version 300 es
+  precision highp float;
+  in vec2 v_uv;
+  out vec4 outColor;
+  uniform vec2 u_resolution;
+  uniform float u_time;
+  uniform vec3 u_color;
+
+  // rotate a vec3 around Y axis
+  mat3 rotY(float a){
+    float c = cos(a), s = sin(a);
+    return mat3(c,0.,s, 0.,1.,0., -s,0.,c);
+  }
+  // rotate around X axis
+  mat3 rotX(float a){
+    float c = cos(a), s = sin(a);
+    return mat3(1.,0.,0., 0.,c,-s, 0.,s,c);
+  }
+
+  // Signed distance to a thin cylinder (coin) with ridged edge
+  float sdCoin(vec3 p){
+    // apply ridged edge via sinusoidal radius modulation
+    float angle = atan(p.x, p.z);
+    float ridges = 0.015 * sin(30.0*angle);
+    float radius = 1.0 + ridges;
+    float h = 0.07; // half thickness
+    vec2 d = vec2(length(p.xz)-radius, abs(p.y)-h);
+    return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+  }
+
+  // normal by gradient
+  vec3 calcNormal(vec3 p){
+    float eps = 0.0005;
+    vec2 e = vec2(1,-1)*eps;
+    return normalize(e.xyy*sdCoin(p+e.xyy)+e.yyx*sdCoin(p+e.yyx)+e.yxy*sdCoin(p+e.yxy)+e.xxx*sdCoin(p+e.xxx));
+  }
+
+  // simple phong lighting with moving specular
+  vec3 shade(vec3 p, vec3 rd){
+    vec3 n = calcNormal(p);
+    vec3 lightDir = normalize(vec3(0.8,0.6,0.7));
+    vec3 viewDir = normalize(-rd);
+    float diff = max(dot(n,lightDir),0.0);
+    vec3 reflectDir = reflect(-lightDir,n);
+    float spec = pow(max(dot(viewDir,reflectDir),0.0),64.0);
+    vec3 col = u_color * (0.2 + 0.8*diff) + vec3(1.0)*spec;
+    // rim lighting for extra metal feel
+    float rim = pow(1.0 - max(dot(n,viewDir),0.0),2.0);
+    col += vec3(0.2,0.2,0.3)*rim;
+    return col;
+  }
+
+  void main(){
+    vec2 uv = (v_uv*2.0-1.0) * vec2(u_resolution.x/u_resolution.y,1.0);
+    // camera
+    vec3 camPos = vec3(0.0,0.0,3.0);
+    vec3 rd = normalize(vec3(uv, -1.5));
+
+    // rotate coin over time
+    float t = u_time * 6.28318530718; // 0..2π
+    mat3 rot = rotY(t) * rotX(t*0.7);
+    // ray march
+    float tDist = 0.0;
+    float hit = -1.0;
+    for(int i=0;i<120;i++){
+      vec3 pos = camPos + rd*tDist;
+      pos = rot * pos; // rotate world instead of coin
+      float d = sdCoin(pos);
+      if(d<0.001){
+        hit = tDist;
+        break;
+      }
+      tDist += d;
+      if(tDist>10.0) break;
+    }
+    vec3 col = vec3(0.04,0.04,0.05); // background
+    if(hit>0.0){
+      vec3 pos = camPos + rd*hit;
+      pos = rot * pos;
+      col = shade(pos, rd);
+    }
+    outColor = vec4(col,1.0);
+  }`;
+
+  // ---------- WEBGL UTIL ----------
+  function createProgram(gl, vs, fs){
+    const prog = gl.createProgram();
+    const vsh = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vsh, vs);
+    gl.compileShader(vsh);
+    if(!gl.getShaderParameter(vsh, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(vsh));
+    const fsh = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fsh, fs);
+    gl.compileShader(fsh);
+    if(!gl.getShaderParameter(fsh, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(fsh));
+    gl.attachShader(prog, vsh);
+    gl.attachShader(prog, fsh);
+    gl.linkProgram(prog);
+    if(!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
+    return prog;
+  }
+
+  // ---------- HERO CANVAS ----------
+  const heroCanvas = document.getElementById('coin-hero');
+  const gl = heroCanvas.getContext('webgl2');
+  const prog = createProgram(gl, vertexSrc, fragmentSrc);
+  const aPos = gl.getAttribLocation(prog, 'a_position');
+  const uRes = gl.getUniformLocation(prog, 'u_resolution');
+  const uTime = gl.getUniformLocation(prog, 'u_time');
+  const uColor = gl.getUniformLocation(prog, 'u_color');
+
+  // fullscreen quad
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1,  1,-1, -1,1,
+    -1,1,   1,-1,  1,1
+  ]), gl.STATIC_DRAW);
+
+  function resizeCanvas(c){
+    const dpr = window.devicePixelRatio||1;
+    const w = c.clientWidth*dpr|0;
+    const h = c.clientHeight*dpr|0;
+    if(c.width!==w||c.height!==h){
+      c.width=w; c.height=h;
+    }
+  }
+
+  function renderHero(t){
+    resizeCanvas(heroCanvas);
+    gl.viewport(0,0,heroCanvas.width,heroCanvas.height);
+    gl.clearColor(0,0,0,1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(prog);
+    gl.uniform2f(uRes, heroCanvas.width, heroCanvas.height);
+    gl.uniform1f(uTime, t);
+    gl.uniform3f(uColor, 0.9, 0.8, 0.6); // base metallic (light gold)
+    gl.enableVertexAttribArray(aPos);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);
+    gl.drawArrays(gl.TRIANGLES,0,6);
+  }
+
+  // animation loop
+  let animId = null;
+  let start = null;
+  function loop(ts){
+    if(!start) start=ts;
+    const elapsed = (ts-start)/5000; // 5 seconds per loop
+    const t = (elapsed%1);
+    renderHero(t);
+    animId = requestAnimationFrame(loop);
+  }
+  animId = requestAnimationFrame(loop);
+
+  // ---------- DEMO API ----------
+  window.demo = {
+    canvas: heroCanvas,
+    setTime(t){
+      cancelAnimationFrame(animId);
+      renderHero(t);
+    },
+    pause(){
+      cancelAnimationFrame(animId);
+    }
+  };
+
+  // ---------- EDITION CANVASES ----------
+  const editionCanvases = document.querySelectorAll('.edition-canvas');
+  const editionData = {
+    bronze:  {color:[0.8,0.5,0.2], state:'available'},
+    silver:  {color:[0.8,0.9,1.0], state:'available'},
+    gold:    {color:[1.0,0.84,0.0], state:'sold-out'},
+    black:   {color:[0.1,0.1,0.1], state:'coming-soon'}
+  };
+
+  editionCanvases.forEach((c,i)=>{
+    const parent = c.parentElement;
+    const ed = parent.dataset.edition;
+    const info = editionData[ed];
+    const glE = c.getContext('webgl2');
+    const progE = createProgram(glE, vertexSrc, fragmentSrc);
+    const aPosE = glE.getAttribLocation(progE, 'a_position');
+    const uResE = glE.getUniformLocation(progE, 'u_resolution');
+    const uTimeE = glE.getUniformLocation(progE, 'u_time');
+    const uColorE = glE.getUniformLocation(progE, 'u_color');
+    const quadE = glE.createBuffer();
+    glE.bindBuffer(glE.ARRAY_BUFFER, quadE);
+    glE.bufferData(glE.ARRAY_BUFFER, new Float32Array([
+      -1,-1,  1,-1, -1,1,
+      -1,1,   1,-1,  1,1
+    ]), glE.STATIC_DRAW);
+    function resizeE(){
+      const dpr = window.devicePixelRatio||1;
+      const w = c.clientWidth*dpr|0;
+      const h = c.clientHeight*dpr|0;
+      if(c.width!==w||c.height!==h){
+        c.width=w; c.height=h;
+      }
+    }
+    function renderE(){
+      resizeE();
+      glE.viewport(0,0,c.width,c.height);
+      glE.clearColor(0,0,0,1);
+      glE.clear(glE.COLOR_BUFFER_BIT);
+      glE.useProgram(progE);
+      glE.uniform2f(uResE, c.width, c.height);
+      glE.uniform1f(uTimeE, 0.0); // static view
+      glE.uniform3fv(uColorE, info.color);
+      glE.enableVertexAttribArray(aPosE);
+      glE.bindBuffer(glE.ARRAY_BUFFER, quadE);
+      glE.vertexAttribPointer(aPosE,2,glE.FLOAT,false,0,0);
+      glE.drawArrays(glE.TRIANGLES,0,6);
+    }
+    renderE();
+  });
+
+})();
+</script>
+</body>
+</html>

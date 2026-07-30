@@ -1,16 +1,3 @@
-"""Read-only results viewer — the public `harness serve`.
-
-Serves the generated static site (overview, per-run / per-task / per-model
-pages, /info, /discriminate), the dataset switcher, and read-only browsing of
-runs/. It has NO control surface: no /run, /watch, /backend, /manage, and no
-POST endpoints — so a publicly-deployed instance can't spend a subscription or
-mutate data. The private operator server (`review.py`, held back from the
-export) is the full control panel; when it's present, `harness serve` uses it
-instead (see __main__).
-
-This module imports only the public instrument (config, report, archive). It
-must never import a private module — `tests/test_boundary.py` enforces that.
-"""
 
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -69,8 +56,6 @@ class Handler(BaseHTTPRequestHandler):
               ".log": "text/plain; charset=utf-8"}
 
     def _send_run_data(self, rel: str):
-        """Read-only browse of runs/ — transcripts, metrics, and each model's
-        workspace (so a generated app.html opens live in a tab)."""
         from urllib.parse import quote, unquote
         rel = unquote(rel).strip("/")
         resolved = config.resolve_run_data(rel)

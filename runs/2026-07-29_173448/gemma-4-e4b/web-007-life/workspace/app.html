@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Game of Life</title>
+    <style>
+        :root {
+            --grid-size-px: 600; /* Ensures at least 400x400 requirement is met */
+            --cell-pixel-size: calc(var(--grid-size-px) / var(--cell-count));
+            --color-bg: #1e212a;
+            --color-dead: #1b1c23;
+            --color-alive: #4CAF50; /* Green */
+            --color-text: #f0f0f0;
+            --color-accent: #8e44ad; /* Purple accent for buttons */
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--color-bg);
+            color: var(--color-text);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+        }
+
+        #controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.2s, transform 0.1s;
+            border-radius: 5px;
+            box-shadow: 0 4px #333;
+        }
+
+        button:active {
+            transform: translateY(2px);
+            box-shadow: none;
+        }
+
+        #life {
+            /* Set the actual canvas dimensions in pixels */
+            width: var(--grid-size-px); 
+            height: var(--grid-size-px);
+            border: 5px solid #343a40;
+            background-color: var(--color-dead);
+            display: grid;
+            /* This is handled by JS to create the cells */
+        }
+
+        .cell {
+            box-sizing: border-box;
+            border: 1px solid rgba(0, 0, 0, 0.1); /* Subtle grid lines */
+            background-color: var(--color-dead);
+            transition: background-color 0.2s;
+        }
+
+        .cell.alive {
+            background-color: var(--color-alive);
+            box-shadow: inset 0 -5px 0 #388e3c; /* Depth effect */
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Conway's Game of Life</h1>
+    <p id="status">Click and drag to seed, or press Step!</p>
+
+    <div id="controls">
+        <button id="step">Step (&#9658;)</button>
+        <button id="play">Start/Stop</button>
+        <button id="random">Randomize</button>
+        <button id="clear">Clear Board</button>
+    </div>
+
+    <!-- The grid canvas. Dimensions set by CSS variables -->
+    <div id="life"></div>
+
+
+<script>
+// ==============================================
+// GLOBAL SETUP AND INITIALIZATION CONSTANTS
+// ==============================================
+
+const MIN_GRID_DIMENSION = 40; // At least 40x40 cells
+const CELL_SIZE_PX = 12; // Base size for calculations (CSS handles scaling)
+
+let GRID_W = MIN_GRID_DIMENSION;
+let GRID_H = MIN_GRID_DIMENSION;
+
+// Internal state matrix: 0 or 1
+let currentGridState = [];
+let isRunning = false;
+let autoStepIntervalId = null;
+
+const lifeDiv = document.getElementById('life');
+const statusElement = document.getElementById('status');
+
+// Adjust CSS variables based on final grid dimensions
+document.documentElement.style.setProperty('--cell-count', GRID_W); 
+
+
+// ==============================================
+// GAME LOGIC IMPLEMENTATION (The core engine)
+// ==============================================
+
+/**
+ * Initializes the game state and UI structure.
+ */
+function initializeGrid() {
+    if (!lifeDiv) return;
+
+    // Set up CSS Grid layout dynamically based on dimensions
+    lifeDiv.style.gridTemplateColumns = `repeat(${GRID_W}, 1fr)`;
+    lifeDiv.style.gridTemplateRows = `repeat(${GRID_H}, 1fr)`;
+
+    // Clear any previous cells/content
+    lifeDiv.innerHTML = '';
+    currentGridState = [];
+
+    // Initialize the state matrix and render DOM elements
+    for (let y = 0; y < GRID_H; y++) {
+        const row = [];
+        const cellsInRow = [];
+        for (let x = 0; x < GRID_W; x++) {
+            row.push(0); // 0 for dead, 1 for alive
+            currentGridState.push({ x: x, y: y, element: null });
+
+            // Create the visual cell element
+            const cellDiv = document.createElement('div');
+            cellDiv.classList.add('cell');
+            cellDiv.dataset.x = x;
+            cellDiv.dataset.y = y;
+            lifeDiv.appendChild(cellDiv);
+        }
+        // Since we are using a flat array for state tracking, 
+        // we rely on the iteration order of the DOM/state push above.
+    }
+}
+
+/**
+ * Helper function: Gets the cell value at (x, y). Handles out-of-bounds by returning 0.
+ * @param {number} x - Column index.
+ * @param {number} y - Row index.
+ * @returns {number} 1 if alive, 0 otherwise.
+ */
+function getCell(x, y) {
+    if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) {
+        return 0; // Edges are dead (boundary condition)
+    }
+    // Calculate the flat index for this cell's state tracking
+    const index = y * GRID_W + x;
+    return currentGridState[index].value || 0;
+}
+
+/**
+ * Counts the number of live neighbors for a cell at (x, y).
+ * @param {number} x - Column index.
+ * @param {number} y - Row index.
+ * @returns {number} The count of alive neighbours.
+ */
+function countNeighbors(x, y) {
+    let count = 0;
+    // Iterate over the 3x3 neighborhood centered at (x, y)
+    for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+            // Skip counting the cell itself
+            if (dx === 0 && dy === 0) continue;
+
+            count += getCell(x + dx, y + dy);
+        }
+    }
+    return count;
+}
+
+
+/**
+ * Calculates the next state for all cells simultaneously and updates the display.
+ * Implements B3/S23 rules.
+ */
+function computeNextState() {
+    // Create a temporary array to store the next generation's states (simultaneity)
+    const nextGeneration = new Array(currentGridState.length).fill(0);
+
+    for (let y = 0; y < GRID_H; y++) {
+        for (let x = 0; x < GRID_W; x++) {
+            const index = y * GRID_W + x;
+            const currentState = getCell(x, y);
+            const neighbors = countNeighbors(x, y);
+            let nextState = 0;
+
+            if (currentState === 1) { // LIVE CELL
+                // Rule S23: Survives if 2 or 3 neighbors
+                if (neighbors === 2 || neighbors === 3) {
+                    nextState = 1;
+                } else {
+                    nextState = 0; // Under/Over population -> Death
+                }
+            } else { // DEAD CELL
+                // Rule B3: Becomes alive if exactly 3 neighbors
+                if (neighbors === 3) {
+                    nextState = 1;
+                } else {
+                    nextState = 0; // Remains dead
+                }
+            }
+
+            // Store the calculated next state
+            nextGeneration[index] = nextState;
+        }
+    }
+
+    // Apply changes and redraw
+    for (let i = 0; i < currentGridState.length; i++) {
+        const cellData = currentGridState[i];
+        const nextState = nextGeneration[i];
+        
+        cellData.value = nextState; // Update the internal state tracker
+
+        // Redraw logic: Apply CSS class based on the new state
+        if (nextState === 1) {
+            cellData.element.classList.add('alive');
+        } else {
+            cellData.element.classList.remove('alive');
+        }
+    }
+
+    return nextGeneration;
+}
+
+
+/**
+ * Advances the simulation by exactly one generation and redraws.
+ */
+function step() {
+    if (autoStepIntervalId) clearInterval(autoStepIntervalId);
+    isRunning = false;
+    document.getElementById('play').textContent = 'Start/Stop';
+
+    computeNextState();
+    statusElement.textContent = "Generation advanced.";
+}
+
+
+/**
+ * Sets every cell to dead and redraws the board.
+ */
+function clearBoard() {
+    if (autoStepIntervalId) clearInterval(autoStepIntervalId);
+    isRunning = false;
+    document.getElementById('play').textContent = 'Start/Stop';
+
+    for (let i = 0; i < currentGridState.length; i++) {
+        currentGridState[i].value = 0;
+        currentGridState[i].element.classList.remove('alive');
+    }
+    statusElement.textContent = "Board cleared.";
+}
+
+/**
+ * Randomly seeds the board with a certain probability (e.g., 35%).
+ */
+function randomSeed() {
+    if (autoStepIntervalId) clearInterval(autoStepIntervalId);
+    isRunning = false;
+    document.getElementById('play').textContent = 'Start/Stop';
+
+    for (let i = 0; i < currentGridState.length; i++) {
+        // Seed with approx 35% probability
+        const newState = Math.random() < 0.35 ? 1 : 0;
+        currentGridState[i].value = newState;
+
+        if (newState === 1) {
+            currentGridState[i].element.classList.add('alive');
+        } else {
+            currentGridState[i].element.classList.remove('alive');
+        }
+    }
+    statusElement.textContent = "Board randomized!";
+}
+
+// ==============================================
+// USER INTERACTION & API BINDING
+// ==============================================
+
+/**
+ * Handles painting/toggling cells when the user clicks or drags on the grid.
+ * @param {MouseEvent | TouchEvent} event 
+ */
+function handlePaint(event) {
+    const targetDiv = event.target;
+    if (!targetDiv || !targetDiv.classList.contains('cell')) return;
+
+    let x, y;
+    // Determine coordinates based on the dataset attributes set during initialization
+    x = parseInt(targetDiv.dataset.x);
+    y = parseInt(targetDiv.dataset.y);
+
+    if (isNaN(x) || isNaN(y)) return;
+
+    const index = y * GRID_W + x;
+    const currentState = currentGridState[index].value;
+    let newState = 1 - currentState; // Toggle state (0 -> 1, 1 -> 0)
+
+    // Update internal state
+    currentGridState[index].value = newState;
+
+    // Redraw visual state
+    if (newState === 1) {
+        targetDiv.classList.add('alive');
+    } else {
+        targetDiv.classList.remove('alive');
+    }
+}
+
+
+/**
+ * Toggles the auto-run simulation state.
+ */
+function togglePlay() {
+    if (autoStepIntervalId) {
+        clearInterval(autoStepIntervalId);
+        autoStepIntervalId = null;
+        isRunning = false;
+        document.getElementById('play').textContent = 'Start/Stop';
+    } else {
+        // Run every 150ms for a smooth, noticeable animation speed
+        autoStepIntervalId = setInterval(() => {
+            step();
+        }, 150);
+        isRunning = true;
+        document.getElementById('play').textContent = 'Running...';
+    }
+}
+
+
+/**
+ * Setup event listeners for controls and drag painting.
+ */
+function setupEventListeners() {
+    // Button Listeners
+    document.getElementById('step').addEventListener('click', step);
+    document.getElementById('play').addEventListener('click', togglePlay);
+    document.getElementById('random').addEventListener('click', randomSeed);
+    document.getElementById('clear').addEventListener('click', clearBoard);
+
+    // Painting (Mouse and Touch) Listeners on the grid container
+    let isDrawing = false;
+    lifeDiv.addEventListener('mousedown', (e) => {
+        isDrawing = true;
+        handlePaint(e); // Paint immediately on click down
+    });
+    document.addEventListener('mouseup', () => {
+        isDrawing = false;
+    });
+
+    // Dragging functionality
+    lifeDiv.addEventListener('mousemove', (e) => {
+        if (isDrawing) {
+            handlePaint(e);
+        }
+    });
+    
+    // Touch support for mobile/touch devices
+    lifeDiv.addEventListener('touchstart', (e) => {
+        e.preventDefault(); // Prevent scrolling while painting
+        isDrawing = true;
+        handlePaint(e.touches[0]); 
+    });
+    document.addEventListener('touchend', () => {
+        isDrawing = false;
+    });
+    lifeDiv.addEventListener('touchmove', (e) => {
+         if (isDrawing) {
+            handlePaint(e.touches[0]);
+        }
+    });
+
+}
+
+
+// ==============================================
+// REQUIRED GLOBAL API EXPOSURE
+// ==============================================
+
+window.life = {
+  w: GRID_W,
+  h: GRID_H,
+
+  /** Gets cell value (1/0). Returns 0 if out-of-bounds. */
+  get(x, y) {
+    return getCell(Math.floor(x), Math.floor(y));
+  },
+
+  /** Sets cell state (truthy = alive, falsy = dead). Does NOT redraw automatically. */
+  set(x, y, v) {
+    if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) return false;
+
+    const index = y * GRID_W + Math.floor(x);
+    let newState = !!v ? 1 : 0;
+    currentGridState[index].value = newState;
+
+    // Update visual state immediately for API calls (like seeding or setting single cells)
+    if (newState === 1) {
+        currentGridState[index].element.classList.add('alive');
+    } else {
+        currentGridState[index].element.classList.remove('alive');
+    }
+
+    return true;
+  },
+  
+  /** Advances one generation, computes state, and redraws. */
+  step: step, 
+  clear: clearBoard,
+};
+
+
+// ==============================================
+// MAIN EXECUTION
+// ==============================================
+function init() {
+    // Set the effective grid dimensions (e.g., 40 cells)
+    GRID_W = MIN_GRID_DIMENSION;
+    GRID_H = MIN_GRID_DIMENSION;
+
+    initializeGrid();
+    setupEventListeners();
+}
+
+window.onload = init;
+</script>
+
+</body>
+</html>

@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bounce Lab · bouncing-ball playground</title>
+<style>
+  :root {
+    --bg: #07090d;
+    --edge: rgba(255, 255, 255, 0.09);
+    --text: #e8eef7;
+    --muted: #8b95a7;
+    --accent: #6ee7ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 28px 16px;
+    background:
+      radial-gradient(1000px 700px at 50% -10%, #182136 0%, rgba(24,33,54,0) 60%),
+      radial-gradient(900px 900px at 85% 110%, #14202b 0%, rgba(20,32,43,0) 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .wrap { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  header { text-align: center; }
+  h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+  }
+  h1 .dot { color: var(--accent); }
+  .sub { margin: 6px 0 0; font-size: 13px; color: var(--muted); letter-spacing: 0.03em; }
+  .stage {
+    padding: 10px;
+    border-radius: 20px;
+    background: linear-gradient(160deg, rgba(255,255,255,0.07), rgba(255,255,255,0.02));
+    border: 1px solid var(--edge);
+    box-shadow: 0 30px 80px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
+  }
+  #sim {
+    display: block;
+    width: min(560px, 86vw);
+    height: auto;
+    aspect-ratio: 1 / 1;
+    border-radius: 12px;
+    background: #0d1220;
+    cursor: crosshair;
+    touch-action: manipulation;
+  }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  button {
+    font: inherit;
+    font-size: 14px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+    color: #eaf2ff;
+    background: #1c2740;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 999px;
+    padding: 10px 20px;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+    transition: transform 60ms ease, background 150ms ease, box-shadow 150ms ease, filter 150ms ease;
+  }
+  button:hover { background: #263455; }
+  button:active { transform: translateY(1px) scale(0.97); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #drop { background: linear-gradient(135deg, #2f6df6, #7a5cff); border-color: transparent; }
+  #drop:hover { background: linear-gradient(135deg, #2f6df6, #7a5cff); filter: brightness(1.12); }
+  #play { min-width: 104px; }
+  #clear { background: transparent; }
+  #clear:hover { background: rgba(255,255,255,0.07); }
+  .count { min-width: 76px; text-align: right; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>Bounce<span class="dot">·</span>Lab</h1>
+      <p class="sub">Click the canvas to spawn a ball — gravity does the rest.</p>
+    </header>
+
+    <div class="stage">
+      <canvas id="sim" width="560" height="560" aria-label="Bouncing ball simulation"></canvas>
+    </div>
+
+    <div class="controls">
+      <button id="drop" type="button">Drop ball</button>
+      <button id="play" type="button" aria-pressed="true">Pause</button>
+      <button id="clear" type="button">Clear</button>
+      <span class="count"><span id="count">0</span> balls</span>
+    </div>
+  </main>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------- setup ---------------- */
+  var canvas = document.getElementById('sim');
+  var ctx = canvas.getContext('2d');
+
+  var W = 560;                       // logical canvas size (CSS pixels)
+  var H = 560;
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+
+  var GRAVITY = 0.45;                // px / step^2, added to vy every step
+  var REST = 0.86;                   // floor / ceiling restitution (< 1)
+  var WALL_REST = 0.9;               // wall restitution (< 1)
+  var DRAG = 0.999;                  // gentle air resistance per step
+  var SLEEP_V = 0.55;                // floor impacts below this settle the ball
+  var MAX_TRAIL = 12;
+
+  var balls = [];
+  var ripples = [];
+  var running = true;
+
+  var countEl = document.getElementById('count');
+  var playBtn = document.getElementById('play');
+  var dropBtn = document.getElementById('drop');
+  var clearBtn = document.getElementById('clear');
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  /* ---------------- tiny sounds (gesture-gated, fail-safe) ---------------- */
+  var actx = null;
+  var lastTick = 0;
+  function audio() {
+    if (!actx) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) { try { actx = new AC(); } catch (e) { actx = null; } }
+    }
+    if (actx && actx.state === 'suspended') actx.resume();
+    return actx;
+  }
+  function blip(freq, dur, vol) {
+    var a = audio();
+    if (!a || a.state !== 'running') return;
+    try {
+      var t = a.currentTime;
+      var o = a.createOscillator();
+      var g = a.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(freq, t);
+      o.frequency.exponentialRampToValueAtTime(Math.max(50, freq * 0.45), t + dur);
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g);
+      g.connect(a.destination);
+      o.start(t);
+      o.stop(t + dur + 0.02);
+    } catch (e) { /* audio is optional */ }
+  }
+  function popSound() { blip(360 + Math.random() * 240, 0.14, 0.07); }
+  function tickSound(speed) {
+    var now = performance.now();
+    if (now - lastTick < 70) return;
+    lastTick = now;
+    blip(120 + Math.min(220, speed * 12), 0.06, Math.min(0.045, 0.01 + speed * 0.0018));
+  }
+
+  /* ---------------- model ---------------- */
+  function makeBall(x, y, vx, vy, r) {
+    if (!(typeof r === 'number') || !isFinite(r) || r <= 0) r = 14;
+    r = Math.min(r, Math.min(W, H) / 2 - 1);
+    if (!isFinite(x)) x = W / 2;
+    if (!isFinite(y)) y = H / 2;
+    if (!isFinite(vx)) vx = 0;
+    if (!isFinite(vy)) vy = 0;
+    x = clamp(x, r, W - r);          // always fully inside the canvas
+    y = clamp(y, r, H - r);
+    return {
+      x: x, y: y, vx: vx, vy: vy, r: r,
+      hue: Math.floor(rand(0, 360)),
+      trail: [],
+      born: performance.now()
+    };
+  }
+
+  function collide(b) {
+    var impact;
+    if (b.x < b.r) {                             // left wall
+      b.x = b.r;
+      impact = Math.abs(b.vx);
+      b.vx = Math.abs(b.vx) * WALL_REST;
+      if (impact > 3) tickSound(impact);
+    } else if (b.x > W - b.r) {                  // right wall
+      b.x = W - b.r;
+      impact = Math.abs(b.vx);
+      b.vx = -Math.abs(b.vx) * WALL_REST;
+      if (impact > 3) tickSound(impact);
+    }
+    if (b.y < b.r) {                             // ceiling
+      b.y = b.r;
+      impact = Math.abs(b.vy);
+      b.vy = Math.abs(b.vy) * REST;
+      if (impact > 3) tickSound(impact);
+    } else if (b.y > H - b.r) {                  // floor
+      b.y = H - b.r;
+      impact = Math.abs(b.vy);
+      b.vy = -Math.abs(b.vy) * REST;
+      if (Math.abs(b.vy) < SLEEP_V) {            // settle instead of micro-bouncing
+        b.vy = 0;
+        b.vx *= 0.96;                            // rolling friction
+      }
+      if (impact > 3) tickSound(impact);
+    }
+  }
+
+  function integrate(dt) {
+    // Sub-step for stability; position clamping makes tunnelling impossible.
+    var sub = Math.max(1, Math.min(64, Math.ceil(dt)));
+    var h = dt / sub;
+    var drag = Math.pow(DRAG, h);
+    for (var s = 0; s < sub; s++) {
+      for (var i = 0; i < balls.length; i++) {
+        var b = balls[i];
+        b.vy += GRAVITY * h;                     // gravity accelerates downward
+        b.vx *= drag;
+        b.vy *= drag;
+        b.x += b.vx * h;
+        b.y += b.vy * h;
+        if (!isFinite(b.x)) { b.x = W / 2; b.vx = 0; }
+        if (!isFinite(b.y)) { b.y = H / 2; b.vy = 0; }
+        collide(b);                              // clamp inside + reverse velocity
+      }
+    }
+  }
+
+  function recordTrails() {
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+      b.trail.push({ x: b.x, y: b.y });
+      if (b.trail.length > MAX_TRAIL) b.trail.shift();
+    }
+  }
+
+  /* ---------------- rendering ---------------- */
+  function easeOutBack(t) {
+    var c = 1.70158, u = t - 1;
+    return 1 + (c + 1) * u * u * u + c * u * u;
+  }
+
+  function draw() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // backdrop
+    ctx.fillStyle = '#0d1220';
+    ctx.fillRect(0, 0, W, H);
+
+    // subtle grid
+    ctx.strokeStyle = 'rgba(140,170,255,0.055)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var gx = 40; gx < W; gx += 40) { ctx.moveTo(gx + 0.5, 0); ctx.lineTo(gx + 0.5, H); }
+    for (var gy = 40; gy < H; gy += 40) { ctx.moveTo(0, gy + 0.5); ctx.lineTo(W, gy + 0.5); }
+    ctx.stroke();
+
+    // vignette
+    var vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.32, W / 2, H / 2, Math.max(W, H) * 0.72);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.38)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+
+    var now = performance.now();
+    var i, j, b;
+
+    // click ripples
+    for (i = ripples.length - 1; i >= 0; i--) {
+      var rp = ripples[i];
+      var t = (now - rp.t0) / 420;
+      if (t >= 1) { ripples.splice(i, 1); continue; }
+      ctx.strokeStyle = 'hsla(' + rp.hue + ',85%,72%,' + ((1 - t) * 0.55).toFixed(3) + ')';
+      ctx.lineWidth = 2.2 * (1 - t) + 0.4;
+      ctx.beginPath();
+      ctx.arc(rp.x, rp.y, 6 + t * 44, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // motion trails
+    for (i = 0; i < balls.length; i++) {
+      b = balls[i];
+      var n = b.trail.length;
+      for (j = 0; j < n; j++) {
+        var a = (j + 1) / n;
+        ctx.fillStyle = 'hsla(' + b.hue + ',80%,62%,' + (a * a * 0.16).toFixed(3) + ')';
+        ctx.beginPath();
+        ctx.arc(b.trail[j].x, b.trail[j].y, b.r * (0.25 + 0.55 * a), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // balls
+    for (i = 0; i < balls.length; i++) {
+      b = balls[i];
+      var pop = easeOutBack(clamp((now - b.born) / 220, 0, 1));
+      var rr = b.r * (0.35 + 0.65 * Math.max(0.001, pop));
+      ctx.save();
+      ctx.shadowColor = 'hsla(' + b.hue + ',90%,65%,0.7)';
+      ctx.shadowBlur = 16;
+      var g = ctx.createRadialGradient(b.x - rr * 0.35, b.y - rr * 0.4, rr * 0.1, b.x, b.y, rr);
+      g.addColorStop(0, 'hsl(' + b.hue + ',90%,80%)');
+      g.addColorStop(0.55, 'hsl(' + b.hue + ',82%,60%)');
+      g.addColorStop(1, 'hsl(' + b.hue + ',78%,46%)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, rr, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // gloss highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.32)';
+      ctx.beginPath();
+      ctx.arc(b.x - rr * 0.32, b.y - rr * 0.38, Math.max(1.2, rr * 0.2), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (countEl) countEl.textContent = String(balls.length);
+  }
+
+  /* ---------------- main loop (fixed timestep) ---------------- */
+  var last = performance.now();
+  var acc = 0;
+  function frame(now) {
+    var elapsed = now - last;
+    last = now;
+    if (!(elapsed >= 0)) elapsed = 0;
+    if (elapsed > 120) elapsed = 120;
+    if (running) {
+      acc += elapsed / (1000 / 60);
+      var steps = Math.floor(acc);
+      if (steps > 0) {
+        acc -= steps;
+        if (steps > 5) steps = 5;
+        while (steps > 0) { integrate(1); recordTrails(); steps--; }
+      }
+    } else {
+      acc = 0;
+    }
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  /* ---------------- controls ---------------- */
+  function setRunning(v) {
+    running = !!v;
+    playBtn.textContent = running ? 'Pause' : 'Play';
+    playBtn.setAttribute('aria-pressed', String(running));
+  }
+
+  function spawnAt(x, y, opts) {
+    opts = opts || {};
+    var b = makeBall(x, y, opts.vx || 0, opts.vy || 0, opts.r != null ? opts.r : rand(10, 20));
+    balls.push(b);
+    ripples.push({ x: b.x, y: b.y, hue: b.hue, t0: performance.now() });
+    popSound();
+    draw();
+    return b;
+  }
+
+  dropBtn.addEventListener('click', function () {
+    var r = rand(11, 19);
+    spawnAt(rand(r + 20, W - r - 20), r + rand(4, 60), { vx: rand(-4, 4), vy: 0, r: r });
+    dropBtn.blur();
+  });
+
+  playBtn.addEventListener('click', function () {
+    setRunning(!running);
+    playBtn.blur();
+  });
+
+  clearBtn.addEventListener('click', function () {
+    balls.length = 0;
+    ripples.length = 0;
+    draw();
+    clearBtn.blur();
+  });
+
+  canvas.addEventListener('pointerdown', function (e) {
+    if (e.button !== undefined && e.button !== 0) return;
+    var rect = canvas.getBoundingClientRect();
+    var x = (e.clientX - rect.left) * (W / rect.width);
+    var y = (e.clientY - rect.top) * (H / rect.height);
+    spawnAt(x, y, { vx: rand(-1.5, 1.5), vy: rand(-1, 0) });
+  });
+
+  window.addEventListener('keydown', function (e) {
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (e.code === 'Space') { e.preventDefault(); setRunning(!running); }
+    else if (e.key === 'c' || e.key === 'C') { balls.length = 0; draw(); }
+  });
+
+  /* ---------------- programmatic API (grading contract) ---------------- */
+  window.sim = {
+    w: W,
+    h: H,
+    balls: function () {
+      return balls.map(function (b) {
+        return { x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: b.r };
+      });
+    },
+    addBall: function (x, y, vx, vy, r) {
+      if (vx === undefined) vx = 0;
+      if (vy === undefined) vy = 0;
+      var b = makeBall(x, y, vx, vy, r);
+      balls.push(b);
+      draw();
+      return b;
+    },
+    clear: function () {
+      balls.length = 0;
+      draw();
+    },
+    step: function (dt) {
+      if (dt === undefined) dt = 1;
+      dt = Number(dt);
+      if (!isFinite(dt) || dt <= 0) dt = 1;
+      integrate(dt);
+      recordTrails();
+      draw();
+    }
+  };
+
+  /* ---------------- go ---------------- */
+  setRunning(true);
+  draw();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

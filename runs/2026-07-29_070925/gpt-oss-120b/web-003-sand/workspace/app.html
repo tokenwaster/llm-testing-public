@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Falling‑Sand Sandbox</title>
+<style>
+    body{
+        margin:0;
+        background:#111;
+        color:#ddd;
+        font-family:sans-serif;
+        display:flex;
+        justify-content:center;
+        align-items:center;
+        height:100vh;
+        user-select:none;
+    }
+    .container{
+        text-align:center;
+    }
+    canvas{
+        background:#000;
+        border:2px solid #555;
+        image-rendering:pixelated;
+        width:400px;
+        height:400px;
+    }
+    .controls{
+        margin-top:10px;
+    }
+    button{
+        margin:2px;
+        padding:6px 12px;
+        background:#333;
+        color:#fff;
+        border:none;
+        border-radius:4px;
+        cursor:pointer;
+    }
+    button.active{
+        background:#555;
+    }
+    button:hover{
+        background:#444;
+    }
+</style>
+</head>
+<body>
+<div class="container">
+    <canvas id="sand" width="400" height="400"></canvas>
+    <div class="controls">
+        <button id="mat-sand">Sand</button>
+        <button id="mat-water">Water</button>
+        <button id="mat-wall">Wall</button>
+        <button id="mat-acid">Acid</button>
+        <button id="mat-empty">Eraser</button>
+        <button id="clear">Clear</button>
+    </div>
+</div>
+<script>
+(() => {
+    /*** configuration ***/
+    const CELL_SIZE = 4;               // pixel size of one cell (canvas 400 → 100 cells)
+    const W = 100;                     // grid width (cells)
+    const H = 100;                     // grid height (cells)
+
+    /*** material enums ***/
+    const MAT_EMPTY = 0, MAT_SAND = 1, MAT_WATER = 2, MAT_WALL = 3, MAT_ACID = 4;
+    const nameToIdx = {empty:0,sand:1,water:2,wall:3,acid:4};
+    const idxToName = ['empty','sand','water','wall','acid'];
+    const colors = [
+        '#000000', // empty – invisible (black background)
+        '#c2b280', // sand
+        '#3399ff', // water
+        '#777777', // wall
+        '#00ff00'  // acid
+    ];
+
+    /*** state ***/
+    const grid = new Uint8Array(W*H); // initially all zero (empty)
+
+    /*** deterministic PRNG ***/
+    let rngSeed = 123456789;
+    function rand() {
+        // Linear congruential generator (32‑bit)
+        rngSeed = (rngSeed * 1664525 + 1013904223) >>> 0;
+        return rngSeed / 4294967296;
+    }
+
+    /*** simulation core ***/
+    function step() {
+        // bottom‑up processing (excluding bottom row which cannot move down)
+        for (let y = H-2; y >= 0; y--) {
+            for (let x = 0; x < W; x++) {
+                const i = y*W + x;
+                const cell = grid[i];
+                if (cell === MAT_SAND) {
+                    // try down
+                    let ny = y+1, nx = x;
+                    let ni = ny*W + nx;
+                    const below = grid[ni];
+                    if (below===MAT_EMPTY || below===MAT_WATER || below===MAT_ACID) {
+                        grid[ni] = MAT_SAND;
+                        grid[i] = below;
+                        continue;
+                    }
+                    // diagonal (random order)
+                    let dirs = [[-1,1],[1,1]];
+                    if (rand()<0.5) dirs.reverse();
+                    for (let d of dirs) {
+                        nx = x + d[0];
+                        ny = y + d[1];
+                        if (nx<0||nx>=W||ny>=H) continue;
+                        ni = ny*W + nx;
+                        const tgt = grid[ni];
+                        if (tgt===MAT_EMPTY || tgt===MAT_WATER || tgt===MAT_ACID) {
+                            grid[ni] = MAT_SAND;
+                            grid[i] = tgt;
+                            break;
+                        }
+                    }
+                } else if (cell === MAT_WATER) {
+                    // try down into empty only
+                    let ny = y+1, nx = x;
+                    let ni = ny*W + nx;
+                    if (grid[ni]===MAT_EMPTY) {
+                        grid[ni] = MAT_WATER;
+                        grid[i] = MAT_EMPTY;
+                        continue;
+                    }
+                    // spread sideways
+                    let dirs = [[-1,0],[1,0]];
+                    if (rand()<0.5) dirs.reverse();
+                    for (let d of dirs) {
+                        nx = x + d[0];
+                        ny = y;
+                        if (nx<0||nx>=W) continue;
+                        ni = ny*W + nx;
+                        if (grid[ni]===MAT_EMPTY) {
+                            grid[ni] = MAT_WATER;
+                            grid[i] = MAT_EMPTY;
+                            break;
+                        }
+                    }
+                } else if (cell === MAT_ACID) {
+                    // move like water (down then sideways)
+                    let moved = false;
+                    let ny = y+1, nx = x;
+                    let ni = ny*W + nx;
+                    if (grid[ni]===MAT_EMPTY) {
+                        grid[ni] = MAT_ACID;
+                        grid[i] = MAT_EMPTY;
+                        moved = true;
+                    } else {
+                        let dirs = [[-1,0],[1,0]];
+                        if (rand()<0.5) dirs.reverse();
+                        for (let d of dirs) {
+                            nx = x + d[0];
+                            ny = y;
+                            if (nx<0||nx>=W) continue;
+                            ni = ny*W + nx;
+                            if (grid[ni]===MAT_EMPTY) {
+                                grid[ni] = MAT_ACID;
+                                grid[i] = MAT_EMPTY;
+                                moved = true;
+                                break;
+                            }
+                        }
+                    }
+                    // dissolution (after possible move)
+                    const cx = moved ? nx : x;
+                    const cy = moved ? ny : y;
+                    const dissolveDirs = [[0,1],[-1,0],[1,0],[-1,1],[1,1]];
+                    for (let d of dissolveDirs) {
+                        const tx = cx + d[0];
+                        const ty = cy + d[1];
+                        if (tx<0||tx>=W||ty<0||ty>=H) continue;
+                        const ti = ty*W + tx;
+                        const target = grid[ti];
+                        if (target===MAT_SAND || target===MAT_WALL) {
+                            grid[ti] = MAT_EMPTY; // erode
+                        }
+                    }
+                }
+                // walls & empty do nothing
+            }
+        }
+    }
+
+    /*** rendering ***/
+    const canvas = document.getElementById('sand');
+    const ctx = canvas.getContext('2d');
+
+    function drawAll() {
+        for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+                const v = grid[y*W + x];
+                ctx.fillStyle = colors[v];
+                ctx.fillRect(x*CELL_SIZE, y*CELL_SIZE, CELL_SIZE, CELL_SIZE);
+            }
+        }
+    }
+
+    function drawCell(x,y){
+        const v = grid[y*W + x];
+        ctx.fillStyle = colors[v];
+        ctx.fillRect(x*CELL_SIZE, y*CELL_SIZE, CELL_SIZE, CELL_SIZE);
+    }
+
+    /*** UI handling ***/
+    let curMat = MAT_SAND; // default
+    const btnMap = {
+        'mat-sand': MAT_SAND,
+        'mat-water': MAT_WATER,
+        'mat-wall': MAT_WALL,
+        'mat-acid': MAT_ACID,
+        'mat-empty': MAT_EMPTY
+    };
+    function setActiveButton(id){
+        document.querySelectorAll('.controls button').forEach(b=>b.classList.remove('active'));
+        const el=document.getElementById(id);
+        if(el) el.classList.add('active');
+    }
+    Object.keys(btnMap).forEach(id=>{
+        const btn=document.getElementById(id);
+        btn.addEventListener('click',()=>{
+            curMat = btnMap[id];
+            setActiveButton(id);
+        });
+    });
+    setActiveButton('mat-sand'); // initial highlight
+
+    document.getElementById('clear').addEventListener('click',()=>{sim.clear();});
+
+    // painting
+    let painting = false;
+    function paint(e){
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        const cx = Math.floor((e.clientX - rect.left) * scaleX / CELL_SIZE);
+        const cy = Math.floor((e.clientY - rect.top) * scaleY / CELL_SIZE);
+        if (cx<0||cx>=W||cy<0||cy>=H) return;
+        sim.set(cx,cy, idxToName[curMat]);
+        drawCell(cx,cy);
+    }
+    canvas.addEventListener('mousedown', e=>{painting=true;paint(e);});
+    canvas.addEventListener('mousemove', e=>{if(painting) paint(e);});
+    window.addEventListener('mouseup', ()=>{painting=false;});
+
+    /*** main loop ***/
+    function loop(){
+        step();
+        drawAll();
+        requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    /*** exposed API ***/
+    const sim = {
+        w: W,
+        h: H,
+        tick(n){
+            for(let i=0;i<n;i++) step();
+        },
+        get(x,y){
+            if (x<0||x>=W||y<0||y>=H) return undefined;
+            return idxToName[grid[y*W+x]];
+        },
+        set(x,y,material){
+            if (x<0||x>=W||y<0||y>=H) return;
+            const v = nameToIdx[material];
+            if (v===undefined) return;
+            grid[y*W+x]=v;
+        },
+        clear(){
+            grid.fill(MAT_EMPTY);
+            drawAll();
+        }
+    };
+    window.sim = sim;
+})();
+</script>
+</body>
+</html>

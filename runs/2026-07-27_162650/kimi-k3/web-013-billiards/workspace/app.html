@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pocket Billiards</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background: radial-gradient(1200px 700px at 50% 15%, #26321a, #10160b 75%);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: #eee;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 18px 12px 30px;
+    user-select: none; -webkit-user-select: none;
+  }
+  h1 { font-size: 22px; margin: 2px 0 12px; letter-spacing: 3px; color: #f4d47c; text-shadow: 0 2px 6px #000; }
+  canvas {
+    display: block; border-radius: 26px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.6);
+    touch-action: none; cursor: crosshair;
+    max-width: 96vw; height: auto;
+  }
+  #bar { display: flex; gap: 14px; align-items: center; margin: 14px 0 8px; flex-wrap: wrap; justify-content: center; }
+  button {
+    background: linear-gradient(#8a5a2b, #6b4423); color: #ffe9c4;
+    border: 1px solid #3a2410; padding: 9px 20px; font-size: 15px; font-weight: 600;
+    border-radius: 10px; cursor: pointer; box-shadow: 0 3px 8px rgba(0,0,0,.4);
+  }
+  button:hover { filter: brightness(1.15); }
+  button:active { transform: translateY(1px); }
+  #msg { font-size: 15px; color: #cde8b8; min-height: 1.2em; }
+  #howto {
+    max-width: 900px; background: rgba(0,0,0,.35); border: 1px solid #3c4a2a;
+    border-radius: 12px; padding: 10px 18px; font-size: 14.5px; line-height: 1.6; color: #dfe8cf;
+  }
+  #howto b { color: #ffd97a; }
+</style>
+</head>
+<body>
+<h1>🎱 POCKET BILLIARDS</h1>
+<canvas id="table"></canvas>
+<div id="bar">
+  <button id="resetBtn">↺ Reset / Rack</button>
+  <span id="msg">Break when ready!</span>
+</div>
+<div id="howto">
+  <b>How to shoot:</b> press on the <b>white cue ball</b>, <b>drag backwards</b> (away from your
+  target) to set direction &amp; power — the longer the drag, the harder the shot — then
+  <b>release</b> to strike. An aim line and power meter appear while you drag.
+  Pot the coloured balls into any of the <b>6 pockets</b> (4 corners + 2 in the middle of the long rails).
+  If the cue ball is potted it is re-spotted automatically (or click a clear spot to place it yourself).
+  Use <b>Reset / Rack</b> to return all balls to the starting layout.
+</div>
+
+<script>
+(function () {
+'use strict';
+
+/* ============================== Constants ============================== */
+var W = 960, H = 480, R = 13;          // playfield size & ball radius (px)
+var RAIL = 44;                          // wooden rail width around the felt
+var CW = W + RAIL * 2, CH = H + RAIL * 2; // canvas logical size
+var PR = 26;                            // pocket capture radius
+var FRICTION = 210;                     // rolling resistance (px / s^2)
+var STOP = 5;                           // speeds below this snap to rest
+var CUSH_E = 0.90;                      // cushion restitution
+var BALL_E = 0.95;                      // ball-ball restitution (near-elastic)
+var MAX_DRAG = 280;                     // drag distance (px) for full power
+var MAX_POWER = 1400;                   // cue-ball speed at full power (px/s)
+var MAX_H = 1 / 240;                    // physics substep length (s)
+var TAU = Math.PI * 2;
+
+var POCKETS = [
+  { x: 0,     y: 0 }, { x: W / 2, y: 0 }, { x: W,     y: 0 },
+  { x: 0,     y: H }, { x: W / 2, y: H }, { x: W,     y: H }
+];
+
+var COLORS = {
+  1: '#f6c90e', 2: '#1b52b8', 3: '#d32f2f', 4: '#6a3fb5',
+  5: '#ef6c00', 6: '#0e7c3a', 7: '#8e2424', 8: '#151515'
+};
+
+/* ============================== Canvas ============================== */
+var canvas = document.getElementById('table');
+var ctx = canvas.getContext('2d');
+var DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+canvas.width = CW * DPR;
+canvas.height = CH * DPR;
+canvas.style.width = CW + 'px';
+ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+var msgEl = document.getElementById('msg');
+function setMsg(t) { msgEl.textContent = t; }
+
+/* ============================== State ============================== */
+var balls = [];
+var aiming = false, aimX = 0, aimY = 0;
+var paused = false, rafId = 0, lastT = 0;
+
+function clampNum(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+function cueBall() {
+  for (var i = 0; i < balls.length; i++) if (balls[i].cue) return balls[i];
+  return null;
+}
+function moving() {
+  for (var i = 0; i < balls.length; i++) {
+    var b = balls[i];
+    if (!b.potted && (b.vx !== 0 || b.vy !== 0)) return true;
+  }
+  return false;
+}
+
+/* ============================== Physics ============================== */
+function physics(dt) {
+  if (!(dt > 0)) return;
+  var n = Math.ceil(dt / MAX_H);
+  if (n < 1) n = 1;
+  if (n > 5000) n = 5000;
+  var h = dt / n;
+  var minD = 2 * R, minD2 = minD * minD;
+  var i, j, s, b, c;
+
+  for (s = 0; s < n; s++) {
+    /* --- friction + integration --- */
+    for (i = 0; i < balls.length; i++) {
+      b = balls[i];
+      if (b.potted) continue;
+      var sp = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+      if (sp > 0) {
+        var ns = sp - FRICTION * h;
+        if (ns <= 0 || sp < STOP) { b.vx = 0; b.vy = 0; }
+        else {
+          var k = ns / sp;
+          b.vx *= k; b.vy *= k;
+          b.x += b.vx * h;
+          b.y += b.vy * h;
+        }
+      }
+    }
+    /* --- pockets --- */
+    for (i = 0; i < balls.length; i++) {
+      b = balls[i];
+      if (b.potted) continue;
+      for (j = 0; j < POCKETS.length; j++) {
+        var pdx = b.x - POCKETS[j].x, pdy = b.y - POCKETS[j].y;
+        if (pdx * pdx + pdy * pdy < PR * PR) {
+          b.potted = true; b.vx = 0; b.vy = 0;
+          break;
+        }
+      }
+    }
+    /* --- cushions --- */
+    for (i = 0; i < balls.length; i++) {
+      b = balls[i];
+      if (b.potted) continue;
+      if (b.x < R)          { b.x = R;     if (b.vx < 0) b.vx = -b.vx * CUSH_E; }
+      else if (b.x > W - R) { b.x = W - R; if (b.vx > 0) b.vx = -b.vx * CUSH_E; }
+      if (b.y < R)          { b.y = R;     if (b.vy < 0) b.vy = -b.vy * CUSH_E; }
+      else if (b.y > H - R) { b.y = H - R; if (b.vy > 0) b.vy = -b.vy * CUSH_E; }
+    }
+    /* --- ball-ball collisions (equal mass, resolved along centre line) --- */
+    for (i = 0; i < balls.length; i++) {
+      var a = balls[i];
+      if (a.potted) continue;
+      for (j = i + 1; j < balls.length; j++) {
+        c = balls[j];
+        if (c.potted) continue;
+        var dx = c.x - a.x, dy = c.y - a.y;
+        var d2 = dx * dx + dy * dy;
+        if (d2 >= minD2) continue;
+        var d = Math.sqrt(d2), nx, ny;
+        if (d < 1e-9) { nx = 1; ny = 0; d = 1e-9; }
+        else { nx = dx / d; ny = dy / d; }
+        var push = (minD - d) / 2;
+        a.x -= nx * push; a.y -= ny * push;
+        c.x += nx * push; c.y += ny * push;
+        var rvx = c.vx - a.vx, rvy = c.vy - a.vy;
+        var vn = rvx * nx + rvy * ny;
+        if (vn < 0) {
+          var jimp = -(1 + BALL_E) * vn / 2;
+          a.vx -= jimp * nx; a.vy -= jimp * ny;
+          c.vx += jimp * nx; c.vy += jimp * ny;
+        }
+      }
+    }
+    /* --- final positional guarantee --- */
+    for (i = 0; i < balls.length; i++) {
+      b = balls[i];
+      if (b.potted) continue;
+      b.x = clampNum(b.x, R, W - R);
+      b.y = clampNum(b.y, R, H - R);
+    }
+  }
+}
+
+/* ============================== Spotting ============================== */
+function spotFree(x, y) {
+  if (x < R || x > W - R || y < R || y > H - R) return false;
+  var i, dx, dy;
+  for (i = 0; i < POCKETS.length; i++) {
+    dx = x - POCKETS[i].x; dy = y - POCKETS[i].y;
+    if (dx * dx + dy * dy < (PR + R) * (PR + R)) return false;
+  }
+  for (i = 0; i < balls.length; i++) {
+    var b = balls[i];
+    if (b.potted || b.cue) continue;
+    dx = x - b.x; dy = y - b.y;
+    if (dx * dx + dy * dy < (2 * R + 1) * (2 * R + 1)) return false;
+  }
+  return true;
+}
+function placeCue(c, x, y) { c.x = x; c.y = y; c.vx = 0; c.vy = 0; c.potted = false; }
+function spotCueAuto() {
+  var c = cueBall();
+  if (!c) return false;
+  var bx = W * 0.25, by = H / 2;
+  if (spotFree(bx, by)) { placeCue(c, bx, by); return true; }
+  for (var k = 1; k <= 80; k++) {
+    var ang = k * 0.9, rad = R * 0.6 * k;
+    var x = bx + Math.cos(ang) * rad;
+    var y = by + Math.sin(ang) * rad * 0.6;
+    if (spotFree(x, y)) { placeCue(c, x, y); return true; }
+  }
+  return false;
+}
+
+/* ============================== sim API ============================== */
+function simReset(list) {
+  balls = (list || []).map(function (b, i) {
+    return {
+      x: clampNum(+b.x || 0, R, W - R),
+      y: clampNum(+b.y || 0, R, H - R),
+      vx: +b.vx || 0,
+      vy: +b.vy || 0,
+      cue: !!b.cue,
+      potted: false,
+      num: (b.num != null) ? b.num : (b.cue ? 0 : i)
+    };
+  });
+  aiming = false;
+  render();
+}
+function simStep(dt) {
+  dt = +dt;
+  if (dt > 0) physics(Math.min(dt, 5));
+  render();
+}
+function simState() {
+  return balls.map(function (b) {
+    return { x: b.x, y: b.y, vx: b.vx, vy: b.vy, potted: b.potted, cue: b.cue };
+  });
+}
+function simShoot(vx, vy) {
+  var c = cueBall();
+  if (!c) return;
+  if (c.potted) spotCueAuto();
+  if (c.potted) return;
+  c.vx = +vx || 0;
+  c.vy = +vy || 0;
+}
+function simPause() {
+  paused = true;
+  if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+}
+function simResume() {
+  if (!paused) return;
+  paused = false;
+  lastT = performance.now();
+  rafId = requestAnimationFrame(loop);
+}
+
+window.sim = {
+  W: W, H: H, R: R,
+  reset: simReset,
+  step: simStep,
+  state: simState,
+  shoot: simShoot,
+  pause: simPause,
+  resume: simResume
+};
+
+/* ============================== Rack ============================== */
+function buildRack() {
+  var out = [{ x: W * 0.25, y: H / 2, vx: 0, vy: 0, cue: true, num: 0 }];
+  var apexX = W * 0.66, cy = H / 2;
+  var rows = [[1], [9, 2], [10, 8, 3], [11, 4, 14, 5], [6, 12, 7, 15, 13]];
+  var rowGap = Math.sqrt(3) * R + 0.4, colGap = 2 * R + 0.4;
+  for (var r = 0; r < 5; r++) {
+    for (var k = 0; k < rows[r].length; k++) {
+      out.push({
+        x: apexX + r * rowGap,
+        y: cy + (k - r / 2) * colGap,
+        vx: 0, vy: 0, num: rows[r][k]
+      });
+    }
+  }
+  return out;
+}
+
+/* ============================== Rendering ============================== */
+function shade(hex, amt) {
+  var n = parseInt(hex.slice(1), 16);
+  var r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  if (amt >= 0) { r += (255 - r) * amt; g += (255 - g) * amt; b += (255 - b) * amt; }
+  else { var k = 1 + amt; r *= k; g *= k; b *= k; }
+  return 'rgb(' + (r | 0) + ',' + (g | 0) + ',' + (b | 0) + ')';
+}
+function colorFor(num, cue) {
+  if (cue || num === 0) return '#f3efe4';
+  var c = COLORS[num > 8 ? num - 8 : num];
+  return c || '#888888';
+}
+function roundRectPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function rr(x, y, w, h, r, fill) {
+  roundRectPath(x, y, w, h, r);
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+function dot(x, y, r) {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, TAU);
+  ctx.fill();
+}
+
+function drawTable() {
+  var i;
+  rr(0, 0, CW, CH, 26, '#4a2c10');                 // outer wood
+  rr(7, 7, CW - 14, CH - 14, 20, '#6b4423');       // rail wood
+  ctx.strokeStyle = 'rgba(0,0,0,.4)';
+  ctx.lineWidth = 2;
+  roundRectPath(RAIL - 22, RAIL - 22, W + 44, H + 44, 10);
+  ctx.stroke();
+  var C = 18;                                       // cushion band
+  ctx.fillStyle = '#0d5a2e';
+  ctx.fillRect(RAIL - C, RAIL - C, W + 2 * C, H + 2 * C);
+  ctx.fillStyle = '#177a40';                        // felt
+  ctx.fillRect(RAIL, RAIL, W, H);
+  var g = ctx.createRadialGradient(
+    RAIL + W / 2, RAIL + H / 2, H * 0.25,
+    RAIL + W / 2, RAIL + H / 2, H * 1.05);
+  g.addColorStop(0, 'rgba(255,255,255,0.05)');
+  g.addColorStop(1, 'rgba(0,0,0,0.22)');
+  ctx.fillStyle = g;
+  ctx.fillRect(RAIL, RAIL, W, H);
+  ctx.fillStyle = '#e9dfc2';                        // sight diamonds
+  for (i = 1; i < 8; i++) {
+    if (i === 4) continue;
+    dot(RAIL + W * i / 8, RAIL - C - 8, 3);
+    dot(RAIL + W * i / 8, RAIL + H + C + 8, 3);
+  }
+  for (i = 1; i < 4; i++) {
+    if (i === 2) continue;
+    dot(RAIL - C - 8, RAIL + H * i / 4, 3);
+    dot(RAIL + W + C + 8, RAIL + H * i / 4, 3);
+  }
+  for (i = 0; i < POCKETS.length; i++) {            // pockets
+    var x = RAIL + POCKETS[i].x, y = RAIL + POCKETS[i].y;
+    ctx.fillStyle = '#241505';
+    dot(x, y, PR + 6);
+    ctx.fillStyle = '#000';
+    dot(x, y, PR - 4);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    dot(x - 4, y - 4, (PR - 4) * 0.5);
+  }
+}
+
+function drawBalls() {
+  for (var i = 0; i < balls.length; i++) {
+    var b = balls[i];
+    if (b.potted) continue;
+    var x = RAIL + b.x, y = RAIL + b.y;
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.beginPath();
+    ctx.ellipse(x + 2.5, y + 3.5, R * 0.95, R * 0.8, 0, 0, TAU);
+    ctx.fill();
+    var striped = !b.cue && b.num > 8;
+    var col = colorFor(b.num, b.cue);
+    var baseCol = striped ? '#f3efe4' : col;
+    var g = ctx.createRadialGradient(x - R * 0.35, y - R * 0.4, R * 0.1, x, y, R);
+    g.addColorStop(0, shade(baseCol, 0.55));
+    g.addColorStop(0.55, baseCol);
+    g.addColorStop(1, shade(baseCol, -0.35));
+    ctx.beginPath();
+    ctx.arc(x, y, R, 0, TAU);
+    ctx.fillStyle = g;
+    ctx.fill();
+    if (striped) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x, y, R, 0, TAU);
+      ctx.clip();
+      ctx.fillStyle = col;
+      ctx.fillRect(x - R, y - R * 0.58, 2 * R, R * 1.16);
+      ctx.restore();
+    }
+    if (!b.cue && b.num > 0) {
+      ctx.fillStyle = '#f5f1e6';
+      dot(x, y, R * 0.52);
+      ctx.fillStyle = '#1c1c1c';
+      ctx.font = 'bold ' + Math.round(R * 0.72) + 'px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(b.num), x, y + 0.5);
+    } else if (b.cue) {
+      ctx.fillStyle = 'rgba(200,40,40,0.55)';
+      dot(x - R * 0.35, y - R * 0.1, 1.6);
+      dot(x + R * 0.3, y + R * 0.25, 1.6);
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    dot(x - R * 0.35, y - R * 0.42, R * 0.16);
+    ctx.beginPath();
+    ctx.arc(x, y, R, 0, TAU);
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+function drawAim() {
+  var c = cueBall();
+  if (!c || c.potted) return;
+  var dx = c.x - aimX, dy = c.y - aimY;
+  var len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 1) return;
+  var ux = dx / len, uy = dy / len;
+  var power = Math.min(len, MAX_DRAG), frac = power / MAX_DRAG;
+  var x = RAIL + c.x, y = RAIL + c.y;
+  var t = 1e9;
+  if (ux > 1e-9)       t = Math.min(t, (W - R - c.x) / ux);
+  else if (ux < -1e-9) t = Math.min(t, (R - c.x) / ux);
+  if (uy > 1e-9)       t = Math.min(t, (H - R - c.y) / uy);
+  else if (uy < -1e-9) t = Math.min(t, (R - c.y) / uy);
+  if (!isFinite(t) || t < 0) t = 0;
+  var lineLen = Math.min(t, 90 + frac * 380);
+  ctx.save();
+  ctx.setLineDash([8, 7]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x + ux * (R + 2), y + uy * (R + 2));
+  ctx.lineTo(x + ux * lineLen, y + uy * lineLen);
+  ctx.stroke();
+  ctx.restore();
+  if (t > 0 && lineLen >= t - 0.5) {
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    dot(x + ux * t, y + uy * t, 4);
+  }
+  /* cue stick */
+  var pull = 6 + frac * 54;
+  var sx = x - ux * (R + pull), sy = y - uy * (R + pull);
+  var ex = x - ux * (R + pull + 170), ey = y - uy * (R + pull + 170);
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#8a5a2b';
+  ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(sx, sy); ctx.stroke();
+  ctx.strokeStyle = '#d9b77c';
+  ctx.lineWidth = 3.4;
+  ctx.beginPath();
+  ctx.moveTo(ex + (sx - ex) * 0.35, ey + (sy - ey) * 0.35);
+  ctx.lineTo(sx, sy);
+  ctx.stroke();
+  ctx.restore();
+  /* power meter */
+  var bw = 170, bh = 13, bx = RAIL + 12, by = CH - RAIL + 15;
+  rr(bx, by, bw, bh, 6, 'rgba(0,0,0,0.45)');
+  if (frac > 0.02) rr(bx + 2, by + 2, (bw - 4) * frac, bh - 4, 4, 'hsl(' + Math.round(120 * (1 - frac)) + ',85%,50%)');
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1;
+  roundRectPath(bx, by, bw, bh, 6);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('POWER', bx + bw + 8, by + bh / 2 + 0.5);
+}
+
+function drawCueHint() {
+  var c = cueBall();
+  if (!c || c.potted) return;
+  ctx.save();
+  ctx.setLineDash([5, 5]);
+  ctx.beginPath();
+  ctx.arc(RAIL + c.x, RAIL + c.y, R + 5, 0, TAU);
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function render() {
+  ctx.clearRect(0, 0, CW, CH);
+  drawTable();
+  drawBalls();
+  if (aiming) drawAim();
+  else if (!moving()) drawCueHint();
+}
+
+/* ============================== Input ============================== */
+function toField(e) {
+  var r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (CW / r.width) - RAIL,
+    y: (e.clientY - r.top) * (CH / r.height) - RAIL
+  };
+}
+
+canvas.addEventListener('pointerdown', function (e) {
+  e.preventDefault();
+  var c = cueBall();
+  if (!c) return;
+  if (moving()) { setMsg('Let the balls come to rest first…'); return; }
+  var p = toField(e);
+  if (c.potted) {
+    if (spotFree(p.x, p.y)) {
+      placeCue(c, p.x, p.y);
+      setMsg('Cue ball placed — drag it back & release to shoot.');
+      render();
+    } else setMsg('Spot blocked — click a clear area of the table.');
+    return;
+  }
+  var dx = p.x - c.x, dy = p.y - c.y;
+  if (dx * dx + dy * dy <= (R * 3.2) * (R * 3.2)) {
+    aiming = true;
+    aimX = p.x; aimY = p.y;
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    render();
+  }
+});
+canvas.addEventListener('pointermove', function (e) {
+  if (!aiming) return;
+  var p = toField(e);
+  aimX = p.x; aimY = p.y;
+  render();
+});
+canvas.addEventListener('pointerup', function (e) {
+  if (!aiming) return;
+  aiming = false;
+  var c = cueBall();
+  if (c && !c.potted) {
+    var dx = c.x - aimX, dy = c.y - aimY;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len > 6) {
+      var power = Math.min(len, MAX_DRAG);
+      var s = MAX_POWER * (power / MAX_DRAG) / len;
+      simShoot(dx * s, dy * s);
+      setMsg('');
+    }
+  }
+  render();
+});
+canvas.addEventListener('pointercancel', function () { aiming = false; render(); });
+
+document.getElementById('resetBtn').addEventListener('click', function () {
+  simReset(buildRack());
+  setMsg('Racked! Break when ready — drag the cue ball back & release.');
+});
+
+/* ============================== Main loop ============================== */
+function gameTick() {
+  var c = cueBall();
+  if (c && c.potted && !moving()) {
+    if (spotCueAuto()) setMsg('Cue ball potted — re-spotted. Shoot again.');
+    else setMsg('Cue ball potted — click a clear spot to place it.');
+  }
+  var others = 0, rem = 0;
+  for (var i = 0; i < balls.length; i++) {
+    if (!balls[i].cue) { others++; if (!balls[i].potted) rem++; }
+  }
+  if (others > 0 && rem === 0) setMsg('Table cleared! 🎉 Press Reset / Rack to play again.');
+}
+
+function loop(t) {
+  if (paused) return;
+  var dt = (t - lastT) / 1000;
+  lastT = t;
+  if (!(dt > 0)) dt = 0;
+  if (dt > 0.05) dt = 0.05;
+  physics(dt);
+  gameTick();
+  render();
+  rafId = requestAnimationFrame(loop);
+}
+
+/* ============================== Init ============================== */
+simReset(buildRack());
+setMsg('Break when ready — drag the cue ball back & release!');
+lastT = performance.now();
+rafId = requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>

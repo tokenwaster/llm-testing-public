@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Pro Billiards Simulation</title>
+    <style>
+        body {
+            background: #222;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        canvas {
+            background-color: #2e7d32;
+            border: 15px solid #5d3a1a;
+            border-radius: 10px;
+            box-shadow: 0 0 50px rgba(0,0,0,0.8);
+            cursor: crosshair;
+        }
+        .ui {
+            margin-top: 20px;
+            text-align: center;
+        }
+        button {
+            padding: 12px 30px;
+            font-size: 18px;
+            background: #5d3a1a;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #8b4513;
+        }
+        #instructions {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.7);
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="instructions">
+        <strong>Instructions:</strong><br>
+        • Click and hold the white cue ball.<br>
+        • Drag backwards to aim and set power.<br>
+        • Release to strike!<br>
+        • Pocket all balls to clear the table.
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <div class="ui">
+        <button onclick="resetGame()">Reset / Rack</button>
+    </div>
+
+    <script>
+        /** 
+         * GAME CONSTANTS 
+         */
+        const W = 800;
+        const H = 450;
+        const R = 12; // Ball radius
+        const FRICTION = 1.6; // Speed decay coefficient
+        const POCKET_RADIUS = 25;
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = W;
+        canvas.height = H;
+
+        // Pocket coordinates (4 corners + 2 side centers)
+        const pockets = [
+            { x: 0, y: 0 },
+            { x: W / 2, y: 0 },
+            { x: W, y: 0 },
+            { x: 0, y: H },
+            { x: W / 2, y: H },
+            { x: W, y: H }
+        ];
+
+        /**
+         * SIMULATION ENGINE
+         */
+        window.sim = {
+            W: W,
+            H: H,
+            R: R,
+            balls: [],
+            isRunning: true,
+
+            // Initialize/Reset balls into the world
+            reset(ballData) {
+                this.balls = ballData.map(b => ({
+                    x: b.x,
+                    y: b.y,
+                    vx: b.vx || 0,
+                    vy: b.vy || 0,
+                    cue: b.cue || false,
+                    potted: false,
+                    color: b.color || `hsl(${Math.random() * 360}, 70%, 50%)`
+                }));
+            },
+
+            // Direct velocity injection for the cue ball
+            shoot(vx, vy) {
+                const cue = this.balls.find(b => b.cue);
+                if (cue) {
+                    cue.vx = vx;
+                    cue.vy = vy;
+                }
+            },
+
+            // Return snapshot of current state
+            state() {
+                return this.balls.map(b => ({
+                    x: b.x,
+                    y: b.y,
+                    vx: b.vx,
+                    vy: b.vy,
+                    potted: b.potted,
+                    cue: b.cue
+                }));
+            },
+
+            pause() { this.isRunning = false; },
+            resume() { this.isRunning = true; },
+
+            // Main physics update step
+            step(dt) {
+                if (dt <= 0) return;
+
+                // 1. Motion and Friction
+                for (let i = 0; i < this.balls.length; i++) {
+                    const b = this.balls[i];
+                    if (b.potted) continue;
+
+                    b.x += b.vx * dt;
+                    b.y += b.vy * dt;
+
+                    // Smooth friction decay: v(t) = v0 * e^(-k*t)
+                    const factor = Math.exp(-FRICTION * dt);
+                    b.vx *= factor;
+                    b.vy *= factor;
+
+                    // Sleep if nearly still
+                    if (Math.abs(b.vx) < 1 && Math.abs(b.vy) < 1) {
+                        b.vx = 0;
+                        b.vy = 0;
+                    }
+
+                    // 2. Cushion Collisions
+                    if (b.x - this.R < 0) {
+                        b.x = this.R;
+                        b.vx *= -1;
+                    } else if (b.x + this.R > this.W) {
+                        b.x = this.W - this.R;
+                        b.vx *= -1;
+                    }
+
+                    if (b.y - this.R < 0) {
+                        b.y = this.R;
+                        b.vy *= -1;
+                    } else if (b.y + this.R > this.H) {
+                        b.y = this.H - this.R;
+                        b.vy *= -1;
+                    }
+
+                    // 4. Pocket Check
+                    for (let p of pockets) {
+                        const dx = b.x - p.x;
+                        const dy = b.y - p.y;
+                        if (dx * dx + dy * dy < POCKET_RADIUS * POCKET_RADIUS) {
+                            b.potted = true;
+                            b.vx = 0;
+                            b.vy = 0;
+                            break;
+                        }
+                    }
+                }
+
+                // 3. Ball-to-Ball Collisions (Elastic)
+                for (let i = 0; i < this.balls.length; i++) {
+                    for (let j = i + 1; j < this.balls.length; j++) {
+                        const b1 = this.balls[i];
+                        const b2 = this.balls[j];
+
+                        if (b1.potted || b2.potted) continue;
+
+                        const dx = b2.x - b1.x;
+                        const dy = b2.y - b1.y;
+                        const distSq = dx * dx + dy * dy;
+                        const minDist = 2 * this.R;
+
+                        if (distSq < minDist * minDist) {
+                            const dist = Math.sqrt(distSq);
+                            // Resolve overlap immediately to prevent sticking
+                            const overlap = (minDist - dist) / 2;
+                            const nx = dx / dist; // Normal X
+                            const ny = dy / dist; // Normal Y
+
+                            b1.x -= nx * overlap;
+                            b1.y -= ny * overlap;
+                            b2.x += nx * overlap;
+                            b2.y += ny * overlap;
+
+                            // Resolve Velocities (Elastic, Equal Mass)
+                            const vdx = b1.vx - b2.vx;
+                            const vdy = b1.vy - b2.vy;
+                            const dotProduct = vdx * nx + vdy * ny;
+
+                            if (dotProduct > 0) { // Only if moving towards each other
+                                const impulse = dotProduct;
+                                b1.vx -= impulse * nx;
+                                b1.vy -= impulse * ny;
+                                b2.vx += impulse * nx;
+                                b2.vy += impulse * ny;
+                            }
+                        }
+                    }
+                }
+
+                render();
+            }
+        };
+
+        /**
+         * RENDERING
+         */
+        function render() {
+            ctx.clearRect(0, 0, W, H);
+
+            // Draw Table Felt
+            ctx.fillStyle = '#2e7d32';
+            ctx.fillRect(0, 0, W, H);
+
+            // Draw Pockets (shadows)
+            pockets.forEach(p => {
+                const grad = ctx.createRadialGradient(p.x, p.y, 5, p.x, p.y, POCKET_RADIUS);
+                grad.addColorStop(0, '#000');
+                grad.addColorStop(1, 'transparent');
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, POCKET_RADIUS, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // Draw Balls
+            window.sim.balls.forEach(b => {
+                if (b.potted) return;
+                ctx.beginPath();
+                ctx.arc(b.x, b.y, this.R, 0, Math.PI * 2); // Error correction: use sim.R
+                // Fixed radius reference for render
+                ctx.arc(b.x, b.y, window.sim.R, 0, Math.PI * 2);
+                ctx.fillStyle = b.cue ? 'white' : b.color;
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+                ctx.stroke();
+                ctx.closePath();
+            });
+
+            // Draw Aim Line (Visual only)
+            if (isDragging && mousePos) {
+                const cue = window.sim.balls.find(b => b.cue);
+                if (cue) {
+                    ctx.beginPath();
+                    ctx.setLineDash([5, 5]);
+                    ctx.moveTo(cue.x, cue.y);
+                    ctx.lineTo(mousePos.x, mousePos.y);
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.closePath();
+                }
+            }
+        }
+
+        /**
+         * INTERACTION & INITIALIZATION
+         */
+        let isDragging = false;
+        let mousePos = null;
+
+        function resetGame() {
+            const balls = [];
+            // Cue Ball
+            balls.push({ x: 200, y: H / 2, vx: 0, vy: 0, cue: true, color: 'white' });
+            
+            // Triangular Rack of Balls
+            let startX = 580;
+            let startY = H / 2;
+            let row = 0;
+            for (let i = 0; i < 6; i++) {
+                for (let j = 0; j <= i; j++) {
+                    balls.push({
+                        x: startX + (i * 18),
+                        y: startY - (i * 10) + (j * 23) - (i * 11),
+                        vx: 0, vy: 0, cue: false,
+                        color: `hsl(${Math.floor(Math.random() * 360)}, 70%, 50%)`
+                    });
+                }
+            }
+            window.sim.reset(balls);
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+
+            const cue = window.sim.balls.find(b => b.cue);
+            if (cue) {
+                const d = Math.sqrt(Math.pow(mx - cue.x, 2) + Math.pow(my - cue.y, 2));
+                if (d < window.sim.R * 2.5) {
+                    isDragging = true;
+                    mousePos = { x: mx, y: my };
+                }
+            }
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            mousePos = {
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top
+            };
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (isDragging) {
+                const cue = window.sim.balls.find(b => b.cue);
+                if (cue && mousePos) {
+                    // Vector from current mouse to start drag position
+                    // Power is scaled by distance dragged back
+                    const dx = cue.x - mousePos.x;
+                    const dy = cue.y - mousePos.y;
+                    window.sim.shoot(dx * 0.12, dy * 0.12);
+                }
+                isDragging = false;
+            }
+        });
+
+        // Game Loop for visual rendering and physics advancement
+        let lastTime = performance.now();
+        function animate() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+
+            if (window.sim.isRunning && dt < 0.1) {
+                window.sim.step(dt);
+            }
+            requestAnimationFrame(animate);
+        }
+
+        // Start the game
+        resetGame();
+        requestAnimationFrame(animate);
+    </script>
+</body>
+</html>

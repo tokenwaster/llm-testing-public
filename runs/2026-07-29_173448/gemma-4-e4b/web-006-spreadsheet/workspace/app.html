@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Spreadsheet</title>
+    <style>
+        :root {
+            --header-bg: #f0f0f0;
+            --border-color: #ccc;
+            --input-bg: white;
+            --focus-color: #a8c7fa;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            padding: 15px;
+            background-color: #eee;
+        }
+
+        #spreadsheet-container {
+            display: grid;
+            /* Total columns = 26 (A-J + Column Header) */
+            grid-template-columns: 30px repeat(10, 1fr); /* Col A=Header, Cols B-K are the cells */
+            gap: 1px;
+            background-color: var(--border-color);
+            border: 1px solid #aaa;
+            max-width: calc(26 * 1.1em); /* Constrain width to prevent overflow on wide screens */
+        }
+
+        #headers {
+            grid-column: 1 / span 26;
+            display: contents;
+        }
+        
+        /* The actual grid layout wrapper */
+        .sheet-area {
+            border-right: none;
+            border-bottom: none;
+        }
+
+        .corner, .header-cell, .data-cell {
+            padding: 5px;
+            background-color: var(--header-bg);
+            text-align: center;
+            font-weight: bold;
+            cursor: default;
+            z-index: 2;
+        }
+
+        .corner {
+             /* Occupies the top-left corner cell */
+             grid-area: 1 / 1;
+        }
+
+        .row-header {
+            grid-column: 1 / 1;
+            text-align: left;
+            padding-left: 8px;
+            font-weight: normal;
+            background-color: #e0e0e0;
+            z-index: 2;
+        }
+
+        .col-header {
+            grid-row: 1 / 1;
+            text-align: center;
+            padding-top: 8px;
+            font-weight: normal;
+            background-color: #e0e0e0;
+            z-index: 2;
+        }
+
+        /* The grid structure */
+        #spreadsheet-container {
+            grid-template-rows: repeat(11, 30px); /* Row 0 for headers + 10 rows (1-10) */
+            width: auto;
+            min-height: 450px; /* Ensure visible size > 400px */
+        }
+
+        .grid-wrapper {
+            display: grid;
+            /* Total columns = 26 (A-J + Column Header) */
+            grid-template-columns: 30px repeat(10, 1fr);
+            gap: 1px;
+            background-color: var(--border-color);
+        }
+
+        .row-index {
+            grid-column: 1 / 1;
+            text-align: left;
+            padding-left: 8px;
+            font-weight: normal;
+            background-color: #e0e0e0;
+            z-index: 2;
+        }
+
+        /* Individual cell wrapper */
+        .cell-wrapper {
+            position: relative;
+            background-color: var(--input-bg);
+            border: 1px solid var(--border-color);
+            padding: 0; /* Padding handled by input/visuals below */
+            cursor: text;
+            height: 30px; /* Fixed height for consistent appearance */
+        }
+
+        /* The actual input element */
+        .cell-wrapper input {
+            width: 100%;
+            height: 100%;
+            box-sizing: border-box;
+            border: none;
+            padding: 5px; /* Padding inside the cell boundary */
+            font-family: monospace;
+            font-size: 1em;
+            outline: none;
+        }
+
+        /* Focus state management */
+        .cell-wrapper input:focus {
+            box-shadow: inset 0 0 0 2px var(--focus-color);
+            background-color: #fffef8;
+        }
+
+
+        /* Controls Section */
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button, textarea {
+            padding: 8px 15px;
+            border: 1px solid #aaa;
+            cursor: pointer;
+        }
+
+        #csv {
+            width: 100%;
+            max-height: 200px;
+        }
+
+        /* Utility class for grid placement */
+        [data-col] { grid-column: var(--col); }
+        [data-row] { grid-row: var(--row); }
+
+    </style>
+</head>
+<body>
+
+    <h1>Spreadsheet MiniApp</h1>
+
+    <div id="spreadsheet-container">
+        <!-- Corner Placeholder (A/1) -->
+        <div class="corner" style="grid-area: 1 / 1;"></div>
+
+        <!-- Column Headers Row (Row 0) -->
+        <div class="col-header" data-col="A"></div>
+        <script>for(let i=0; i<=9; i++) { document.write(`<div class="col-header" data-col="${String.fromCharCode(65+i)}">${String.fromCharCode(65+i)}</div>`); }</script>
+
+        <!-- Row Index Column (Col 0) -->
+        <div class="row-index"></div>
+
+        <!-- Data Grid Area (R1-R10, C A-J) -->
+        <div id="grid" class="cell-wrapper grid-wrapper">
+            <!-- Cells will be dynamically populated here -->
+        </div>
+    </div>
+
+    <div id="controls">
+        <button id="export">Export CSV</button>
+    </div>
+    
+    <textarea id="csv" placeholder="CSV data appears here..."></textarea>
+
+
+    <script>
+// ==============================================================
+// CORE SPREADSHEET LOGIC IMPLEMENTATION
+// ==============================================================
+
+const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+const ROWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+/** Global State and API Context */
+const sheetState = {
+    // Stores the raw content (formula or plain text) for all cells. Format: 'A1': '=SUM(B2:C2)'
+    rawValues: {}, 
+    // Dependency graph: Key = cellRef, Value = Set of references that depend on this cellRef
+    dependencies: {} 
+};
+
+// Helper to get the coordinates from a reference like "A1"
+function parseReference(ref) {
+    const match = ref.match(/([A-Z]+)([0-9]+)/i);
+    if (!match) return null;
+    return { colIndex: COLS.indexOf(match[1].toUpperCase()), rowIndex: parseInt(match[2]) - 1, rawRef: match[0] };
+}
+
+/** Initializes the internal state and UI elements */
+function initializeSheet() {
+    const gridElement = document.getElementById('grid');
+    sheetState.rawValues = {};
+    sheetState.dependencies = {};
+
+    // Set up initial structure and listeners
+    ROWS.forEach(r => {
+        COLS.forEach(c => {
+            const ref = `${c}${r}`;
+            const colIndex = COLS.indexOf(c);
+            const rowIndex = r - 1; // 0-indexed internal representation
+
+            // Create the cell wrapper structure for CSS Grid layout
+            let cellWrapper = document.createElement('div');
+            cellWrapper.className = 'cell-wrapper';
+            cellWrapper.setAttribute('data-col', colIndex + 2); /* Col index starts from 2 (A is 2nd column) */
+            cellWrapper.setAttribute('data-row', r);
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.id = `cell-${ref}`;
+            input.dataset.ref = ref;
+            
+            // Initialize state and structure
+            sheetState.rawValues[ref] = '';
+            cellWrapper.appendChild(input);
+
+            gridElement.appendChild(cellWrapper);
+        });
+    });
+
+    // Attach event listeners to all inputs
+    document.querySelectorAll('#grid input').forEach(input => {
+        const ref = input.dataset.ref;
+        
+        // Input handler: Tracks typing changes
+        input.addEventListener('input', (e) => {
+            sheetState.rawValues[ref] = e.target.value;
+            recalculateSheet();
+        });
+
+        // Blur/Keydown handler: Commits the change and triggers recalculation
+        input.addEventListener('blur', () => {
+             // The input event already set rawValue, but we ensure final calculation happens.
+             setTimeout(recalculateSheet, 50); // Small delay to ensure state updates propagate smoothly
+        });
+
+         input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                // Prevent default form submission behavior if applicable
+                e.preventDefault(); 
+                // Commit change and trigger recalculation cascade
+                setTimeout(recalculateSheet, 50);
+            }
+        });
+
+    });
+
+    document.getElementById('export').addEventListener('click', exportCSV);
+}
+
+
+/** ===============================================
+ * CALCULATION LOGIC CORE FUNCTIONS
+ * =============================================== */
+
+// Simple function to parse and resolve cell references within a formula string
+function substituteReferences(formula, calculationStack) {
+    let tempFormula = formula;
+    const regex = /(?<![a-zA-Z0-9\(\)\+\-\*\/])([A-Z]+[0-9]+)/gi;
+    
+    // Global replacement function
+    return tempFormula.replace(regex, (match) => {
+        const ref = match;
+        const computedValue = calculateInternal(ref, calculationStack);
+
+        if (typeof computedValue === 'string' && computedValue.startsWith('#')) {
+            // Reference is an error or cycle
+            return `__ERROR_REF_${computedValue}__`; 
+        } else if (isNaN(computedValue) || !isFinite(computedValue)) {
+            return "0"; // Treat invalid numeric references as 0 for safety in eval()
+        }
+        // Replace the reference with its raw number string representation
+        return computedValue.toString();
+    });
+}
+
+/** Core recursive calculation function */
+function calculateInternal(ref, calculatingStack = new Set()) {
+    if (!sheetState.rawValues[ref] || sheetState.rawValues[ref].trim() === '') {
+        return 0; // Empty cell counts as 0 in formulas
+    }
+
+    // --- Cycle Detection ---
+    if (calculatingStack.has(ref)) {
+        return "#CYCLE";
+    }
+    
+    const raw = sheetState.rawValues[ref];
+    
+    // Check if the content is a formula
+    if (!raw.startsWith('=')) {
+        const value = isNaN(parseFloat(raw)) ? (typeof parseFloat(raw) === 'number' && !isNaN(parseFloat(raw))) ? parseFloat(raw) : raw : parseFloat(raw);
+        return typeof value === 'number' ? value : String(value); // Return as number or string
+    }
+
+    // --- Formula Evaluation Start ---
+    calculatingStack.add(ref);
+    try {
+        // 1. Syntax Pre-Check (Very basic, checks for common non-formula chars if not at start)
+        let formulaBody = raw.substring(1);
+        if (!/^[0-9\s\(\)\+\-\*\/[A-Z]*]+$/.test(formulaBody)) {
+             calculatingStack.delete(ref);
+             return "#ERR"; // Invalid syntax detected immediately
+        }
+
+        // 2. Reference Substitution: Replace all cell references with computed numeric values
+        let substitutedFormula = substituteReferences(raw, calculatingStack);
+
+        // Handle potential errors injected during substitution
+        if (substitutedFormula.includes('__ERROR_REF')) {
+             calculatingStack.delete(ref);
+             return "#ERR"; 
+        }
+
+
+        // 3. Final Evaluation (Using Math functions/eval on safe numeric string)
+        // Use a try-catch block around eval() for safety and to catch runtime errors
+        const result = new Function(`return (${substitutedFormula})`)();
+
+        if (!isFinite(result)) {
+            calculatingStack.delete(ref);
+            return "#ERR"; 
+        }
+
+        // Successful calculation
+        calculatingStack.delete(ref);
+        return result;
+
+    } catch (e) {
+        // Catches general JS runtime errors during evaluation
+        calculatingStack.delete(ref);
+        console.error(`Calculation error for ${ref}:`, e);
+        return "#ERR"; 
+    }
+}
+
+
+/** Updates the computed value display and internal state for a single cell */
+function updateCellDisplayAndState(ref, calculatedValue) {
+    const inputElement = document.getElementById(`cell-${ref}`);
+    if (!inputElement) return;
+
+    // 1. Update Displayed Value (The UI)
+    let displayText;
+    if (typeof calculatedValue === 'string' && calculatedValue.startsWith('#')) {
+        displayText = calculatedValue; // Error or Cycle message
+    } else if (typeof calculatedValue === 'number') {
+        displayText = calculatedValue.toString(); // Display numbers cleanly
+    } else {
+        // Non-numeric, non-formula text remains itself
+        displayText = String(calculatedValue); 
+    }
+
+    inputElement.value = displayText;
+
+    // 2. Update internal display representation (For API 'get' method)
+    const cellContainer = inputElement.closest('.cell-wrapper');
+    if (cellContainer && !inputElement.readOnly) {
+        cellContainer.dataset.computedValue = displayText;
+    }
+}
+
+
+/** Recalculates the entire sheet, handling dependencies and cycles */
+function recalculateSheet(initialTriggerRef = null) {
+    // We must recalculate everything to ensure transitive updates work, 
+    // but we need careful dependency management to detect cycles correctly.
+
+    let needsRecalc = new Set();
+    
+    if (initialTriggerRef) {
+        // Simple approach: just trigger all calculations one by one until stable/no changes occur
+        needsRecalc.add(initialTriggerRef);
+    } else {
+         // On initial load, calculate everything
+         for (const ref in sheetState.rawValues) {
+             needsRecalc.add(ref);
+         }
+    }
+
+    let changed = true;
+    let iterationCount = 0;
+    const MAX_ITERATIONS = 15; // Safety break for complex graphs/cycles
+
+    // Iterative recalculation until stable or max iterations reached
+    while (changed && iterationCount < MAX_ITERATIONS) {
+        changed = false;
+        iterationCount++;
+        let currentPassUpdates = new Set();
+
+        for (const ref of Object.keys(sheetState.rawValues)) {
+            // If the raw value changed since last pass, or if we explicitly need to update it:
+            if (needsRecalc.has(ref) || sheetState.rawValues[ref].length > 0 && iterationCount === 1 ) {
+
+                const currentValue = calculateInternal(ref);
+                let displayValue;
+                
+                if (typeof currentValue === 'string' && currentValue.startsWith('#CYCLE')) {
+                    displayValue = '#CYCLE'; // Cycle detection result
+                } else if (currentValue !== sheetState.computedValues[ref]) {
+                    // Value has actually changed since last pass
+                    changed = true;
+                    sheetState.computedValues[ref] = currentValue; 
+                    displayValue = currentValue;
+                } else {
+                    displayValue = sheetState.computedValues[ref]; // No change
+                }
+
+                updateCellDisplayAndState(ref, displayValue);
+            }
+        }
+        
+        // Since the calculation is always global, we just set needsRecalc to all cells 
+        needsRecalc = new Set(Object.keys(sheetState.rawValues));
+    }
+
+
+    // Store computed values globally for easy access and cycle checks
+    window.sheetStateComputed = sheetState.computedValues || {};
+    for (const ref of Object.keys(sheetState.rawValues)) {
+        if (!sheetState.computedValues[ref]) {
+             sheetState.computedValues[ref] = calculateInternal(ref);
+        }
+    }
+}
+
+
+/** ===============================================
+ * API IMPLEMENTATION (window.sheet)
+ * =============================================== */
+
+window.sheet = {
+    // Sets the raw text content of a cell (e.g., "=A1*2")
+    set: function(ref, value) {
+        if (!sheetState.rawValues[ref]) return false; 
+
+        // Update internal state immediately
+        sheetState.rawValues[ref] = String(value);
+
+        // Update UI element text
+        const inputElement = document.getElementById(`cell-${ref}`);
+        if (inputElement) {
+            inputElement.value = String(value);
+        }
+
+        // Trigger the recalculation cascade
+        recalculateSheet(ref);
+    },
+
+    // Gets the currently displayed/computed value of a cell 
+    get: function(ref) {
+         // Check if computed state exists, otherwise run calculation for safety (though it shouldn't be needed)
+        if (!window.sheetStateComputed || !(ref in window.sheetStateComputed)) {
+             recalculateSheet(); // Force recalculation
+        }
+        return window.sheetStateComputed[ref];
+    },
+
+    // Gets the raw text content of a cell (the formula or plain text)
+    raw: function(ref) {
+        return sheetState.rawValues[ref] || '';
+    }
+};
+
+
+/** ===============================================
+ * UTILITIES & EXPORT
+ * =============================================== */
+
+function exportCSV() {
+    const computedData = [];
+    for (let r = 1; r <= 10; r++) {
+        let row = [];
+        for (let c = 0; c < COLS.length; c++) {
+            const colRef = COLS[c];
+            const ref = `${colRef}${r}`;
+            // Use the computed value for export
+            row.push(window.sheetStateComputed[ref] === undefined ? "" : String(window.sheetStateComputed[ref]));
+        }
+        computedData.push(row.join(','));
+    }
+
+    document.getElementById('csv').value = computedData.join('\n');
+}
+
+
+// --- Initialization Sequence ---
+// Initialize the internal state and attach listeners before running any API calls
+initializeSheet(); 
+
+// Initial calculation run (Populates sheetStateComputed)
+recalculateSheet(); 
+
+    </script>
+</body>
+</html>

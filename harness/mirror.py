@@ -1,20 +1,3 @@
-"""The private held-out mirror: contamination measured instead of assumed.
-
-Publishing the suite publishes the answers — a correct model reply recorded in
-runs/ IS the key, so withholding tasks-refs or meta.yaml would not help and would
-cost the auditability that makes the public data worth anything. The alternative
-is to keep the public set fully open and hold back a PRIVATE variant of the same
-task, regenerated at a different seed. A model that scores markedly higher on the
-published instance than on the unpublished one has memorised the instance.
-
-Only generated tasks can be mirrored: a task whose content comes from a seeded
-generator can be re-rolled, while a hand-written app spec or agent workspace
-cannot. mirrorable() reports exactly which, so the coverage claim stays honest.
-
-What this does NOT detect: a model that learned the underlying skill from the
-published task scores the same on both, and should — that is learning, not
-cheating. The signal is verbatim memorisation only.
-"""
 
 import re
 import shutil
@@ -26,13 +9,12 @@ _GEN = "generate.py"
 
 
 class RunActive(RuntimeError):
-    """A build was attempted while a run is executing — see build_mirror."""
+    pass
 
 _KEY_FILES = ("checker.py", "meta.yaml")
 
 
 def _carries_key(pub_dir: Path, name: str) -> bool:
-    """Does this file of the public task hold the expected answer?"""
     p = pub_dir / name
     if not p.is_file():
         return False
@@ -45,7 +27,6 @@ def _carries_key(pub_dir: Path, name: str) -> bool:
 
 
 def _stale_key(pub_dir: Path, regenerated: set[str]) -> str:
-    """'' if the variant is scoreable, else why it is not."""
     missed = [n for n in _KEY_FILES
               if _carries_key(pub_dir, n) and n not in regenerated]
     if missed:
@@ -56,18 +37,6 @@ def _stale_key(pub_dir: Path, regenerated: set[str]) -> str:
 
 
 def verify_variant(task) -> str:
-    """'' if this private variant grades correctly, else why it does not.
-
-    The same gate new public tasks pass (rule #5): a known-good submission must
-    score 1.0 and an empty one 0.0. Applied to the mirror because a variant is
-    generated code no human read — and a key that silently belongs to the public
-    prompt fails exactly this check while looking fine on disk.
-
-    The answer lane can be checked completely (its key is in meta.yaml, so the
-    correct submission is constructible). A checker lane can only be checked from
-    below — empty must earn nothing — because reconstructing a correct reply would
-    mean reimplementing the checker.
-    """
     from . import scoring
     if task.scoring_type == "answer":
         key = (task.scoring or {}).get("answer")
@@ -93,15 +62,11 @@ def verify_variant(task) -> str:
 
 
 def produced_any(sandbox) -> bool:
-    """Did the generator already write something? Running as __main__
-    often does the work, in which case calling main() again would
-    duplicate it."""
     return any(p.is_file() and p.name != _GEN
                for p in sandbox.rglob("*"))
 
 
 def mirrorable() -> list[dict]:
-    """Public tasks that can be re-seeded, with their generator + current seed."""
     from .tasks import load_tasks
     out = []
     for t in load_tasks():
@@ -118,25 +83,6 @@ def mirrorable() -> list[dict]:
 
 def build_mirror(task_ids=None, seed_offset: int | None = None,
                  progress=print) -> list[str]:
-    """Generate private variants of the given tasks at a shifted seed.
-
-    Run in a SANDBOX, not in place. Generators resolve their output from
-    `Path(__file__).resolve().parents[2]`, and some hardcode the destination
-    inline rather than through a constant — rewriting an `OUT =` line therefore
-    misses them and the generator writes straight into the PUBLIC task. That
-    happened once here and overwrote tasks/long-context/ctx-013's prompt. So the
-    generator is copied into a throwaway root whose parents[2] IS the sandbox,
-    left free to write wherever it wants, and only the files it produced are
-    harvested. The public task cannot be reached from there.
-
-    Only SEED is rewritten. Everything else about the task — its shape, checker
-    and answers format — must stay identical, or the two variants would not be
-    comparable.
-
-    A variant that the generator cannot fully re-key is REFUSED rather than
-    shipped: see _stale_key. The reasons land in private/mirror.json so the
-    operator page can state coverage from what was actually verified.
-    """
     import tempfile
     from .util import now_iso, write_json
     from .runner import active_run
@@ -158,7 +104,6 @@ def build_mirror(task_ids=None, seed_offset: int | None = None,
         out_dir = config.PRIVATE_TASKS_DIR / info["category"] / tid
 
         def _refuse(reason: str) -> None:
-            """Never leave an unscoreable variant where a run could pick it up."""
             if out_dir.exists():
                 shutil.rmtree(out_dir)
             report[tid] = {"category": info["category"], "ok": False,
@@ -247,7 +192,6 @@ def _load_report() -> dict:
 
 
 def load_private_tasks():
-    """The mirror's tasks, loaded with the same loader as the public suite."""
     from .tasks import load_tasks
     if not config.PRIVATE_TASKS_DIR.is_dir():
         return []
@@ -255,34 +199,16 @@ def load_private_tasks():
 
 
 def delta_band(delta: float, n: int) -> str:
-    """'flat' | 'watch' | 'suspect' for a public-vs-private delta over n tasks.
-
-    Scaled by n, not a fixed number. One task flipping 1.0 -> 0.0 moves the mean
-    by exactly 1/n, so a constant threshold means something different at every
-    coverage level: 0.15 was chosen first and happens to sit below 1/6 = 0.167,
-    which made a SINGLE differing task read as a finding. The bands are therefore
-    stated in units of "tasks' worth of difference":
-
-      flat    <= one task's worth   — expected; re-seeding is not difficulty-neutral
-      watch   <= two tasks' worth
-      suspect  > two tasks' worth
-
-    Negative is always flat: memorising the published instance can only inflate the
-    PUBLIC side, so a better private score is noise, not virtue.
-    """
     if n <= 0 or delta <= 1.0 / n:
         return "flat"
     return "watch" if delta <= 2.0 / n else "suspect"
 
 
 def built_ids() -> set[str]:
-    """Task ids with a variant actually on disk — the only ones that can be run
-    or compared. mirrorable() says what COULD be mirrored; this says what is."""
     return {t.id for t in load_private_tasks()}
 
 
 def private_scores() -> dict[tuple, list[float]]:
-    """{(model, task): [scores]} from private/runs — never the public aggregate."""
     from .util import read_json
     out: dict[tuple, list[float]] = {}
     if not config.PRIVATE_RUNS_DIR.is_dir():
@@ -296,18 +222,6 @@ def private_scores() -> dict[tuple, list[float]]:
 
 
 def contamination_delta(pub: dict | None = None) -> list[dict]:
-    """Per model: public score vs private score on the mirrored tasks.
-
-    A positive delta means the model did BETTER on the published instance than on
-    an unpublished one of the same shape — the signature of having memorised it.
-    Reported per model with n, so a one-task difference is not read as a finding.
-
-    Both sides use the suite's aggregation basis: every scored run of that
-    model·task, meaned. The public side comes from report.collect_task_data (the
-    same numbers the leaderboard shows), so the two columns are comparable. Pass
-    `pub` when the caller already has that data — the report render does, and
-    reloading every run to build it again is the expensive part.
-    """
     mirrored = built_ids()
     priv = {k: v for k, v in private_scores().items() if k[1] in mirrored}
     if not mirrored or not priv:
@@ -347,20 +261,6 @@ def contamination_delta(pub: dict | None = None) -> list[dict]:
 
 
 def mirror_state(pub: dict | None = None, with_delta: bool = True) -> dict:
-    """Everything the operator page and the report pages need, from disk.
-
-    Coverage is stated as a fraction of the WHOLE public suite, including the
-    tasks that can never be mirrored, because "6 of 6 built" would read as full
-    coverage when it is 6 of 55. Held-out coverage that overstates itself is
-    worse than none.
-
-    `with_delta=False` skips the public/private comparison, which is the only
-    costly part — it reloads every run to rebuild the public aggregate (measured
-    0.4s across this dataset, and it grows with runs/). The control page drops it
-    while a run executes: the page polls, and re-reading every run every few
-    seconds is disk and CPU that the timing-scored tasks calibrate against an idle
-    machine to earn.
-    """
     from .tasks import load_tasks
     pub_tasks = load_tasks()
     can = {t["id"]: t for t in mirrorable()}

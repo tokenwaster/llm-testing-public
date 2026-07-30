@@ -1,12 +1,3 @@
-"""An empty 200 means different things local vs cloud, and mislabelling it
-corrupts attribution.
-
-For a LOCAL model (LM Studio) an empty response really is context overflow —
-non-retryable, a known limit. For a CLOUD model it is a transient upstream
-hiccup: kimi-k3 hit this on a 550-token prompt (nowhere near its window) and got
-one un-retried, scored 0.0 that assess then blamed on the model's context. It
-must retry, and if it persists attribute to infra — never context-overflow.
-"""
 
 import pytest
 
@@ -49,8 +40,6 @@ def test_a_response_with_only_tool_calls_is_not_degenerate():
 
 
 def test_cloud_empty_attributes_to_infra_not_the_model():
-    """The whole point: assess must call it transport-drop/infra, not a
-    context-overflow known-limit charged against the model."""
     tdef = type("T", (), {"category": "one-shot-apps", "id": "web-007-life",
                           "scoring_type": "webapp"})()
     try:

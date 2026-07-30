@@ -1,5 +1,3 @@
-"""Sandbox tools for tier-2 agentic tasks. Every operation is confined to the
-task's workspace directory — path escapes are rejected."""
 
 import sys
 from pathlib import Path
@@ -49,8 +47,6 @@ def _resolve(workspace: Path, rel: str) -> Path:
 
 
 def execute_tool(workspace: Path, name: str, args: dict) -> str:
-    """Execute a tool call; always returns a string (errors included) so the
-    model can react rather than the run crashing."""
     try:
         if name == "list_files":
             files = sorted(p for p in workspace.rglob("*") if p.is_file())

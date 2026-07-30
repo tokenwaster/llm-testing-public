@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Billiards</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:'Segoe UI',Arial,sans-serif;color:#ddd;overflow:hidden}
+#ui{display:flex;gap:12px;margin-bottom:10px;align-items:center;flex-wrap:wrap;justify-content:center}
+button{background:#c0392b;color:#fff;border:none;padding:8px 18px;border-radius:6px;cursor:pointer;font-size:15px;transition:background .15s}
+button:hover{background:#e74c3c}
+#info{font-size:13px;background:rgba(0,0,0,.45);padding:6px 14px;border-radius:6px;white-space:nowrap}
+canvas{border-radius:10px;box-shadow:0 4px 30px rgba(0,0,0,.6);cursor:crosshair}
+</style>
+</head>
+<body>
+<div id="ui">
+<button id="btnReset">Reset / Rack</button>
+<div id="info">Click &amp; drag the white cue ball backward to aim + set power — release to shoot.</div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+"use strict";
+
+const canvas=document.getElementById("canvas");
+const ctx=canvas.getContext("2d");
+
+/* ─── Dimensions ─── */
+const RW=960, RH=540;          // canvas size
+const MAR=42;                   // rail margin
+const W=RW-2*MAR;              // playfield width
+const H=RH-2*MAR;              // playfield height
+const R=13;                    // ball radius
+const POCKET_R=22;             // pocket radius
+
+canvas.width=RW; canvas.height=RH;
+
+/* ─── Pocket positions ─── */
+const pockets=[
+  {x:0,y:0},                         // top-left
+  {x:W/2,y:0},                       // top-mid
+  {x:W,y:0},                         // top-right
+  {x:0,y:H},                         // bottom-left
+  {x:W/2,y:H},                       // bottom-mid
+  {x:W,y:H},                         // bottom-right
+];
+
+/* ─── Ball colours ─── */
+const BALL_COLORS=["#f5f5f5","#f1c40f","#3498db","#e74c3c","#8e44ad","#e67e22","#2ecc71","#2c3e50","#ecf0f1","#f39c12","#9b59b6","#1abc9c","#d35400","#c0392b","#27ae60","#2980b9"];
+
+/* ─── State ─── */
+let balls=[];
+let running=true;
+let dragging=false;
+let dragStartX=0, dragStartY=0, dragCurX=0, dragCurY=0;
+
+/* ─── Physics constants ─── */
+const FRICTION=2.0;          // friction coefficient (higher = faster stop)
+const SUB_STEPS=6;           // sub-steps per step call for stability
+const MIN_VEL=0.08;          // velocity threshold to consider stopped
+
+/* ─── window.sim API ─── */
+window.sim={
+  W:W, H:H, R:R,
+  reset:function(bData){
+    balls=bData.map(function(b){
+      return {
+        x:b.x, y:b.y,
+        vx:b.vx||0, vy:b.vy||0,
+        cue:!!b.cue,
+        potted:false,
+        color:b.color||"#f5f5f5",
+        num:b.num||0,
+      };
+    });
+    dragging=false;
+    render();
+  },
+  step:function(dt){
+    if(!running) return;
+    var sub=dt/SUB_STEPS;
+    for(var s=0;s<SUB_STEPS;s++){
+      integrate(sub);
+      resolveCollisions();
+      checkPockets();
+      clampCushions();
+    }
+    render();
+  },
+  state:function(){
+    return balls.map(function(b){
+      return {x:b.x,y:b.y,vx:b.vx,vy:b.vy,potted:b.potted,cue:b.cue};
+    });
+  },
+  shoot:function(vx,vy){
+    for(var i=0;i<balls;i++){
+      if(balls[i].cue && !balls[i].potted){
+        balls[i].vx=vx;
+        balls[i].vy=vy;
+        break;
+      }
+    }
+  },
+  pause:function(){running=false;},
+  resume:function(){running=true;requestLoop();},
+};
+
+/* ─── Physics helpers ─── */
+function integrate(dt){
+  for(var i=0;i<balls;i++){
+    var b=balls[i];
+    if(b.potted) continue;
+    b.x+=b.vx*dt;
+    b.y+=b.vy*dt;
+    // exponential friction
+    var f=Math.exp(-FRICTION*dt);
+    b.vx*=f;
+    b.vy*=f;
+    if(Math.abs(b.vx)<MIN_VEL && Math.abs(b.vy)<MIN_VEL){
+      b.vx=0; b.vy=0;
+    }
+  }
+}
+
+function clampCushions(){
+  for(var i=0;i<balls.length;i++){
+    var b=balls[i];
+    if(b.potted) continue;
+    if(b.x-R<0){b.x=R; if(b.vx<0)b.vx=-b.vx*0.8;}
+    if(b.x+R>W){b.x=W-R; if(b.vx>0)b.vx=-b.vx*0.8;}
+    if(b.y-R<0){b.y=R; if(b.vy<0)b.vy=-b.vy*0.8;}
+    if(b.y+R>H){b.y=H-R; if(b.vy>0)b.vy=-b.vy*0.8;}
+  }
+}
+
+function resolveCollisions(){
+  for(var i=0;i<balls.length;i++){
+    if(balls[i].potted) continue;
+    for(var j=i+1;j<balls.length;j++){
+      if(balls[j].potted) continue;
+      var a=balls[i], b=balls[j];
+      var dx=b.x-a.x, dy=b.y-a.y;
+      var dist=Math.sqrt(dx*dx+dy*dy);
+      var minD=2*R;
+      if(dist<minD && dist>0.0001){
+        // normal
+        var nx=dx/dist, ny=dy/dist;
+        // relative velocity along normal
+        var dvx=a.vx-b.vx, dvy=a.vy-b.vy;
+        var dvn=dvx*nx+dvy*ny;
+        if(dvn>0){
+          // equal mass elastic: swap normal components
+          a.vx-=dvn*nx;
+          a.vy-=dvn*ny;
+          b.vx+=dvn*nx;
+          b.vy+=dvn*ny;
+        }
+        // separate overlapping balls
+        var overlap=minD-dist;
+        var sep=overlap/2+0.2;
+        a.x-=sep*nx;
+        a.y-=sep*ny;
+        b.x+=sep*nx;
+        b.y+=sep*ny;
+      }
+    }
+  }
+}
+
+function checkPockets(){
+  for(var i=0;i<balls.length;i++){
+    var b=balls[i];
+    if(b.potted) continue;
+    for(var p=0;p<pockets.length;p++){
+      var pk=pockets[p];
+      var dx=b.x-pk.x, dy=b.y-pk.y;
+      if(dx*dx+dy*dy<POCKET_R*POCKET_R*0.55){
+        b.potted=true;
+        b.vx=0; b.vy=0;
+        break;
+      }
+    }
+  }
+}
+
+/* ─── Rendering ─── */
+function render(){
+  // background
+  ctx.fillStyle="#1a1a2e";
+  ctx.fillRect(0,0,RW,RH);
+
+  // rails
+  var railGrad=ctx.createLinearGradient(0,0,0,MAR);
+  railGrad.addColorStop(0,"#5d3a1a");
+  railGrad.addColorStop(1,"#8b5e3c");
+  ctx.fillStyle=railGrad;
+  ctx.fillRect(0,0,RW,RH);
+
+  // inner rail highlight
+  ctx.strokeStyle="#a0724a";
+  ctx.lineWidth=2;
+  ctx.strokeRect(MAR-1,MAR-1,W+2,H+2);
+
+  // felt
+  var feltGrad=ctx.createRadialGradient(MAR+W/2,MAR+H/2,20,MAR+W/2,MAR+H/2,W*0.6);
+  feltGrad.addColorStop(0,"#2d8a4e");
+  feltGrad.addColorStop(1,"#1f6b3d");
+  ctx.fillStyle=feltGrad;
+  ctx.fillRect(MAR,MAR,W,H);
+
+  // pockets
+  for(var i=0;i<pockets.length;i++){
+    var pk=pockets[i];
+    ctx.beginPath();
+    ctx.arc(MAR+pk.x,MAR+pk.y,POCKET_R,0,Math.PI*2);
+    ctx.fillStyle="#111";
+    ctx.fill();
+    ctx.strokeStyle="#333";
+    ctx.lineWidth=2;
+    ctx.stroke();
+  }
+
+  // balls
+  for(var i=0;i<balls.length;i++){
+    drawBall(balls[i]);
+  }
+
+  // aim line
+  if(dragging){
+    drawAimLine();
+  }
+}
+
+function drawBall(b){
+  if(b.potted) return;
+  var cx=MAR+b.x, cy=MAR+b.y;
+  // shadow
+  ctx.beginPath();
+  ctx.arc(cx+2,cy+2,R,0,Math.PI*2);
+  ctx.fillStyle="rgba(0,0,0,0.35)";
+  ctx.fill();
+  // ball
+  ctx.beginPath();
+  ctx.arc(cx,cy,R,0,Math.PI*2);
+  ctx.fillStyle=b.color||"#fff";
+  ctx.fill();
+  // highlight
+  var hg=ctx.createRadialGradient(cx-R*0.3,cy-R*0.3,1,cx,cy,R);
+  hg.addColorStop(0,"rgba(255,255,255,0.45)");
+  hg.addColorStop(1,"rgba(255,255,255,0)");
+  ctx.beginPath();
+  ctx.arc(cx,cy,R,0,Math.PI*2);
+  ctx.fillStyle=hg;
+  ctx.fill();
+  // number for non-cue
+  if(!b.cue && b.num){
+    ctx.fillStyle="#fff";
+    ctx.font="bold "+(R*0.85)+"px Arial";
+    ctx.textAlign="center";
+    ctx.textBaseline="middle";
+    ctx.fillText(b.num,cx,cy);
+  }
+}
+
+function drawAimLine(){
+  var cue=null;
+  for(var i=0;i<balls.length;i++){
+    if(balls[i].cue && !balls[i].potted){ cue=balls[i]; break; }
+  }
+  if(!cue) return;
+  var mx=dragCurX, my=dragCurY;
+  var sx=dragStartX, sy=dragStartY;
+  var dx=sx-mx, dy=sy-my;
+  var dist=Math.sqrt(dx*dx+dy*dy);
+  if(dist<2) return;
+  // direction from cue ball opposite to drag
+  var px=dx/dist, py=dy/dist;
+  var power=Math.min(dist,300);
+  // draw power indicator (dashed line from cue in shot direction)
+  var endX=cue.x+px*power*1.5;
+  var endY=cue.y+py*power*1.5;
+  ctx.save();
+  ctx.setLineDash([6,6]);
+  ctx.strokeStyle="rgba(255,255,255,0.7)";
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(MAR+cue.x,MAR+cue.y);
+  ctx.lineTo(MAR+endX,MAR+endY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // arrow head
+  var arrowLen=12;
+  var ax=MAR+endX, ay=MAR+endY;
+  ctx.fillStyle="rgba(255,255,255,0.7)";
+  ctx.beginPath();
+  ctx.moveTo(ax,ay);
+  ctx.lineTo(ax-arrowLen*px-arrowLen*0.3*py,ay-arrowLen*py+arrowLen*0.3*px);
+  ctx.lineTo(ax-arrowLen*px+arrowLen*0.3*py,ay-arrowLen*py-arrowLen*0.3*px);
+  ctx.closePath();
+  ctx.fill();
+  // drag line back
+  ctx.strokeStyle="rgba(255,200,50,0.5)";
+  ctx.lineWidth=1.5;
+  ctx.setLineDash([4,4]);
+  ctx.beginPath();
+  ctx.moveTo(MAR+cue.x,MAR+cue.y);
+  ctx.lineTo(mx,my);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+/* ─── Input ─── */
+function getCanvasPos(e){
+  var rect=canvas.getBoundingClientRect();
+  var scaleX=canvas.width/rect.width;
+  var scaleY=canvas.height/rect.height;
+  var clientX, clientY;
+  if(e.touches){
+    clientX=e.touches[0].clientX;
+    clientY=e.touches[0].clientY;
+  } else {
+    clientX=e.clientX;
+    clientY=e.clientY;
+  }
+  return {x:(clientX-rect.left)*scaleX, y:(clientY-rect.top)*scaleY};
+}
+
+function findCueBall(){
+  for(var i=0;i<balls.length;i++){
+    if(balls[i].cue && !balls[i].potted) return balls[i];
+  }
+  return null;
+}
+
+function onDown(e){
+  e.preventDefault();
+  var pos=getCanvasPos(e);
+  var cue=findCueBall();
+  if(!cue) return;
+  var dx=pos.x-MAR-cue.x, dy=pos.y-MAR-cue.y;
+  if(dx*dx+dy*dy<(R+8)*(R+8)){
+    dragging=true;
+    dragStartX=pos.x;
+    dragStartY=pos.y;
+    dragCurX=pos.x;
+    dragCurY=pos.y;
+    window.sim.pause();
+  }
+}
+
+function onMove(e){
+  if(!dragging) return;
+  e.preventDefault();
+  var pos=getCanvasPos(e);
+  dragCurX=pos.x;
+  dragCurY=pos.y;
+  render();
+}
+
+function onUp(e){
+  if(!dragging) return;
+  e.preventDefault();
+  dragging=false;
+  var cue=findCueBall();
+  if(!cue) { window.sim.resume(); return; }
+  var dx=dragStartX-dragCurX, dy=dragStartY-dragCurY;
+  var dist=Math.sqrt(dx*dx+dy*dy);
+  var maxPower=1500;
+  var power=Math.min(dist,300)/300;
+  if(dist<3){
+    window.sim.resume();
+    return;
+  }
+  var speed=power*maxPower;
+  var vx=(dx/dist)*speed, vy=(dy/dist)*speed;
+  window.sim.shoot(vx,vy);
+  window.sim.resume();
+}
+
+canvas.addEventListener("mousedown",onDown);
+canvas.addEventListener("mousemove",onMove);
+canvas.addEventListener("mouseup",onUp);
+canvas.addEventListener("mouseleave",onUp);
+canvas.addEventListener("touchstart",onDown,{passive:false});
+canvas.addEventListener("touchmove",onMove,{passive:false});
+canvas.addEventListener("touchend",onUp,{passive:false});
+
+/* ─── Rack setup ─── */
+function buildRack(){
+  var arr=[];
+  // cue ball
+  arr.push({x:W*0.25, y:H/2, cue:true, color:"#f5f5f5", num:0});
+  // rack position
+  var rx=W*0.73, ry=H/2;
+  var d=R*2.05;
+  var rows=[
+    [{num:1,dy:0}],
+    [{num:3,dy:-d*0.866},{num:2,dy:d*0.866}],
+    [{num:5,dy:-d*1.732},{num:8,dy:0},{num:4,dy:d*1.732}],
+    [{num:7,dy:-d*2.598},{num:6,dy:-d*0.866},{num:9,dy:d*0.866},{num:10,dy:d*2.598}],
+    [{num:12,dy:-d*3.464},{num:11,dy:-d*1.732},{num:14,dy:0},{num:13,dy:d*1.732},{num:15,dy:d*3.464}],
+  ];
+  var ci=1;
+  for(var r=0;r<rows.length;r++){
+    for(var c=0;c<rows[r].length;c++){
+      var item=rows[r][c];
+      arr.push({
+        x:rx+r*d*0.866+1,
+        y:ry+item.dy,
+        cue:false,
+        color:BALL_COLORS[item.num],
+        num:item.num,
+      });
+    }
+  }
+  window.sim.reset(arr);
+}
+
+document.getElementById("btnReset").addEventListener("click",buildRack);
+
+/* ─── Animation loop ─── */
+var lastTime=0;
+function requestLoop(){
+  lastTime=performance.now();
+  animate();
+}
+
+function animate(){
+  if(!running) return;
+  var now=performance.now();
+  var dt=(now-lastTime)/1000;
+  lastTime=now;
+  if(dt>0.1) dt=0.1; // clamp large gaps
+  window.sim.step(dt);
+  requestAnimationFrame(animate);
+}
+
+/* ─── Init ─── */
+buildRack();
+requestLoop();
+
+})();
+</script>
+</body>
+</html>

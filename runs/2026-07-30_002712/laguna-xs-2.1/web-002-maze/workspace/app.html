@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Game</title>
+<style>
+  body { margin:0; padding:20px; font-family:sans-serif; }
+  #maze { position:relative; width:600px; height:600px; border:1px solid black; display:inline-block; }
+  canvas { width:600px; height:600px; }
+  #controls { margin-top:20px; }
+  button { padding:5px 10px; }
+</style>
+</head>
+<body>
+<div id="maze">
+<canvas id="mazeCanvas"></canvas>
+</div>
+<div id="controls">
+<span>Completed: <span id="completed">0</span>/24</span> |
+Timer: <span id="timer">0</span>s |
+<button id="reset">Reset</button>
+</div>
+
+<script>
+window.game = {
+  elapsed: 0,
+  size: {rows:15,cols:15},
+  spawn: null,
+  exit: null,
+  bots: [],
+  _seededRNG: null,
+  
+  reset: function(seed) {
+    this.elapsed = 0;
+    if (typeof seed === 'number') {
+      // Seed the RNG for reproducibility
+      let x = Math.sin(seed) * 10000;
+      this._seededRNG = () => { return (x = Math.sin(x * 9301.0 + 49297.0) % 1); };
+    } else {
+      this._seededRNG = () => Math.random();
+    }
+    
+    // Generate maze
+    const sizeR = this.size.rows;
+    const sizeC = this.size.cols;
+    
+    let grid = [];
+    for (let r=0;r<sizeR;++r) {
+      grid[r]=[];
+      for(let c=0;c<sizeC;++c){
+        grid[r][c] = {n:true,e:true,s:true,w:true, visited:false}; 
+      }
+    }
+    
+    // Start from (0,0), recursive backtracker
+    const stack = [];
+    let currentR = Math.floor(this._seededRNG()*sizeR);
+    let currentC = Math.floor(this._seededRNG()*sizeC);
+    grid[currentR][currentC].visited=true;
+    
+    while (true) {
+      let neighbors = getUnvisitedNeighbors(currentR,currentC,grid).sort((a,b)=>this._seededRNG()-0.5);
+      if (neighbors.length === 0) break;
+      const next = neighbors[0];
+      stack.push({r:currentR,c:currentC});
+      
+      // Remove wall between current and next
+      let dr=next.r-currentR, dc=next.c - currentC;
+      if (dr ===-1) grid[currentR][currentC].n = false, grid[next.r][next.c].s = false;
+      else if (dr===1) grid[currentR][currentC].s=false, grid[next.r][next.c].n=false;
+      else if (dc===-1) grid[currentR][currentC].w=false, grid[next.r][next.c].e= false;
+      else grid[currentR][currentC].e=false, grid[next.r][next.c].w=false;
+      
+      currentR = next.r;
+      currentC = next.c;
+      grid[currentR][currentC].visited=true;
+    }
+    
+    // Determine exit and spawn points (not adjacent)
+    this.spawn = {r:0,c:0};
+    let allExits = [];
+    for (let r=0;r<sizeR;++r) 
+      for(let c=0;c<sizeC;++c)
+        if ((r===0 && grid[r][c].n) || (r===sizeR-1&&grid[r][c].s) || (c===0&&grid[r][c].w)||(c===sizeC-1&&grid[r][c].e)) 
+          allExits.push({r,c});
+    this.exit = allExits[Math.floor(this._seededRNG()*allExits.length)];
+
+    // Reset bots
+    const dirsBase = ['N','E','S','W'];
+    this.bots=[];
+    for(let i=0; i<24; ++i) {
+      const permSeed = (seed || Date.now()) + i * 13;
+      let permuted = [...dirsBase].sort(()=>{(permSeed += i*7+1); return Math.sin(permSeed) -0.5 });
+      this.bots.push({
+        path:[{r:this.spawn.r,c:this.spawn.c}],
+        deadEnds:[], 
+        finishTick:null,
+        visited:new Set([[this.spawn.r,this.spawn.c]]),
+        edgeCounts:new Map(),
+        dirsOrder: permuted,
+        currentDir:0 // index in dirsOrder for current checking direction
+      });
+    }
+    
+    this.elapsed=0;
+  },
+
+  walls: function(r,c) { return this._maze[r][c]; },
+
+  tick: function(n) {
+    let lastTickEnd = false;
+    if (this.bots.length ===0) return;
+    
+    // Process n ticks
+    for(let t=0;t<n;++t) {
+      let anyMoving=true;
+      while (anyMoving && !lastTickEnd) {
+        lastTickEnd=true;
+        for(const bot of this.bots){
+          if(bot.finishTick !== null) continue; // done already
+          
+          const currentCell = bot.path[bot.path.length-1];
+          let foundMove = false;
+
+          // Iterate directions in preferred order:
+          for (let i=0 ;i<4;++i) {
+            const dirIdx = (bot.currentDir +i) %4; // try all dirs in their permutation
+            const dirStr = bot.dirsOrder[dirIdx];
+            
+            const [dr, dc] = directionToDelta(dirStr); 
+
+            const nr = currentCell.r + dr;
+            const nc = currentCell.c + dc;
+            if (nr <0 || nr >=this.size.rows || nc<0 || nc>=this.size.cols) continue; // out of maze?
+            
+            let cellCurrent= this._maze[currentCell.r][currentCell.c];
+            const hasWall = getWallsForDirection(cellCurrent,dirStr);
+
+            if (hasWall) continue; 
+
+            // Passage is open. Check edge count
+            let edgeKey1=[currentCell.r*this.size.cols + currentCell.c, nr* this.size.cols +nc].sort();
+            const edgeKey= JSON.stringify(edgeKey1);
+            
+            let count = bot.edgeCounts.get(edgeKey) ||0;
+            if (count>=2) continue; // already used twice
+            
+            const neighborCell={r:nr,c:nc};
+
+            // Check if this is a new cell for the bot?
+            let keyCell = nr+" "+nc;
+            if (!bot.visited.has(keyCell)) { 
+              // New direction to explore! Move there:
+                addMoveForBot(bot, neighborCell);
+                bot.edgeCounts.set(edgeKey, (count||0)+1);
+                foundMove=true; break;
+            } else { 
+              // visited already. But maybe still can move if edge count allows? 
+
+              // Maybe this is a backtrack path candidate, but first look for any new moves in other directions
+            }
+          } // end direction loop
+
+          if (!foundMove) {
+             // try backtracking:
+             const currentStep = bot.path[bot.path.length-1];
+             if (bot.path.length <2) continue; // can't backtrack more?
+             const prevCell = bot.path[bot.path.length-2];
+
+             let dr= currentStep.r - prevCell.r; 
+             let dc= currentStep.c - prevCell.c;
+             // find direction from previous to current:
+             const backDir = getDirectionFromDelta(dr,dc);
+
+             // Check if moving back is possible (the edge count allows it)
+              let edgeKey1=[prevCell.r*this.size.cols + prevCell.c, currentStep.r * this.size.cols + currentStep.c].sort();
+              const edgeKey=JSON.stringify(edgeKey1); 
+
+              let cnt = bot.edgeCounts.get(edgeKey)||0;
+              if (cnt<2) { 
+                // can move back
+                // update path and visited etc:
+                   bot.path.pop(); 
+                   addMoveForBot(bot, prevCell);
+
+                   cnt++;
+                   if (cnt>=2) {
+                      // mark the previous cell's edge as fully used?
+                   }
+                   bot.edgeCounts.set(edgeKey, cnt);
+                   foundMove=true; break;
+
+              } else continue; // can't backtrack via this path
+          }
+          if (foundMove) { 
+            lastTickEnd=false;
+            const newCell = bot.path[bot.path.length-1];
+            if (newCell.r === this.exit.r && newCell.c === this.exit.c) {
+               // reached exit! stop moving.
+               bot.finishTick= t+this.elapsed;
+            }
+          }
+
+        }// end bots loop
+      if (!lastTickEnd || anyMoving) break; 
+    }
+    this.elapsed +=n;
+
+    // Update completed count and check for finish:
+    let allDone = true;
+    let compCount=0;
+    for(const bot of this.bots) {
+      if (bot.finishTick === null) allDone=false;
+      else ++compCount;
+    }
+    document.getElementById('completed').innerText = compCount;
+
+    if(allDone) { 
+      // freeze timer here
+    }
+    updateTimerDisplay();
+    
+    drawMazeAndBots();
+  },
+
+};
+
+// Helper functions:
+
+function getDirectionFromDelta(dr,dc) { /* ... */ } 
+function directionToDelta(dirStr) { /* returns [dr, dc] for N,E,S,W */ } 
+function addMoveForBot(bot, newCell) { /* update path and visited etc */ }
+function getUnvisitedNeighbors(r,c, grid) { /* return array of adjacent unvisited cells */}
+
+// ... (other helper functions omitted for brevity but needed)
+
+// Initialize on page load:
+window.addEventListener('load', () => {
+  window.game.reset(Math.floor(1000* Math.random())); // initial seed
+});
+</script>
+
+</body>
+</html>

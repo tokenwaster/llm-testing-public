@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mini Spreadsheet</title>
+<style>
+  :root { --bd:#c8ccd4; --hd:#eef1f6; --sel:#3b82f6; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: #f7f8fa;
+    font-family: -apple-system, "Segoe UI", Arial, sans-serif; color: #1b1f24;
+  }
+  #app { min-width: 600px; min-height: 400px; width: 900px; max-width: 100%; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  #grid {
+    display: grid;
+    grid-template-columns: 44px repeat(10, 1fr);
+    gap: 0; border: 1px solid var(--bd); background: var(--bd);
+    width: 100%;
+  }
+  .hd {
+    background: var(--hd); font-size: 12px; font-weight: 600; text-align: center;
+    padding: 6px 2px; border-right: 1px solid var(--bd); border-bottom: 1px solid var(--bd);
+    user-select: none;
+  }
+  .cellwrap { border-right: 1px solid var(--bd); border-bottom: 1px solid var(--bd); background: #fff; }
+  input.cell {
+    width: 100%; height: 26px; border: 0; outline: 0; padding: 2px 5px;
+    font: 13px/1.4 "Segoe UI", Arial, sans-serif; background: transparent; color: inherit;
+  }
+  input.cell:focus { box-shadow: inset 0 0 0 2px var(--sel); background: #fff; }
+  input.cell.err { color: #b91c1c; }
+  #bar { margin: 14px 0 8px; display: flex; gap: 10px; align-items: center; }
+  button {
+    font: 13px/1 "Segoe UI", Arial, sans-serif; padding: 8px 14px; cursor: pointer;
+    border: 1px solid var(--bd); border-radius: 6px; background: #fff;
+  }
+  button:hover { background: var(--hd); }
+  #csv { width: 100%; height: 150px; font: 12px/1.4 Consolas, monospace; padding: 8px;
+         border: 1px solid var(--bd); border-radius: 6px; }
+  .hint { font-size: 12px; color: #5b6472; margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <div id="grid"></div>
+  <div id="bar">
+    <button id="export">Export CSV</button>
+    <button id="clear">Clear All</button>
+  </div>
+  <textarea id="csv" spellcheck="false" placeholder="CSV output appears here"></textarea>
+  <p class="hint">Type a value or a formula like <code>=A1*2+(B2-3)/4</code>. Enter or click away commits.</p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var COLS = "ABCDEFGHIJ".split("");
+  var NROWS = 10;
+  var REFS = [];
+  var i, r, c;
+  for (r = 1; r <= NROWS; r++) {
+    for (c = 0; c < COLS.length; c++) REFS.push(COLS[c] + r);
+  }
+
+  var raw = Object.create(null);   // ref -> raw text
+  var disp = Object.create(null);  // ref -> displayed string
+  REFS.forEach(function (ref) { raw[ref] = ""; disp[ref] = ""; });
+
+  function isRef(name) {
+    var m = /^([A-Za-z])([0-9]{1,2})$/.exec(name);
+    if (!m) return null;
+    var col = m[1].toUpperCase();
+    var row = parseInt(m[2], 10);
+    if (COLS.indexOf(col) === -1) return null;
+    if (!(row >= 1 && row <= NROWS)) return null;
+    return col + row;
+  }
+
+  /* ---------------- tokenizer + parser ---------------- */
+
+  function Err(code) { this.code = code; }
+
+  function tokenize(src) {
+    var toks = [], p = 0;
+    while (p < src.length) {
+      var ch = src[p];
+      if (ch === " " || ch === "\t") { p++; continue; }
+      if ("+-*/()".indexOf(ch) !== -1) { toks.push({ t: ch }); p++; continue; }
+      var m = /^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)/.exec(src.slice(p));
+      if (m) { toks.push({ t: "num", v: parseFloat(m[0]) }); p += m[0].length; continue; }
+      m = /^[A-Za-z]+[0-9]*/.exec(src.slice(p));
+      if (m) {
+        var ref = isRef(m[0]);
+        if (!ref) throw new Err("#ERR");
+        toks.push({ t: "ref", v: ref });
+        p += m[0].length;
+        continue;
+      }
+      throw new Err("#ERR");
+    }
+    return toks;
+  }
+
+  // resolve: ref -> number (may throw Err)
+  function parseAndEval(src, resolve) {
+    var toks = tokenize(src), pos = 0;
+
+    function peek() { return toks[pos]; }
+    function eat(t) {
+      var tok = toks[pos];
+      if (!tok || tok.t !== t) throw new Err("#ERR");
+      pos++;
+      return tok;
+    }
+
+    function expr() {
+      var v = term();
+      var tok;
+      while ((tok = peek()) && (tok.t === "+" || tok.t === "-")) {
+        pos++;
+        var rhs = term();
+        v = tok.t === "+" ? v + rhs : v - rhs;
+      }
+      return v;
+    }
+    function term() {
+      var v = factor();
+      var tok;
+      while ((tok = peek()) && (tok.t === "*" || tok.t === "/")) {
+        pos++;
+        var rhs = factor();
+        v = tok.t === "*" ? v * rhs : v / rhs;
+      }
+      return v;
+    }
+    function factor() {
+      var tok = peek();
+      if (!tok) throw new Err("#ERR");
+      if (tok.t === "-") { pos++; return -factor(); }
+      if (tok.t === "+") { pos++; return factor(); }
+      if (tok.t === "num") { pos++; return tok.v; }
+      if (tok.t === "ref") { pos++; return resolve(tok.v); }
+      if (tok.t === "(") {
+        pos++;
+        var v = expr();
+        eat(")");
+        return v;
+      }
+      throw new Err("#ERR");
+    }
+
+    if (toks.length === 0) throw new Err("#ERR");
+    var out = expr();
+    if (pos !== toks.length) throw new Err("#ERR");
+    if (typeof out !== "number" || !isFinite(out)) throw new Err("#ERR");
+    return out;
+  }
+
+  /* ---------------- evaluation ---------------- */
+
+  function fmtNum(n) {
+    if (!isFinite(n)) return "#ERR";
+    var rounded = Math.round(n * 1e10) / 1e10;
+    if (Object.is(rounded, -0)) rounded = 0;
+    return String(rounded);
+  }
+
+  // value kinds: {k:'empty'} {k:'num',n} {k:'text',s} {k:'err',e}
+  function recalc() {
+    var cache = Object.create(null);
+    var inProgress = Object.create(null);
+
+    function compute(ref) {
+      if (cache[ref]) return cache[ref];
+      if (inProgress[ref]) return { k: "err", e: "#CYCLE" }; // not cached: cycle detected
+      inProgress[ref] = true;
+      var text = raw[ref] == null ? "" : String(raw[ref]);
+      var val;
+      if (text.charAt(0) === "=") {
+        try {
+          var n = parseAndEval(text.slice(1), function (dep) {
+            var dv = compute(dep);
+            if (dv.k === "err") throw new Err(dv.e);
+            if (dv.k === "empty") return 0;
+            if (dv.k === "num") return dv.n;
+            throw new Err("#ERR"); // non-numeric text in a formula
+          });
+          val = { k: "num", n: n };
+        } catch (ex) {
+          val = { k: "err", e: ex instanceof Err ? ex.code : "#ERR" };
+        }
+      } else if (text.trim() === "") {
+        val = { k: "empty" };
+      } else if (/^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/.test(text.trim())) {
+        val = { k: "num", n: parseFloat(text.trim()) };
+      } else {
+        val = { k: "text", s: text };
+      }
+      delete inProgress[ref];
+      cache[ref] = val;
+      return val;
+    }
+
+    REFS.forEach(function (ref) {
+      var v = compute(ref);
+      disp[ref] =
+        v.k === "empty" ? "" :
+        v.k === "num" ? fmtNum(v.n) :
+        v.k === "text" ? v.s : v.e;
+    });
+    render();
+  }
+
+  /* ---------------- DOM ---------------- */
+
+  var inputs = Object.create(null);
+  var editing = null;
+
+  function render() {
+    REFS.forEach(function (ref) {
+      var el = inputs[ref];
+      if (!el) return;
+      if (ref !== editing) el.value = disp[ref];
+      var bad = disp[ref] === "#ERR" || disp[ref] === "#CYCLE";
+      el.classList.toggle("err", bad && ref !== editing);
+    });
+  }
+
+  function build() {
+    var grid = document.getElementById("grid");
+    var frag = document.createDocumentFragment();
+
+    var corner = document.createElement("div");
+    corner.className = "hd";
+    corner.textContent = "";
+    frag.appendChild(corner);
+    COLS.forEach(function (col) {
+      var h = document.createElement("div");
+      h.className = "hd";
+      h.textContent = col;
+      frag.appendChild(h);
+    });
+
+    for (var row = 1; row <= NROWS; row++) {
+      var rh = document.createElement("div");
+      rh.className = "hd";
+      rh.textContent = String(row);
+      frag.appendChild(rh);
+      for (var ci = 0; ci < COLS.length; ci++) {
+        var ref = COLS[ci] + row;
+        var wrap = document.createElement("div");
+        wrap.className = "cellwrap";
+        var inp = document.createElement("input");
+        inp.type = "text";
+        inp.className = "cell";
+        inp.id = "cell-" + ref;
+        inp.setAttribute("data-ref", ref);
+        inp.autocomplete = "off";
+        inp.spellcheck = false;
+        wrap.appendChild(inp);
+        frag.appendChild(wrap);
+        inputs[ref] = inp;
+        attach(inp, ref);
+      }
+    }
+    grid.appendChild(frag);
+  }
+
+  function attach(inp, ref) {
+    inp.addEventListener("focus", function () {
+      editing = ref;
+      inp.value = raw[ref];
+      inp.classList.remove("err");
+    });
+    inp.addEventListener("blur", function () {
+      commit(ref, inp.value);
+    });
+    inp.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commit(ref, inp.value);
+        inp.blur();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        inp.value = raw[ref];
+        inp.blur();
+      }
+    });
+  }
+
+  function commit(ref, text) {
+    raw[ref] = text == null ? "" : String(text);
+    if (editing === ref) editing = null;
+    recalc();
+  }
+
+  /* ---------------- CSV ---------------- */
+
+  function csvField(s) {
+    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  function exportCSV() {
+    var lines = [];
+    for (var row = 1; row <= NROWS; row++) {
+      var cells = COLS.map(function (col) { return csvField(disp[col + row]); });
+      lines.push(cells.join(","));
+    }
+    document.getElementById("csv").value = lines.join("\n");
+  }
+
+  /* ---------------- API ---------------- */
+
+  window.sheet = {
+    set: function (ref, text) {
+      var k = isRef(String(ref));
+      if (!k) throw new Error("Not a cell: " + ref);
+      raw[k] = text == null ? "" : String(text);
+      if (editing === k) editing = null;
+      var el = inputs[k];
+      if (el && document.activeElement === el) el.blur();
+      recalc();
+      return disp[k];
+    },
+    get: function (ref) {
+      var k = isRef(String(ref));
+      if (!k) throw new Error("Not a cell: " + ref);
+      return disp[k];
+    },
+    raw: function (ref) {
+      var k = isRef(String(ref));
+      if (!k) throw new Error("Not a cell: " + ref);
+      return raw[k];
+    },
+    exportCSV: exportCSV
+  };
+
+  /* ---------------- boot ---------------- */
+
+  build();
+  document.getElementById("export").addEventListener("click", exportCSV);
+  document.getElementById("clear").addEventListener("click", function () {
+    REFS.forEach(function (ref) { raw[ref] = ""; });
+    editing = null;
+    document.getElementById("csv").value = "";
+    recalc();
+  });
+  recalc();
+})();
+</script>
+</body>
+</html>

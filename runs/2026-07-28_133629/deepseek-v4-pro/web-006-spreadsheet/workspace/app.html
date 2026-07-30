@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Spreadsheet</title>
+    <style>
+        body {
+            font-family: monospace;
+            margin: 10px;
+        }
+        .spreadsheet {
+            display: inline-block;
+        }
+        table {
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+        th, td {
+            border: 1px solid #aaa;
+            padding: 0;
+            margin: 0;
+            min-width: 70px;
+            height: 26px;
+        }
+        th {
+            background: #f0f0f0;
+            font-weight: normal;
+            text-align: center;
+            font-size: 13px;
+        }
+        input {
+            width: 100%;
+            height: 100%;
+            border: none;
+            padding: 2px 5px;
+            box-sizing: border-box;
+            font-family: monospace;
+            font-size: 13px;
+            text-align: right;
+            background: transparent;
+        }
+        input:focus {
+            outline: 2px solid #4a90d8;
+            background: #fff;
+            position: relative;
+            z-index: 1;
+        }
+        .controls {
+            margin-top: 12px;
+        }
+        #export {
+            padding: 5px 12px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        #csv {
+            margin-top: 8px;
+            width: 600px;
+            height: 80px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .app-container {
+            min-width: 600px;
+            min-height: 400px;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <div class="spreadsheet">
+            <table>
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>A</th><th>B</th><th>C</th><th>D</th><th>E</th>
+                        <th>F</th><th>G</th><th>H</th><th>I</th><th>J</th>
+                    </tr>
+                </thead>
+                <tbody id="grid-body"></tbody>
+            </table>
+        </div>
+        <div class="controls">
+            <button id="export">Export CSV</button>
+            <textarea id="csv" readonly></textarea>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+            const ROWS = [1,2,3,4,5,6,7,8,9,10];
+            const allIds = [];
+            for (let row of ROWS) {
+                for (let col of COLS) {
+                    allIds.push(col + row);
+                }
+            }
+
+            // Cell data
+            const cells = {};
+            const dependents = new Map();
+            for (let id of allIds) {
+                cells[id] = {
+                    raw: '',
+                    deps: new Set(),
+                    value: '',
+                    dirty: false,
+                    computed: false
+                };
+                dependents.set(id, new Set());
+            }
+
+            // Build table body
+            const tbody = document.getElementById('grid-body');
+            for (let row of ROWS) {
+                const tr = document.createElement('tr');
+                const th = document.createElement('th');
+                th.textContent = row;
+                tr.appendChild(th);
+                for (let col of COLS) {
+                    const id = col + row;
+                    const td = document.createElement('td');
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.id = 'cell-' + id;
+                    input.value = '';
+                    input.title = id;
+                    td.appendChild(input);
+                    tr.appendChild(td);
+                }
+                tbody.appendChild(tr);
+            }
+
+            // Focus tracking
+            let activeCellId = null;
+
+            // Update display of all cells
+            function updateAllDisplay() {
+                for (let id of allIds) {
+                    const input = document.getElementById('cell-' + id);
+                    if (!input) continue;
+                    if (id === activeCellId) {
+                        input.value = cells[id].raw;
+                    } else {
+                        input.value = cells[id].value;
+                    }
+                }
+            }
+
+            // Commit edit from UI
+            function commitEdit(id, newRaw) {
+                activeCellId = null;  // cell lost focus
+                updateRawCell(id, newRaw);
+                updateAllDisplay();
+            }
+
+            // Attach event listeners
+            document.querySelectorAll('input[id^="cell-"]').forEach(input => {
+                const id = input.id.replace('cell-', '');
+                input.addEventListener('focus', () => {
+                    activeCellId = id;
+                    input.value = cells[id].raw;
+                    input.select();
+                });
+                input.addEventListener('blur', () => {
+                    commitEdit(id, input.value);
+                });
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        input.blur();
+                    }
+                });
+            });
+
+            // ---- Core engine ----
+            const inEval = new Set();
+            const evalStack = [];
+
+            function getNumericValue(ref) {
+                const valStr = computeCell(ref);
+                if (valStr === '#ERR' || valStr === '#CYCLE') return NaN;
+                if (valStr === '') return 0;
+                const num = parseFloat(valStr);
+                return isNaN(num) ? 0 : num;
+            }
+
+            function computeCell(id) {
+                const cell = cells[id];
+                if (cell.computed && !cell.dirty) return cell.value;
+
+                if (inEval.has(id)) {
+                    // Cycle detected – find cycle members on the current stack
+                    const cycleStart = evalStack.indexOf(id);
+                    const cycleMembers = evalStack.slice(cycleStart);
+                    for (const cid of cycleMembers) {
+                        cells[cid].value = '#CYCLE';
+                        cells[cid].dirty = false;
+                        cells[cid].computed = true;
+                    }
+                    return '#CYCLE';
+                }
+
+                inEval.add(id);
+                evalStack.push(id);
+                cell.dirty = false;
+
+                if (!cell.raw.startsWith('=')) {
+                    cell.value = cell.raw;
+                    cell.computed = true;
+                } else {
+                    const formula = cell.raw.substring(1).trim();
+                    const depsSet = new Set();
+                    let invalid = false;
+                    formula.replace(/([A-J])(10|[1-9])/gi, (match) => {
+                        const ref = match.toUpperCase();
+                        if (cells[ref]) depsSet.add(ref);
+                        else invalid = true;
+                    });
+                    if (invalid) {
+                        cell.value = '#ERR';
+                        cell.computed = true;
+                    } else {
+                        // Store deps (they will be updated by updateRawCell)
+                        cell.deps = depsSet;
+                        let anyNaN = false;
+                        const numericVals = {};
+                        for (const dep of depsSet) {
+                            const num = getNumericValue(dep);
+                            if (isNaN(num)) { anyNaN = true; break; }
+                            numericVals[dep] = num;
+                        }
+
+                        // Check if cycle detection set this cell while evaluating deps
+                        if (cell.computed) {
+                            inEval.delete(id);
+                            evalStack.pop();
+                            return cell.value;
+                        }
+
+                        if (anyNaN) {
+                            cell.value = '#ERR';
+                            cell.computed = true;
+                        } else {
+                            let expr = formula;
+                            for (const dep of depsSet) {
+                                expr = expr.replace(new RegExp(dep, 'gi'), '(' + numericVals[dep] + ')');
+                            }
+                            try {
+                                const result = eval(expr);
+                                if (typeof result !== 'number' || isNaN(result)) {
+                                    cell.value = '#ERR';
+                                } else {
+                                    cell.value = result.toString();
+                                }
+                            } catch (e) {
+                                cell.value = '#ERR';
+                            }
+                            cell.computed = true;
+                        }
+                    }
+                }
+
+                inEval.delete(id);
+                evalStack.pop();
+                return cell.value;
+            }
+
+            // Dependency graph update and dirty propagation
+            function updateRawCell(id, newRaw) {
+                const cell = cells[id];
+                const oldDeps = cell.deps;
+                for (const dep of oldDeps) {
+                    if (dependents.has(dep)) dependents.get(dep).delete(id);
+                }
+                cell.raw = newRaw;
+
+                let newDeps = new Set();
+                if (newRaw.startsWith('=')) {
+                    const formula = newRaw.substring(1).trim();
+                    formula.replace(/([A-J])(10|[1-9])/gi, (match) => {
+                        const ref = match.toUpperCase();
+                        if (cells[ref]) newDeps.add(ref);
+                    });
+                }
+                cell.deps = newDeps;
+                for (const dep of newDeps) {
+                    if (!dependents.has(dep)) dependents.set(dep, new Set());
+                    dependents.get(dep).add(id);
+                }
+
+                // Mark this cell and all transitive dependents as dirty
+                markDirty(id);
+                recomputeAll();
+            }
+
+            function markDirty(startId) {
+                const queue = [startId];
+                const visited = new Set();
+                while (queue.length) {
+                    const id = queue.shift();
+                    if (visited.has(id)) continue;
+                    visited.add(id);
+                    cells[id].dirty = true;
+                    cells[id].computed = false;
+                    const deps = dependents.get(id);
+                    if (deps) {
+                        for (const depId of deps) {
+                            if (!visited.has(depId)) queue.push(depId);
+                        }
+                    }
+                }
+            }
+
+            function recomputeAll() {
+                const dirtyIds = allIds.filter(id => cells[id].dirty);
+                for (const id of dirtyIds) {
+                    computeCell(id);
+                }
+                updateAllDisplay();
+            }
+
+            // Export CSV
+            document.getElementById('export').addEventListener('click', () => {
+                const lines = [];
+                for (const row of ROWS) {
+                    const rowVals = COLS.map(col => cells[col + row].value);
+                    lines.push(rowVals.join(','));
+                }
+                document.getElementById('csv').value = lines.join('\n');
+            });
+
+            // ---- Public API ----
+            window.sheet = {
+                set: function(id, text) {
+                    updateRawCell(id, text);
+                },
+                get: function(id) {
+                    return cells[id].value;
+                },
+                raw: function(id) {
+                    return cells[id].raw;
+                }
+            };
+
+            // Initialize display
+            updateAllDisplay();
+        })();
+    </script>
+</body>
+</html>

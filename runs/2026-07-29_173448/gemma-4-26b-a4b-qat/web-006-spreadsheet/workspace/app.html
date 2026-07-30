@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Spreadsheet</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        table { border-collapse: collapse; table-layout: fixed; min-width: 600px; min-height: 400px; }
+        th, td { border: 1px solid #ccc; width: 60px; height: 30px; text-align: center; padding: 0; position: relative; }
+        th { background: #f0f0f0; font-size: 12px; color: #666; }
+        td { background: white; padding: 0; }
+        input { width: 100%; height: 100%; border: none; outline: none; padding: 0; margin: 0; text-align: center; font-size: 14px; box-sizing: border-box; }
+        input:focus { background-color: #fffde7; }
+        .controls { margin-bottom: 15px; }
+        #csv { width: 600px; height: 120px; margin-top: 15px; font-family: monospace; }
+        .btn { padding: 8px 16px; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+<div class="controls">
+    <button id="export" class="btn">Export CSV</button>
+</div>
+
+<table id="grid">
+    <thead>
+        <tr id="header-row"></tr>
+    </thead>
+    <tbody id="grid-body"></tbody>
+</table>
+
+<textarea id="csv" readonly placeholder="CSV output will appear here..."></textarea>
+
+<script>
+    const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+    const ROWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+    const rawValues = new Map();
+    const computedValues = new Map();
+    const adj = new Map();
+    const inCycle = new Set();
+    const isError = new Set();
+
+    // Initialization
+    const headerRow = document.getElementById('header-row');
+    const gridBody = document.getElementById('grid-body');
+
+    // Create Header
+    headerRow.appendChild(document.createElement('th')); // Empty top-left
+    COLS.forEach(c => {
+        const th = document.createElement('th');
+        th.textContent = c;
+        headerRow.appendChild(th);
+    });
+
+    // Create Rows
+    for (let r of ROWS) {
+        const tr = document.createElement('tr');
+        // Row header
+        const th = document.createElement('th');
+        th.textContent = r;
+        tr.appendChild(th);
+
+        // Cells
+        for (let c of COLS) {
+            const td = document.createElement('td');
+            const id = `cell-${c}${r}`;
+            const input = document.createElement('input');
+            input.id = id;
+            input.addEventListener('focus', () => {
+                const raw = rawValues.get(id) || "";
+                input.value = raw;
+            });
+            input.addEventListener('blur', () => {
+                rawValues.set(id, input.value);
+                recalculate();
+                input.value = computedValues.get(id) || "";
+            });
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') input.blur();
+            });
+            td.appendChild(input);
+            tr.appendChild(td);
+            rawValues.set(id, "");
+            computedValues.set(id, "");
+            adj.set(id, new Set());
+        }
+        gridBody.appendChild(tr);
+    }
+
+    // --- Logic ---
+
+    function getDeps(formula) {
+        if (!formula.startsWith('=')) return [];
+        const matches = formula.match(/[A-J](?:10|[1-9])/g) || [];
+        return matches.map(m => `cell-${m}`);
+    }
+
+    function findCycles(adjMap) {
+        const cycleSet = new Set();
+        const nodes = Array.from(adjMap.keys());
+
+        function hasCycle(startNode, currNode, path) {
+            const neighbors = adjMap.get(currNode) || new Set();
+            for (const neighbor of neighbors) {
+                if (neighbor === startNode) return true;
+                if (!path.has(neighbor)) {
+                    path.add(neighbor);
+                    if (hasCycle(startNode, neighbor, path)) return true;
+                    path.delete(neighbor);
+                }
+            }
+            return false;
+        }
+
+        for (const node of nodes) {
+            if (hasCycle(node, node, new Set())) {
+                cycleSet.add(node);
+            }
+        }
+        return cycleSet;
+    }
+
+    function shuntingYard(tokens) {
+        const output = [];
+        const stack = [];
+        const precedence = { '+': 1, '-': 1, '*': 2, '/': 2 };
+        for (const token of tokens) {
+            if (token.type === 'NUM' || token.type === 'REF') {
+                output.push(token);
+            } else if (token.type === 'OP') {
+                if (token.val === '(') {
+                    stack.push(token);
+                } else if (token.val === ')') {
+                    while (stack.length > 0 && stack[stack.length - 1].val !== '(') {
+                        output.push(stack.pop());
+                    }
+                    stack.pop();
+                } else {
+                    while (stack.length > 0 && stack[stack.length - 1].val !== '(' && precedence[stack[stack.length - 1].val] >= precedence[token.val]) {
+                        output.push(stack.pop());
+                    }
+                    stack.push(token);
+                }
+            }
+        }
+        while (stack.length > 0) output.push(stack.pop());
+        return output;
+    }
+
+    function evaluatePostfix(postfix, depValues, deps) {
+        const stack = [];
+        for (const token of postfix) {
+            if (token.type === 'NUM') {
+                stack.push(token.val);
+            } else {
+                const b = stack.pop();
+                const a = stack.pop();
+                if (typeof a !== 'number' || typeof b !== 'number' || isNaN(a) || isNaN(b)) throw new Error("ERR");
+                switch (token.val) {
+                    case '+': stack.push(a + b); break;
+                    case '-': stack.push(a - b); break;
+                    case '*': stack.push(a * b); break;
+                    case '/': 
+                        if (b === 0) throw new Error("ERR");
+                        stack.push(a / b); 
+                        break;
+                }
+            }
+        }
+        return stack[0];
+    }
+
+    function recalculate() {
+        // 1. Rebuild dependency graph
+        adj.clear();
+        for (const [id, raw] of rawValues.entries()) {
+            const deps = getDeps(raw);
+            adj.set(id, new Set(deps));
+        }
+
+        // 2. Detect Cycles
+        inCycle.clear();
+        const detectedCycles = findCycles(adj);
+        detectedCycles.forEach(id => inCycle.add(id));
+
+        // 3. Compute values using a memoized DFS (handles transitive dependencies)
+        const memo = new Map();
+        const visiting = new Set();
+        const errorSet = new Set();
+
+        function getVal(id) {
+            if (inCycle.has(id)) return "#CYCLE";
+            if (errorSet.has(id)) return "#ERR";
+            if (memo.has(id)) return memo.get(id);
+            if (visiting.has(id)) return "#CYCLE";
+
+            visiting.add(id);
+            const raw = rawValues.get(id) || "";
+            let result;
+
+            if (raw.startsWith('=')) {
+                const formula = raw.substring(1);
+                const deps = getDeps(raw);
+                const depValues = [];
+                let depError = false;
+
+                for (const d of deps) {
+                    const dv = getVal(d);
+                    if (dv === "#CYCLE" || dv === "#ERR") {
+                        depError = true;
+                        break;
+                    }
+                    depValues.push(dv);
+                }
+
+                if (depError) {
+                    result = "#ERR";
+                } else {
+                    try {
+                        // Tokenize formula
+                        const tokens = formula.match(/[A-J](?:10|[1-9])|[0-9.]+|[+\-*\/()]/g) || [];
+                        const processedTokens = tokens.map(t => {
+                            if (deps.includes(t)) {
+                                const v = depValues[deps.indexOf(t)];
+                                if (typeof v !== 'number' || isNaN(v)) throw new Error();
+                                return { type: 'NUM', val: v };
+                            }
+                            if (/[0-9.]/.test(t)) return { type: 'NUM', val: parseFloat(t) };
+                            return { type: 'OP', val: t };
+                        });
+
+                        const postfix = shuntingYard(processedTokens);
+                        result = evaluatePostfix(postfix, depValues, deps);
+                    } catch (e) {
+                        result = "#ERR";
+                    }
+                }
+            } else {
+                result = raw;
+            }
+
+            if (result === "#ERR") errorSet.add(id);
+            visiting.delete(id);
+            memo.set(id, result);
+            return result;
+        }
+
+        for (const id of rawValues.keys()) {
+            computedValues.set(id, getVal(id));
+        }
+
+        // 4. Update DOM
+        for (const [id, val] of computedValues.entries()) {
+            const el = document.getElementById(id);
+            if (el && document.activeElement !== el) {
+                el.value = val;
+            }
+        }
+    }
+
+    // --- API ---
+    window.sheet = {
+        set(id, text) {
+            rawValues.set(id, text);
+            recalculate();
+            const el = document.getElementById(id);
+            if (el) el.value = computedValues.get(id) || "";
+        },
+        get(id) {
+            const val = computedValues.get(id);
+            return val === undefined ? "" : String(val);
+        },
+        raw(id) {
+            return rawValues.get(id) || "";
+        }
+    };
+
+    // --- UI Events ---
+    document.getElementById('export').addEventListener('click', () => {
+        let csvRows = [];
+        for (let r of ROWS) {
+            let rowData = [];
+            for (let c of COLS) {
+                rowData.push(computedValues.get(`cell-${c}${r}`));
+            }
+            csvRows.push(rowData.join(','));
+        }
+        document.getElementById('csv').value = csvRows.join('\n');
+    });
+
+    // Initial calculation
+    recalculate();
+</script>
+</body>
+</html>

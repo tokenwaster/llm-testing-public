@@ -1,15 +1,3 @@
-"""Re-grade saved results without any model calls — used by the CLI
-(`harness rescore`) and the web control panel (/run and /manage).
-
-Covers all automatic lanes:
-  - pytest / webapp: re-run the checker against the saved workspace
-  - answer: re-match the saved transcript's ANSWER line against the CURRENT
-    meta (so a corrected answer key or tolerance re-scores for free)
-
-The currently-executing run (run.json finished == null) is SKIPPED — its
-results are mid-write, and re-scoring them would race the live run. This
-makes rescore safe to trigger even while a run is active elsewhere.
-"""
 
 import fnmatch
 
@@ -25,15 +13,12 @@ def rescore(selector="*", progress=print, force: bool = False) -> int:
 
 
 def _matches(task_id: str, selector) -> bool:
-    """selector: a list/set of exact task ids, or an fnmatch glob string."""
     if isinstance(selector, (list, set, tuple)):
         return task_id in selector
     return fnmatch.fnmatch(task_id, selector)
 
 
 def _final_response(tdir) -> str | None:
-    """Last model response text from the transcript (what the answer lane
-    graded at run time)."""
     lines = read_jsonl(tdir / "transcript.jsonl")
     text = None
     for d in lines:
@@ -43,7 +28,7 @@ def _final_response(tdir) -> str | None:
 
 
 class RunInProgress(Exception):
-    """A run is executing — rescoring now would corrupt its timings."""
+    pass
 
 
 def _active_run() -> str | None:

@@ -1,10 +1,3 @@
-"""Generator + reference for ctx-012-aggregate-reversals-32k (v0.6 long-context).
-
-Numeric aggregation that punishes skimming: sum the SETTLED movements for ONE
-account among a long ledger, where (a) most lines are other accounts, and (b)
-PENDING and REVERSED lines look identical to settled ones but must be excluded.
-Answer computed by construction.
-"""
 
 import random
 from pathlib import Path

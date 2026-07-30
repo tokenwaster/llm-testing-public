@@ -1,4 +1,3 @@
-"""Small shared helpers: time, hashing, safe JSON file IO, killable subprocesses."""
 
 import hashlib
 import json
@@ -10,12 +9,6 @@ from pathlib import Path
 
 
 def terminate_tree(proc) -> None:
-    """Kill `proc` and every descendant it spawned.
-
-    Must be called while `proc` is still alive: taskkill /T walks the live
-    parent->child snapshot, and orphans keep a stale PPID once the top exits.
-    POSIX kills the process group, so callers pass start_new_session=True.
-    """
     if proc.poll() is not None:
         return
     if os.name == "nt":
@@ -33,8 +26,6 @@ def terminate_tree(proc) -> None:
 
 
 class CappedResult:
-    """returncode is None when the process was killed; `timed_out` tells that
-    apart from a plain non-zero exit."""
 
     def __init__(self, returncode, stdout, stderr, timed_out):
         self.returncode = returncode
@@ -44,12 +35,6 @@ class CappedResult:
 
 
 def run_capped(cmd, timeout: float, **kwargs) -> CappedResult:
-    """subprocess.run(timeout=), except the timeout reaps the whole tree.
-
-    Use anywhere a deadline can fire on a process that spawns others:
-    run(timeout=) kills only the direct child, and a venv python.exe is itself a
-    launcher shim, so the real interpreter survives.
-    """
     kwargs.setdefault("stdout", subprocess.PIPE)
     kwargs.setdefault("stderr", subprocess.PIPE)
     kwargs.setdefault("text", True)
@@ -84,15 +69,6 @@ _HASH_SKIP_DIRS = {"__pycache__", ".pytest_cache"}
 
 
 def hash_dir(path: Path, patterns: tuple[str, ...] = ("*",)) -> str:
-    """Stable content hash of every file under `path` (sorted, recursive).
-
-    Bytecode is NOT content. rglob("*") happily swept __pycache__ in, so simply
-    RUNNING a task's checker (python compiles it) changed the task's identity:
-    33 of v0.5's 39 tasks recorded two or three different hashes for content
-    that never moved, which makes "every result records a hash of the task"
-    worthless for spotting real drift. Skip caches so the hash means what it
-    claims.
-    """
     h = hashlib.sha256()
     files = sorted(p for pat in patterns for p in path.rglob(pat)
                    if p.is_file() and not _HASH_SKIP_DIRS & set(p.parts)
@@ -106,11 +82,6 @@ def hash_dir(path: Path, patterns: tuple[str, ...] = ("*",)) -> str:
 
 
 def robust_rmtree(path, tries: int = 5, delay: float = 0.3) -> bool:
-    """rmtree tolerating Windows file locks and read-only files. A dir can't be
-    removed while any process holds a handle (WinError 32 — a just-exited child,
-    antivirus, an open editor); read-only files raise WinError 5. Clears the
-    read-only bit inline and retries with backoff. True on success, False if
-    still stuck — callers should surface that, not crash the request thread."""
     import os
     import shutil
     import stat
@@ -144,9 +115,6 @@ def read_json(path: Path, default=None):
 
 
 def write_json(path: Path, data) -> None:
-    """Atomic write: readers see either the old file or the new one, never a
-    torn half-write — required now that report regeneration can run while a
-    benchmark is writing results."""
     import os
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -187,14 +155,6 @@ _awake = _threading.local()
 
 @contextmanager
 def keep_awake():
-    """Block SYSTEM sleep for the wrapped work (Windows); no-op elsewhere.
-    Released on exit, or by the OS if the process dies.
-
-    REENTRANT per thread — only the outermost exit releases. Windows' idle
-    timer counts from the last user INPUT, so even a millisecond release
-    between trials means instant sleep on an idle box: the outermost scope
-    must cover the ENTIRE job. State is per-thread — call INSIDE the worker
-    thread."""
     import ctypes
     ES_CONTINUOUS = 0x80000000
     ES_SYSTEM_REQUIRED = 0x00000001
@@ -237,17 +197,6 @@ _PRE = _re.compile(r"<pre\b[^>]*>.*?</pre>", _re.S | _re.I)
 
 
 def strip_output_comments(s: str) -> str:
-    """Strip CSS/JS comments from generated HTML before it ships.
-
-    Applies ONLY outside <pre>: those hold verbatim model output, whose own
-    `/* */` and `//` are the evidence the page exists to show — stripping them
-    silently rewrites what a model produced, and an unbalanced `/*` in one
-    model's code swallows every page element up to the next `*/`.
-
-    Leaves HTML <!-- --> comments alone (ours are the functional navlink/NAV
-    markers), and only treats // as a comment when whitespace precedes it, so
-    URLs (`https://`, `href="//..."`) survive.
-    """
     out, last = [], 0
     for m in _PRE.finditer(s):
         out.append(_strip_css_js(s[last:m.start()]))

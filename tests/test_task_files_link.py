@@ -1,10 +1,3 @@
-"""The task page links each row to the files behind its own numbers.
-
-The link points at the run that produced THAT row — not the model's newest run —
-so stepping down the column compares like with like. /data only ever serves the
-live runs/, so an archived dataset (runs under archive/<ver>/runs) must not show
-the column at all rather than a page of 404s.
-"""
 
 import re
 
@@ -38,7 +31,6 @@ def test_the_link_targets_this_rows_own_run(monkeypatch):
 
 
 def test_a_model_name_needing_escaping_is_quoted(monkeypatch):
-    """Every current name is URL-safe; one with a space or + must not break."""
     html = _page(monkeypatch, config.RUNS_DIR)
     href = re.findall(r'class="filelink" href="([^"]+)"', html)[0]
     assert " " not in href
@@ -46,8 +38,6 @@ def test_a_model_name_needing_escaping_is_quoted(monkeypatch):
 
 
 def test_an_archived_dataset_gets_no_files_column(monkeypatch, tmp_path):
-    """/data serves only the live runs/, so these links could never resolve.
-    (The .filelink CSS still ships in BASE_CSS — it is the link that must go.)"""
     html = _page(monkeypatch, tmp_path / "archive" / "v0.5" / "runs")
     assert 'class="filelink"' not in html
     assert "/data/" not in html

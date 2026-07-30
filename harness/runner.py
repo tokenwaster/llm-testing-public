@@ -1,15 +1,3 @@
-"""The run engine. Sequential by design: local models share one GPU, so
-parallel requests would corrupt timing. Every request/response is written
-verbatim to transcript.jsonl; metrics.json aggregates timing/tokens/cost.
-
-Run layout:
-    runs/<run-id>/run.json                          — run manifest
-    runs/<run-id>/<model>/model_meta.json           — warm-up / cold-start info
-    runs/<run-id>/<model>/<task>/transcript.jsonl
-    runs/<run-id>/<model>/<task>/metrics.json
-    runs/<run-id>/<model>/<task>/score.json
-    runs/<run-id>/<model>/<task>/workspace/         — the model's sandbox
-"""
 
 import shutil
 import time
@@ -26,17 +14,10 @@ from .util import append_jsonl, now_iso, now_ms, write_json
 
 
 class RunInProgress(Exception):
-    """Another run is already executing — starting a second would corrupt both."""
+    pass
 
 
 def active_run() -> str | None:
-    """The run currently executing, from DISK — not from in-process state.
-
-    The job manager's one-at-a-time lock lives in memory, so it only guards its
-    own process; a second server or CLI `harness run` sees "idle" and starts a
-    concurrent run (CPU contention then corrupts the timing budgets — v0.5.9).
-    runs/ is the one thing every process shares, so it is the honest lock.
-    """
     from .util import read_json
     for base in (config.RUNS_DIR, getattr(config, "SCOUTS_DIR", None),
                  getattr(config, "SPECIAL_DIR", None),
@@ -51,19 +32,6 @@ def active_run() -> str | None:
 
 
 def _window_limited() -> dict[str, dict[str, str]]:
-    """{model: {task: reason}} for the cells a bigger WINDOW might rescue, across
-    the live runs/. Both qualifying modes are time-bound — the model just needed
-    more wall-clock:
-
-      * "silence" — legacy rumination_spiral: the claude CLI thought with no
-                    output until the (now retired) no-output guard killed it.
-                    Silence was never a spiral, only a too-tight window.
-      * "timeout" — hit the wall-clock deadline unrecovered (status stayed error
-                    through the last attempt); this is also where claude silence
-                    lands now that the guard is gone.
-
-    A runaway (token ceiling) and a repetition_loop (a real spiral, going in
-    circles) are both EXCLUDED: neither is fixed by more time."""
     from .util import read_json
     out: dict[str, dict[str, str]] = {}
     if not config.RUNS_DIR.is_dir():
@@ -87,16 +55,10 @@ def _window_limited() -> dict[str, dict[str, str]]:
 
 
 def spiral_matrix() -> dict[str, list[str]]:
-    """{model: [task ids]} a wider window might rescue — rumination spirals plus
-    unrecovered timeouts. Feeds the Special window probe (which raises each
-    task's own timeout to the window, so both modes get the extra time). See
-    _window_limited for why runaways are excluded."""
     return {m: sorted(t) for m, t in sorted(_window_limited().items())}
 
 
 def window_reasons() -> dict[str, dict[str, str]]:
-    """Per-cell reason ('spiral' | 'timeout') behind spiral_matrix(), so the
-    special page can label why each cell is in the probe set."""
     return _window_limited()
 
 
@@ -104,15 +66,6 @@ _WINDOW_NEED: dict | None = None
 
 
 def measured_window_need(model: str, task: str) -> float | None:
-    """Seconds this model·task needed to emit its FIRST answer token, as
-    MEASURED by the special/ window probe. None if it was never probed.
-
-    Reporting only — it must NOT gate a retry. That was tried and the very next
-    run disproved it: the probe measured sonnet-4-6 at 1160s on ctx-013 (over
-    the 900s budget), but a live attempt produced its first token at 805s and
-    scored 1.0. Think-time is variable, so one measurement establishes a
-    DATA POINT, never a ceiling, and skipping the retry would have converted
-    that 1.0 into a 0."""
     global _WINDOW_NEED
     if _WINDOW_NEED is None:
         import re
@@ -139,19 +92,6 @@ def measured_window_need(model: str, task: str) -> float | None:
 
 
 def sampling_drift(models=None) -> dict[str, dict]:
-    """{model: {mismatch, mismatch_tasks, unverified, current, total}} — which of
-    a model's CELLS were measured under sampling that no longer applies.
-
-    Per CELL, not per run: a partial re-run must not clear the flag for the tasks
-    it did not touch. Each cell records the exact `sampling_used` that produced
-    it, so this compares that against what the model would send for that task's
-    category today. Re-running a task overwrites its record, so the count falls
-    on its own as work is done — nothing to reset by hand.
-
-    mismatch   = recorded, and different -> definitely stale, re-run these
-    unverified = no record (measured before it was tracked) -> cannot be proven
-    current    = recorded and identical
-    """
     from .registry import load_models
     from .tasks import load_tasks
     from .util import read_json
@@ -187,16 +127,6 @@ def sampling_drift(models=None) -> dict[str, dict]:
 
 
 def turns_matrix() -> dict[str, list[str]]:
-    """{model: [agentic task ids]} where the model FAILED by exhausting the turn
-    budget — status=="max_turns" AND it did not reach a passing score. Feeds the
-    Special turn-budget probe, which re-runs these with a raised max_turns to see
-    whether more steps let the model converge.
-
-    A max_turns run that still PASSED (finished the work, just never emitted a
-    clean stop before the cap) is excluded — the cap didn't cost it anything. A
-    partial score IS included: extra turns might carry it the rest of the way.
-    This is the turn-count analog of _window_limited (time); the two are separate
-    because more time and more turns are different remedies."""
     from .util import read_json
     from . import assess
     thr = assess.load_cfg().get("pass_threshold", 0.8)
@@ -220,30 +150,6 @@ BUDGET_CEILING_FRAC = 0.9
 
 
 def budget_matrix() -> dict[str, list[str]]:
-    """{model: [task ids]} where the TOKEN budget, not the model, ended the attempt.
-
-    A cell qualifies when it ran to the ceiling (error_kind 'runaway') and emitted
-    essentially no visible answer — `tokens_out - reasoning_tokens` at or below
-    BUDGET_MUTE_TOKENS. That is the case a bigger budget might convert: the whole
-    allowance went into the think channel and the model never reached its answer.
-
-    Measured on agents-a1: six consecutive attempts on ctx-013 spent 32,766-32,768
-    of 32,768 tokens reasoning and emitted 1-2 tokens of answer. Scoring that 0.0
-    records "cannot aggregate a ledger" when what was observed is "was not given
-    room to say so".
-
-    Excluded on purpose: a runaway that DID emit a substantial answer (a real
-    repetition loop, or a genuinely clipped reply) — more budget feeds the loop
-    rather than fixing it. The third-party analogue is _window_limited (time) and
-    turns_matrix (steps); budget, time and turns are three different remedies and
-    a cell must qualify for the one it actually needs.
-
-    Also excluded: a runaway with NO token accounting. Older runs record
-    tokens_out/reasoning_tokens as null, and treating a missing count as zero
-    visible tokens classified 20 cells across 9 models as budget-silenced on no
-    evidence at all. Unknown is not the same as muted, so it does not qualify —
-    see _visible_answer.
-    """
     out: dict[str, set] = {}
     if not config.RUNS_DIR.is_dir():
         return {}
@@ -264,12 +170,6 @@ def _model_caps() -> dict[str, int]:
 
 
 def _visible_answer(mfile, cap: int | None = None) -> int | None:
-    """Most visible (non-reasoning) answer tokens any RUNAWAY attempt of this cell
-    produced, or None when the cell did not run away or kept no token accounting.
-
-    None means "cannot tell", and must never collapse to 0 — that is the whole
-    difference between a measured mute and an unrecorded one.
-    """
     from .util import read_json
     d = read_json(mfile, {})
     best = None
@@ -287,8 +187,6 @@ def _visible_answer(mfile, cap: int | None = None) -> int | None:
 
 
 def budget_reasons() -> dict[str, dict[str, str]]:
-    """Per cell, how little answer it managed — so the page can show WHY each cell
-    is in the probe set rather than asserting it."""
     from .util import read_json
     out: dict[str, dict[str, str]] = {}
     matrix = budget_matrix()
@@ -308,8 +206,6 @@ def budget_reasons() -> dict[str, dict[str, str]]:
 
 
 class UsageLimitReached(Exception):
-    """A Claude subscription cap was hit. Unwinds the current task without
-    scoring it (a re-run after the reset fills it in) and pauses the run."""
     def __init__(self, reset_at: float | None = None, reset_hint: str = ""):
         super().__init__("claude subscription usage limit reached")
         self.reset_at = reset_at
@@ -317,14 +213,6 @@ class UsageLimitReached(Exception):
 
 
 class RequestRejected(Exception):
-    """The provider refused the request, so the model never saw the prompt.
-
-    A bad parameter (Moonshot rejects any temperature but 1 for kimi-k3), an
-    unknown model id, or a bad key. Scoring that 0.0 blames the model for our
-    config — kimi-k3 took 55 zeros that way. Unlike a rate limit this is
-    DETERMINISTIC: every remaining task would be refused identically, so the
-    runner drops this task unscored and skips the model rather than burning the
-    whole suite on the same 4xx."""
 
     def __init__(self, message: str, kind: str = "request_rejected") -> None:
         super().__init__(message)
@@ -332,14 +220,6 @@ class RequestRejected(Exception):
 
 
 class RateLimited(Exception):
-    """The provider rate-limited us and the task never got to run.
-
-    Same reasoning as UsageLimitReached, different cause: this is OUR access
-    being throttled, not the model failing. Scoring it 0.0 would put a
-    capability failure on a model that never got a turn - kimi-k3 scored 1.0 on
-    every task it reached while landing 0.25 raw, purely because its provider
-    was busy. So the task is dropped unscored and a re-run fills it in.
-    """
     def __init__(self, message: str = "", retry_after: float | None = None):
         super().__init__(message or "provider rate limit")
         self.detail = message
@@ -362,13 +242,30 @@ AGENT_SYSTEM_PROMPT = (
 )
 
 
+def _cli_effort_default() -> str | None:
+    from pathlib import Path as _P
+    import json as _json
+    import os as _os
+    env = _os.environ.get("CLAUDE_EFFORT_LEVEL")
+    if env:
+        return env
+    for cand in (config.ROOT / ".claude" / "settings.json",
+                 _P.home() / ".claude" / "settings.json"):
+        try:
+            d = _json.loads(cand.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        lvl = d.get("effortLevel")
+        if lvl:
+            return str(lvl)
+    return None
+
+
 def new_run_id() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
 
 def env_snapshot() -> dict:
-    """Hardware/software fingerprint stored in every run manifest — cross-date
-    speed comparisons are only meaningful on a known-identical rig."""
     import platform
     import subprocess
     env = {"os": platform.platform(), "python": platform.python_version(),
@@ -408,9 +305,6 @@ class TaskRunner:
     def warm_up(self, preload_ms: float | None = None,
                 unloaded_others: bool = False,
                 model_info: dict | None = None) -> dict:
-        """One throwaway ping so a JIT-loaded local model doesn't pollute the
-        first timed task. When pre-loaded via lms, load time arrives as
-        preload_ms and the ping is just a warm check."""
         t0 = now_ms()
         try:
             self.adapter.chat([{"role": "user", "content": "Reply with exactly: OK"}],
@@ -432,7 +326,6 @@ class TaskRunner:
 
     def _attempt(self, task_dir: Path, messages: list[dict], system: str,
                  tools: list[dict] | None, timeout_s: int, n: int) -> tuple[ChatResult | None, dict]:
-        """One request. Returns (result_or_None, attempt_record)."""
         self._log(task_dir, "request", {
             "attempt": n, "n_messages": len(messages),
             "roles": [m["role"] for m in messages],
@@ -480,8 +373,6 @@ class TaskRunner:
                            system: str, tools: list[dict] | None,
                            attempts: list[dict],
                            validate=None) -> ChatResult | None:
-        """Retry loop. `validate(res) -> str|None` returns an error string for
-        format failures (which also consume an attempt — the clock never lies)."""
         runaway_retries = 0
         for n in range(1, task.max_retries + 2):
             if self._cancelled():
@@ -594,6 +485,9 @@ class TaskRunner:
             "reasoning_tokens": reasoning_tokens,
             "sampling_used": self.model.sampling_payload(task.category),
             "sampling_profile": self.model.resolved_sampling(task.category)[1],
+            "effort_used": (self.model.effort_as_tested
+                            if self.model.effort_settable else None),
+            "thinking_off": self.model.thinking_off or None,
             "cost_usd": cost_usd, "cost_source": cost_source,
             "served_by": served_by or None,
             "gen_tokens_per_sec": (round(tokens_out / (gen_ms / 1000), 2)
@@ -641,8 +535,6 @@ class TaskRunner:
 
     def _run_agentic_cli(self, task: Task, task_dir: Path, workspace: Path,
                          attempts: list[dict]) -> tuple[int, str, str]:
-        """Tier-2 via Claude Code's own tools; one `claude -p` invocation
-        (cwd = workspace) is the whole episode."""
         from .adapters import AdapterError
         self._log(task_dir, "request", {
             "attempt": 1, "n_messages": 1, "roles": ["user"],
@@ -729,9 +621,6 @@ def _sum_tokens(attempts: list[dict], key: str) -> int | None:
 
 
 def _failure_mode(attempts: list[dict], status: str) -> str | None:
-    """Coarse label for why a task ended badly, for reporting. None when the
-    final attempt succeeded (a task that ran away once then recovered is not
-    tagged)."""
     if status == "max_turns":
         return "max_turns"
     if not attempts:
@@ -752,20 +641,11 @@ _CTX_CHUNK = 16384
 
 
 def _ctx_bucket(need: int) -> int:
-    """Round a needed context up to the next 16k chunk. Fine enough that a 64k
-    task doesn't get loaded in a 128k window (which would needlessly spill), yet
-    coarse enough that the many ~34k short tasks share one load."""
     import math
     return max(_CTX_CHUNK, math.ceil(need / _CTX_CHUNK) * _CTX_CHUNK)
 
 
 def context_buckets(model: Model, tasks: list[Task]) -> list[tuple]:
-    """Group tasks by the context window they need, ascending. A local run then
-    loads the model once per group at the smallest window that serves it, so
-    short-context tasks stay resident in VRAM and run at full speed while only
-    the genuinely large-context tasks pay the big-window (and, past the card, the
-    shared-memory-spill) cost. Returns [(ctx, [tasks]), ...] ascending; the yaml
-    context_length caps every bucket. Deterministic (sorted) for repeatability."""
     cap = model.context_length or 0
     groups: dict[int, list] = {}
     for t in tasks:
@@ -781,8 +661,6 @@ _VRAM_MB_CACHE = "unset"
 
 
 def _gpu_vram_mb():
-    """Total GPU VRAM in MiB via nvidia-smi (a leaf query), or None when there's
-    no NVIDIA GPU / nvidia-smi. Cached for the process."""
     global _VRAM_MB_CACHE
     if _VRAM_MB_CACHE != "unset":
         return _VRAM_MB_CACHE
@@ -802,11 +680,6 @@ def _gpu_vram_mb():
 
 
 def _bucket_offload(fp: dict | None, ctx: int, vram_mb) -> str:
-    """'max' when the model + this context's KV comfortably fit VRAM — force
-    every layer onto the GPU (fast). 'auto' when it would overflow, so LM Studio
-    parks the excess on the CPU (slow, ~8 tok/s, but it COMPLETES) instead of
-    '--gpu max' forcing a shared-memory spill to ~0.03 tok/s that hangs the whole
-    machine. 'auto' too when we can't measure — the safe default never spills."""
     if not fp or not vram_mb:
         return "auto"
     need_gb = fp["weights_gb"] + fp["kv_fixed_gb"] + fp["kv_per_tok_gb"] * ctx
@@ -815,15 +688,6 @@ def _bucket_offload(fp: dict | None, ctx: int, vram_mb) -> str:
 
 
 def load_plan(model: Model, tasks: list[Task], footprint=None, vram_mb=None) -> list[tuple]:
-    """Ordered [(ctx, gpu_offload, [tasks])] for a local run.
-
-    Starts from context_buckets, then COALESCES every bucket that fits VRAM
-    ('max') into a single load at the largest fitting context — so a small model
-    that fits even its biggest context loads ONCE, not once per bucket (e4b was
-    reloading 5x for nothing). Buckets that overflow stay separate ('auto'), each
-    at its own context, so an oversized task isn't loaded at a needlessly larger
-    window (which would offload more to the CPU and run slower). Ascending by
-    load context; the coalesced 'max' group (if any) is the small-context one."""
     buckets = context_buckets(model, tasks)
     max_tasks, max_ctx, groups = [], 0, []
     for ctx, g in buckets:
@@ -839,9 +703,6 @@ def load_plan(model: Model, tasks: list[Task], footprint=None, vram_mb=None) -> 
 
 
 def _stamp_load_plan(meta_path, plan: list[tuple]) -> None:
-    """Record the context-bucket load plan on model_meta.json so every run is
-    self-describing — speed numbers (tok/s, wall) are only comparable within the
-    same plan. Merges into whatever warm_up just wrote."""
     from .util import read_json
     meta = read_json(meta_path, {})
     if not meta:
@@ -855,8 +716,6 @@ def _stamp_load_plan(meta_path, plan: list[tuple]) -> None:
 
 def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
               manage_memory: bool = True, cancel=None) -> None:
-    """Run every task against one model. Safe to call from a thread — each
-    model writes only inside its own run_dir/<model>/ subtree."""
     from .util import read_json
     adapter = make_adapter(model)
     runner = TaskRunner(run_dir, model, adapter, cancel=cancel)
@@ -1064,15 +923,6 @@ def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
 
 
 def _record_dropped(run_dir: Path, model: str, task: str, reason: str) -> None:
-    """Append (model, task, reason) to the manifest's dropped_unscored list.
-
-    A task dropped WITHOUT a score — rate-limited (429) below the streak
-    threshold, or usage-capped — otherwise leaves a SILENT coverage gap: no
-    dir, no result row, and (below the streak) no stopped_models entry either,
-    so the cell just reads "not run" with no explanation. This makes the drop
-    queryable from run.json. Best-effort — a logging failure must not abort the
-    run. (Matches the existing unlocked read-modify-write of run.json; serial is
-    the default and only mode where the manifest is contended.)"""
     from .util import read_json, write_json
     try:
         mani_path = run_dir / "run.json"
@@ -1087,15 +937,6 @@ def _record_dropped(run_dir: Path, model: str, task: str, reason: str) -> None:
 
 
 def _persisting_progress(run_dir: Path, progress, lock=None):
-    """Wrap a progress callback so every narration line is ALSO appended to
-    run_dir/run.log (timestamped), then forwarded to the original sink.
-
-    The output window only ever held the last ~200 lines in memory and nothing
-    reached disk, so a model that got skipped, rate-limited, usage-capped or
-    crashed left no record of WHY — the reason had to be reverse-engineered from
-    task timestamps. Lines are model-prefixed by their callers (`[<model>] …`),
-    so the run log is grep-able per model. Logging must never break a run, so
-    every write is best-effort. Thread-safe for parallel (per-model-thread) runs."""
     import threading
     lock = lock or threading.Lock()
     log_path = run_dir / "run.log"
@@ -1114,14 +955,6 @@ def _persisting_progress(run_dir: Path, progress, lock=None):
 def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = None,
               tag: str = "", progress=print, parallel: bool = False,
               cancel=None, force: bool = False) -> Path:
-    """Serial (default) preserves timing fairness on a shared local GPU;
-    parallel runs one thread per model, only timing-fair across *different*
-    endpoints (e.g. one local + one cloud).
-
-    Refuses while another run is executing. Every path (web panel, scout, CLI)
-    goes through here, so the guard belongs here rather than in the job
-    manager's in-memory lock.
-    """
     import threading
 
     from .validate import validate_models
@@ -1151,8 +984,11 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
             m.name: {"max_tokens": m.max_tokens, "temperature": m.temperature,
                      "sampling": dict(m.sampling or {}),
                      "sampling_profiles": {k: dict(v) for k, v in
-                                           (m.sampling_profiles or {}).items()}}
+                                           (m.sampling_profiles or {}).items()},
+                     "effort": (m.effort_as_tested if m.effort_settable
+                                else None)}
             for m in models},
+        "cli_effort_default": _cli_effort_default(),
         "tasks": [{"id": t.id, "hash": t.content_hash, "tier": t.tier,
                    "category": t.category} for t in tasks],
         "finished": None,

@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conway's Game of Life</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0a0a1a;
+    color: #e0e0f0;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  h1 {
+    font-size: 1.6rem;
+    margin-bottom: 0.4rem;
+    background: linear-gradient(90deg, #7b5ea7, #e84393, #fd79a8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: 0.05em;
+  }
+
+  .subtitle {
+    font-size: 0.75rem;
+    color: #6c6c8a;
+    margin-bottom: 1rem;
+  }
+
+  #life {
+    border: 2px solid #2a2a4a;
+    border-radius: 8px;
+    cursor: crosshair;
+    background: #0d0d22;
+    box-shadow: 0 0 40px rgba(123, 94, 167, 0.15), inset 0 0 60px rgba(0,0,0,0.5);
+    display: block;
+  }
+
+  .controls {
+    margin-top: 1rem;
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  button {
+    background: #1a1a3a;
+    color: #c8c8f0;
+    border: 1px solid #3a3a6a;
+    padding: 0.5rem 1.2rem;
+    font-size: 0.9rem;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+  }
+
+  button:hover {
+    background: #2a2a5a;
+    border-color: #6c5ce7;
+    color: #fff;
+    box-shadow: 0 0 12px rgba(108, 92, 231, 0.3);
+  }
+
+  button:active {
+    transform: scale(0.96);
+  }
+
+  button.active {
+    background: #6c5ce7;
+    border-color: #a29bfe;
+    color: #fff;
+    box-shadow: 0 0 16px rgba(108, 92, 231, 0.5);
+  }
+
+  .info {
+    margin-top: 0.7rem;
+    font-size: 0.72rem;
+    color: #5a5a7a;
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  .speed-control {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+    font-size: 0.78rem;
+    color: #6c6c8a;
+  }
+
+  .speed-control input[type="range"] {
+    width: 120px;
+    accent-color: #6c5ce7;
+  }
+</style>
+</head>
+<body>
+
+<h1>🧬 Conway's Game of Life</h1>
+<p class="subtitle">B3 / S23 — click &amp; drag to paint cells</p>
+<canvas id="life" width="600" height="600"></canvas>
+<div class="controls">
+  <button id="step">⏭ Step</button>
+  <button id="play">▶ Play</button>
+  <button id="random">🎲 Random</button>
+  <button id="clear">💀 Clear</button>
+</div>
+<div class="speed-control">
+  <span>Speed:</span>
+  <input type="range" id="speed" min="1" max="60" value="12">
+  <span id="fps-label">12 fps</span>
+</div>
+<p class="info">
+  Grid: <span id="grid-info">50 × 50</span> &nbsp;|&nbsp;
+  Gen: <span id="gen-count">0</span> &nbsp;|&nbsp;
+  Alive: <span id="alive-count">0</span>
+</p>
+
+<script>
+(function() {
+  "use strict";
+
+  // ── Grid configuration ──────────────────────────────────────
+  const COLS = 50;          // number of columns (cells wide)
+  const ROWS = 50;          // number of rows    (cells tall)
+  const CELL = 12;         // pixels per cell
+  const W = COLS * CELL;   // 600 CSS px ≥ 400 ✓
+  const H = ROWS * CELL;   // 600 CSS px ≥ 400 ✓
+
+  // ── State ───────────────────────────────────────────────────
+  let grid = createGrid();
+  let generation = 0;
+  let playing = false;
+  let animFrameId = null;
+  let lastStepTime = 0;
+  let targetFps = 12;
+
+  // ── Canvas & context ────────────────────────────────────────
+  const canvas = document.getElementById("life");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+
+  // ── Helpers ─────────────────────────────────────────────────
+  function createGrid() {
+    return new Array(ROWS).fill(null).map(() => new Uint8Array(COLS));
+  }
+
+  function countNeighbors(gx, gy) {
+    let s = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      const ny = gy + dy;
+      if (ny < 0 || ny >= ROWS) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = gx + dx;
+        if (nx < 0 || nx >= COLS) continue;
+        s += grid[ny][nx];
+      }
+    }
+    return s;
+  }
+
+  // ── Simulation step (simultaneous update — no in-place!) ───
+  function computeNext() {
+    const next = createGrid();
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        const n = countNeighbors(x, y);
+        if (grid[y][x]) {
+          // Live cell survives with 2 or 3 neighbours
+          next[y][x] = (n === 2 || n === 3) ? 1 : 0;
+        } else {
+          // Dead cell becomes alive with exactly 3 neighbours
+          next[y][x] = (n === 3) ? 1 : 0;
+        }
+      }
+    }
+    grid = next;
+    generation++;
+  }
+
+  // ── Rendering ───────────────────────────────────────────────
+  function redraw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Grid lines (subtle)
+    ctx.strokeStyle = "rgba(42, 42, 74, 0.5)";
+    ctx.lineWidth = 0.5;
+    for (let x = 0; x <= COLS; x++) {
+      ctx.beginPath();
+      ctx.moveTo(x * CELL, 0);
+      ctx.lineTo(x * CELL, H);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= ROWS; y++) {
+      ctx.beginPath();
+      ctx.moveTo(0, y * CELL);
+      ctx.lineTo(W, y * CELL);
+      ctx.stroke();
+    }
+
+    // Alive cells with a nice glow effect
+    let aliveCount = 0;
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        if (!grid[y][x]) continue;
+        aliveCount++;
+
+        const px = x * CELL + 1;
+        const py = y * CELL + 1;
+        const sz = CELL - 2;
+
+        // Glow
+        ctx.fillStyle = "rgba(108, 92, 231, 0.15)";
+        ctx.fillRect(px - 2, py - 2, sz + 4, sz + 4);
+
+        // Main cell — slight color variation per generation for visual interest
+        const hue = (generation * 3 + x * 2 + y * 3) % 360;
+        ctx.fillStyle = `hsl(${hue}, 70%, 65%)`;
+        roundRect(ctx, px, py, sz, sz, 2);
+        ctx.fill();
+
+        // Highlight edge
+        ctx.strokeStyle = "rgba(255,255,255,0.15)";
+        ctx.lineWidth = 0.5;
+        roundRect(ctx, px, py, sz, sz, 2);
+        ctx.stroke();
+      }
+    }
+
+    // Update info
+    document.getElementById("gen-count").textContent = generation;
+    document.getElementById("alive-count").textContent = aliveCount;
+  }
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.lineTo(x + w - r, y);
+    c.quadraticCurveTo(x + w, y, x + w, y + r);
+    c.lineTo(x + w, y + h - r);
+    c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    c.lineTo(x + r, y + h);
+    c.quadraticCurveTo(x, y + h, x, y + h - r);
+    c.lineTo(x, y + r);
+    c.quadraticCurveTo(x, y, x + r, y);
+    c.closePath();
+  }
+
+  // ── Animation loop ──────────────────────────────────────────
+  function gameLoop(timestamp) {
+    if (!playing) return;
+    animFrameId = requestAnimationFrame(gameLoop);
+
+    const interval = 1000 / targetFps;
+    if (timestamp - lastStepTime >= interval) {
+      lastStepTime = timestamp;
+      computeNext();
+      redraw();
+    }
+  }
+
+  function startPlaying() {
+    if (playing) return;
+    playing = true;
+    document.getElementById("play").classList.add("active");
+    document.getElementById("play").textContent = "⏸ Pause";
+    lastStepTime = performance.now();
+    animFrameId = requestAnimationFrame(gameLoop);
+  }
+
+  function stopPlaying() {
+    playing = false;
+    document.getElementById("play").classList.remove("active");
+    document.getElementById("play").textContent = "▶ Play";
+    if (animFrameId) cancelAnimationFrame(animFrameId);
+    animFrameId = null;
+  }
+
+  // ── Public API ──────────────────────────────────────────────
+  window.life = {
+    get w() { return COLS; },
+    get h() { return ROWS; },
+
+    get(x, y) {
+      if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return 0;
+      return grid[y][x];
+    },
+
+    set(x, y, v) {
+      if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return;
+      grid[y][x] = v ? 1 : 0;
+    },
+
+    step() {
+      computeNext();
+      redraw();
+    },
+
+    clear() {
+      grid = createGrid();
+      generation = 0;
+      redraw();
+    }
+  };
+
+  // ── Button handlers ─────────────────────────────────────────
+  document.getElementById("step").addEventListener("click", () => {
+    computeNext();
+    redraw();
+  });
+
+  document.getElementById("play").addEventListener("click", () => {
+    if (playing) stopPlaying(); else startPlaying();
+  });
+
+  document.getElementById("random").addEventListener("click", () => {
+    grid = createGrid();
+    generation = 0;
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        grid[y][x] = Math.random() < 0.28 ? 1 : 0;
+      }
+    }
+    redraw();
+  });
+
+  document.getElementById("clear").addEventListener("click", () => {
+    window.life.clear();
+  });
+
+  // ── Speed slider ────────────────────────────────────────────
+  const speedSlider = document.getElementById("speed");
+  const fpsLabel = document.getElementById("fps-label");
+  speedSlider.addEventListener("input", () => {
+    targetFps = parseInt(speedSlider.value);
+    fpsLabel.textContent = targetFps + " fps";
+  });
+
+  // ── Click / drag painting ───────────────────────────────────
+  let painting = false;
+  let paintValue = 1;
+
+  function cellFromEvent(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const scaleY = H / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleY;
+    const gx = Math.floor(mx / CELL);
+    const gy = Math.floor(my / CELL);
+    if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return null;
+    return { x: gx, y: gy };
+  }
+
+  canvas.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    painting = true;
+    const c = cellFromEvent(e);
+    if (!c) return;
+    paintValue = grid[c.y][c.x] ? 0 : 1;
+    window.life.set(c.x, c.y, paintValue);
+    redraw();
+  });
+
+  canvas.addEventListener("mousemove", (e) => {
+    if (!painting) return;
+    const c = cellFromEvent(e);
+    if (!c) return;
+    window.life.set(c.x, c.y, paintValue);
+    redraw();
+  });
+
+  window.addEventListener("mouseup", () => { painting = false; });
+
+  // Touch support
+  canvas.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    const me = new MouseEvent("mousedown", { clientX: t.clientX, clientY: t.clientY });
+    canvas.dispatchEvent(me);
+  }, { passive: false });
+
+  canvas.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    const me = new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY });
+    window.dispatchEvent(me);
+  }, { passive: false });
+
+  canvas.addEventListener("touchend", () => {
+    window.dispatchEvent(new MouseEvent("mouseup"));
+  });
+
+  // ── Initial draw ────────────────────────────────────────────
+  redraw();
+
+})();
+</script>
+</body>
+</html>

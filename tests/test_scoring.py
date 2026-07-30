@@ -1,19 +1,7 @@
-"""Regression tests for answer-lane scoring.
-
-Run: .venv/Scripts/python.exe -m pytest tests/ -q
-
-Seeded by the Cohere north-mini-code incident: the model emitted correct
-answers with a trailing <|END_OF_TURN_TOKEN|> control token, which defeated
-both the numeric and exact matchers and silently zeroed 15 correct answers
-(dropping its suite score 0.66 -> 0.28). These tests lock in the fix (strip
-control tokens before matching) and the FORMAT-MISS guard that surfaces any
-FUTURE extraction/format artifact instead of averaging it in as a 0.
-"""
 from harness import scoring
 
 
 class _Task:
-    """Minimal stand-in for harness.tasks.Task (score_answer only reads .scoring)."""
     def __init__(self, answer, match="exact", tolerance=None):
         self.scoring = {"answer": answer, "match": match}
         if tolerance is not None:
@@ -84,3 +72,73 @@ def test_numeric_answer_with_a_natural_unit_is_accepted():
 def test_numeric_wrong_value_with_unit_still_zero():
     rec = scoring.score_answer(_Task("240", "numeric"), "ANSWER: 300 minutes")
     assert rec["score"] == 0.0
+
+
+COLLECT_ERR = """
+=================================== ERRORS ====================================
+______________________ ERROR collecting test_checker.py _______________________
+E     File "solution.py", line 43
+E       elif char == '"':
+E   IndentationError: expected an indented block after 'else' statement on line 40
+=========================== short test summary info ===========================
+ERROR test_checker.py
+1 error in 0.11s
+"""
+
+NO_SUBMISSION = """
+=================================== ERRORS ====================================
+______________________ ERROR collecting test_checker.py _______________________
+E   ModuleNotFoundError: No module named 'solution'
+1 error in 0.09s
+"""
+
+REAL_FAILURE = """
+FAILED test_checker.py::test_whitespace - ValueError: bad char
+1 failed, 8 passed in 0.02s
+"""
+
+
+def _summary(out, tmp_path, monkeypatch, cap=None):
+    import types
+
+    from harness import scoring
+
+    class _P:
+        timed_out = False
+        returncode = 1
+        stdout = out
+        stderr = ""
+
+    monkeypatch.setattr(scoring, "run_capped", lambda *a, **k: _P())
+    chk = tmp_path / "checker.py"
+    chk.write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    task = types.SimpleNamespace(
+        checker=chk, checker_timeout_s=60,
+        scoring={} if cap is None else {"automated_max": cap})
+    return scoring.run_pytest_checker(task, tmp_path)
+
+
+def test_a_broken_submission_names_the_error_not_a_test_count(tmp_path,
+                                                              monkeypatch):
+    r = _summary(COLLECT_ERR, tmp_path, monkeypatch)
+    assert r["score"] == 0.0
+    assert "does not import" in r["summary"]
+    assert "IndentationError" in r["summary"]
+    assert "0/1 tests passed" not in r["summary"]
+
+
+def test_a_missing_submission_says_so(tmp_path, monkeypatch):
+    r = _summary(NO_SUBMISSION, tmp_path, monkeypatch)
+    assert r["score"] == 0.0
+    assert "ModuleNotFoundError" in r["summary"]
+
+
+def test_a_real_test_failure_still_reports_the_count(tmp_path, monkeypatch):
+    r = _summary(REAL_FAILURE, tmp_path, monkeypatch)
+    assert r["summary"].startswith("8/9 tests passed")
+    assert r["score"] == round(8 / 9, 4)
+
+
+def test_a_capped_task_keeps_its_ceiling_on_a_real_failure(tmp_path, monkeypatch):
+    r = _summary(REAL_FAILURE, tmp_path, monkeypatch, cap=0.8)
+    assert r["score"] == round((8 / 9) * 0.8, 4)
