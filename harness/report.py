@@ -67,6 +67,79 @@ def _brand(prefix: str = "") -> str:
             f'<span class="bw">{BRAND_NAME}</span></a>')
 
 
+SOCIALS = [
+    ("YouTube", "https://www.youtube.com/@TokenWaster", "#FF0000",
+     "M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545"
+     "s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93."
+     "502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505"
+     " 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-."
+     "502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"),
+    ("X", "https://x.com/tokenwaster", "#000000",
+     "M14.234 10.162 22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258"
+     " 24H2.33l8.016-9.318L16.749 24h6.993zm-2.837 3.299-.929-1.329L3.076 1.56h3"
+     ".182l5.965 8.532.929 1.329 7.754 11.09h-3.182z"),
+    ("TikTok", "https://www.tiktok.com/@tokenwaster", "#000000",
+     "M12.525.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 "
+     "2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-."
+     "93-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17"
+     "-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.71-.02-.5"
+     "-.03-1-.01-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72."
+     "02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 "
+     "1.75-.21.51-.15 1.07-.14 1.61.24 1.64 1.82 3.02 3.5 2.87 1.12-.01 2.19-.66"
+     " 2.77-1.61.19-.33.4-.67.41-1.06.1-1.79.06-3.57.07-5.36.01-4.03-.01-8.05.02"
+     "-12.07z"),
+    ("Instagram", "https://www.instagram.com/tokenwaster/", "#E4405F",
+     "M7.0301.084c-1.2768.0602-2.1487.264-2.911.5634-.7888.3075-1.4575.72-2.1228"
+     " 1.3877-.6652.6677-1.075 1.3368-1.3802 2.127-.2954.7638-.4956 1.6365-.552 "
+     "2.914-.0564 1.2775-.0689 1.6882-.0626 4.947.0062 3.2586.0206 3.6671.0825 "
+     "4.9473.061 1.2765.264 2.1482.5635 2.9107.308.7889.72 1.4573 1.388 2.1228."
+     "6679.6655 1.3365 1.0743 2.1285 1.38.7632.295 1.6361.4961 2.9134.552 1.2773"
+     ".056 1.6884.069 4.9462.0627 3.2578-.0062 3.668-.0207 4.9478-.0814 1.28-."
+     "0607 2.147-.2652 2.9098-.5633.7889-.3086 1.4578-.72 2.1228-1.3881.665-.6682"
+     " 1.0745-1.3378 1.3795-2.1284.2957-.7632.4966-1.636.552-2.9124.056-1.2809."
+     "0692-1.6898.063-4.948-.0063-3.2583-.021-3.6668-.0817-4.9465-.0607-1.2797-."
+     "264-2.1487-.5633-2.9117-.3084-.7889-.72-1.4568-1.3876-2.1228C21.2982 1.33 "
+     "20.628.9208 19.8378.6165 19.074.321 18.2017.1197 16.9244.0645 15.6471.0093 "
+     "15.236-.005 11.977.0014 8.718.0076 8.31.0215 7.0301.0839m.1402 21.6932c-1."
+     "17-.0509-1.8053-.2453-2.2287-.408-.5606-.216-.96-.4771-1.3819-.895-.422-."
+     "4178-.6811-.8186-.9-1.378-.1644-.4234-.3624-1.058-.4171-2.228-.0595-1.2645"
+     "-.072-1.6442-.079-4.848-.007-3.2037.0053-3.583.0607-4.848.05-1.169.2456-1."
+     "805.408-2.2282.216-.5613.4762-.96.895-1.3816.4188-.4217.8184-.6814 1.3783-."
+     "9003.423-.1651 1.0575-.3614 2.227-.4171 1.2655-.06 1.6447-.072 4.848-.079 "
+     "3.2033-.007 3.5835.005 4.8495.0608 1.169.0508 1.8053.2445 2.228.408.5608."
+     "216.96.4754 1.3816.895.4217.4194.6816.8176.9005 1.3787.1653.4217.3617 1.056"
+     ".4169 2.2263.0602 1.2655.0739 1.645.0796 4.848.0058 3.203-.0055 3.5834-.061"
+     " 4.848-.051 1.17-.245 1.8055-.408 2.2294-.216.5604-.4763.96-.8954 1.3814-."
+     "419.4215-.8181.6811-1.3783.9-.4224.1649-1.0577.3617-2.2262.4174-1.2656.0595"
+     "-1.6448.072-4.8493.079-3.2045.007-3.5825-.006-4.848-.0608M16.953 5.5864A1.44"
+     " 1.44 0 1 0 18.39 4.144a1.44 1.44 0 0 0-1.437 1.4424M5.8385 12.012c.0067 "
+     "3.4032 2.7706 6.1557 6.173 6.1493 3.4026-.0065 6.157-2.7701 6.1506-6.1733-."
+     "0065-3.4032-2.771-6.1565-6.174-6.1498-3.403.0067-6.156 2.771-6.1496 6.1738"
+     "M8 12.0077a4 4 0 1 1 4.008 3.9921A3.9996 3.9996 0 0 1 8 12.0077"),
+    ("GitHub", "https://github.com/tokenwaster", "#181717",
+     "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-."
+     "258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422"
+     " 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 "
+     "1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1."
+     "605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-."
+     "54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02."
+     "006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 "
+     "3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 "
+     "1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 "
+     "22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"),
+]
+
+
+def _social_rail() -> str:
+    items = "".join(
+        f'<a class="sr-i" href="{url}" target="_blank" rel="noopener me" '
+        f'title="{name}" aria-label="{name}" style="--brand:{colour}">'
+        f'<svg viewBox="0 0 24 24" aria-hidden="true">'
+        f'<path fill="currentColor" d="{path}"/></svg></a>'
+        for name, url, colour, path in SOCIALS)
+    return f'<nav class="srail" aria-label="Social links">{items}</nav>'
+
+
 def _nav(prefix: str = "") -> str:
     out = []
     for label, href, control in _NAV:
@@ -541,6 +614,18 @@ th.lenscol, td.lensval { background:var(--accent-soft); font-weight:600; }
 .chartkey .k-dot.dim { opacity:.4; }
 .chartkey .k-line { display:inline-block; width:26px; border-top:2px dashed var(--accent);
   vertical-align:4px; margin:0 2px 0 6px; }
+/* "N tied" in the task-fit table opens the full list. In flow, not absolute:
+   the table's card scrolls horizontally and would clip a positioned popup. */
+.tiepop { display:inline-block; vertical-align:baseline; }
+.tiepop > summary { display:inline; cursor:help; list-style:none;
+  color:var(--muted); font-size:12px; border-bottom:1px dotted var(--muted); }
+.tiepop > summary::-webkit-details-marker { display:none; }
+.tiepop > summary::after { content:" ▸"; font-size:9px; }
+.tiepop[open] > summary::after { content:" ▾"; }
+.tiepop > summary:hover { color:var(--accent); border-bottom-color:var(--accent); }
+.tiepop .tp-list { display:flex; flex-direction:column; gap:2px; margin:6px 0 2px;
+  padding:7px 10px; max-height:280px; overflow-y:auto; font-size:12.5px;
+  background:var(--surface-2); border:1px solid var(--hair); border-radius:6px; }
 /* aggregated hover tooltip — lists every dot under the cursor */
 .szttip { position:fixed; z-index:60; pointer-events:none; display:none;
   background:var(--surface); border:1px solid var(--border); border-radius:8px;
@@ -867,6 +952,37 @@ body { max-width:var(--shell-w); margin:0 auto;
 .pagebar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
   margin:0 0 20px; font-size:12.5px; color:var(--muted); }
 .pagebar .sub { margin:0; }
+/* Floating social rail. Content is capped at --shell-w and centred, so the
+   gutter is (100vw - shell)/2 — a 42px rail plus air needs about 64px of it,
+   which only exists above ~1610px. Above that it parks in the gutter beside the
+   content; below it docks to the bottom-right corner instead of sitting on top
+   of the text. The header has no room and a footer on a 10,000px page is a dead
+   end, so it floats. */
+.srail { position:fixed; z-index:30; top:50%; transform:translateY(-50%);
+  right:calc((100vw - var(--shell-w)) / 2 - 52px);
+  display:flex; flex-direction:column; gap:6px;
+  padding:7px 6px; border-radius:12px;
+  background:var(--surface); border:1px solid var(--hair); }
+.srail .sr-i { display:flex; align-items:center; justify-content:center;
+  width:30px; height:30px; border-radius:8px; color:var(--muted);
+  text-decoration:none; }
+.srail .sr-i svg { width:17px; height:17px; display:block; }
+.srail .sr-i:hover { color:var(--brand); background:var(--surface-2);
+  text-decoration:none; }
+@media (prefers-color-scheme: dark) {
+  /* the X and GitHub marks are near-black; on a dark plane use the ink instead */
+  .srail .sr-i[title="X"]:hover, .srail .sr-i[title="GitHub"]:hover {
+    color:var(--ink); }
+}
+@media (max-width:1609px) {
+  .srail { top:auto; bottom:18px; right:18px; transform:none;
+    flex-direction:row; box-shadow:0 4px 18px rgba(0,0,0,.28); }
+}
+@media (max-width:760px) {
+  .srail { bottom:12px; right:12px; gap:2px; padding:5px 4px; }
+  .srail .sr-i { width:28px; height:28px; }
+}
+@media print { .srail { display:none; } }
 """
 
 BASE_CSS = BASE_CSS.replace("__HEADER_CSS__", HEADER_CSS)
@@ -1237,9 +1353,14 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 the whole suite is <strong>not ranked</strong>: its mean isn't comparable, and the
 tasks it's missing skew toward the ones it failed or never reached. Those models
 are shown last, marked <span class="pill" style="border-color:var(--warn);color:var(--warn)">partial</span>.</p>
+<div class="seg" data-seg="podium">
+  <button class="on" data-f="all">All</button>
+  <button data-f="local">Local ⚡</button>
+  <button data-f="remote">API / CLI</button>
+</div>
 <div class="podium">
 {% for p in podium %}
-<a class="pcard m{{ loop.index if (loop.index <= 3 and not p.partial) else 0 }}" href="models/{{ p.slug }}.html">
+<a class="pcard m{{ loop.index if (loop.index <= 3 and not p.partial) else 0 }}" href="models/{{ p.slug }}.html" data-kind="{{ p.kind }}"{% if p.partial %} data-partial="1"{% endif %}>
   <span class="cardarrow">→</span>
   <div class="rank">{% if p.partial %}<span style="color:var(--warn)">unranked</span>{% else %}{% if loop.index == 1 %}★ {% endif %}#{{ loop.index }}{% endif %}</div>
   <div class="name">{{ p.model }}</div>
@@ -1319,7 +1440,17 @@ the GGUF, not the run's loaded window.</div>
 
 {% if bump %}
 <h2>Rankings across suite versions</h2>
-<div class="card chartcard">{{ bump }}</div>
+<div class="seg" data-seg="bump">
+  <button class="on" data-f="all">All</button>
+  <button data-f="local">Local ⚡</button>
+  <button data-f="remote">API / CLI</button>
+</div>
+{% for key in ['all','local','remote'] %}
+<div data-bcohort="{{ key }}"{% if key != 'all' %} style="display:none"{% endif %}>
+{% if bumps[key] %}<div class="card chartcard">{{ bumps[key] }}</div>
+{% else %}<p class="muted small">not enough versions with {{ 'local' if key == 'local' else 'API / CLI' }} coverage to trace a rank.</p>{% endif %}
+</div>
+{% endfor %}
 <div class="foot" style="margin-top:6px">Each column is one dataset version
 (archived or live); lines trace a model's leaderboard <b>rank</b>. Ranks are
 the honest cross-version comparison — raw scores are not comparable because
@@ -1334,12 +1465,6 @@ agentic/timing tasks — read the earliest columns with that caveat.</div>
 <div class="chartkey"><span class="k-dot"></span> a model &nbsp;
   <span class="k-dot dim"></span> dominated (something cheaper/faster scores at
   least as high) &nbsp; <span class="k-line"></span> Pareto frontier</div>
-{% if cost_scatter %}
-<div class="foot" style="margin:0 0 4px">Score vs <b>cost to run the full
-  suite</b> — API / CLI models (a local model's "cost" is just electricity)</div>
-<div class="card chartcard">{{ cost_scatter }}</div>
-{% endif %}
-<div class="foot" style="margin:14px 0 4px">Score vs <b>generation speed</b></div>
 <div class="seg" data-seg="valspeed">
   <button class="on" data-f="all">All</button>
   <button data-f="local">Local ⚡</button>
@@ -1347,7 +1472,18 @@ agentic/timing tasks — read the earliest columns with that caveat.</div>
 </div>
 {% for key in ['all','local','remote'] %}
 <div data-vcohort="{{ key }}"{% if key != 'all' %} style="display:none"{% endif %}>
-<div class="card chartcard">{{ speed_scatter[key] }}</div></div>
+  {% if cost_scatter[key] %}
+  <div class="foot" style="margin:0 0 4px">Score vs <b>cost to run the full
+    suite</b> — API / CLI models (a local model's "cost" is just electricity)</div>
+  <div class="card chartcard">{{ cost_scatter[key] }}</div>
+  {% elif key == 'local' %}
+  <div class="foot" style="margin:0 0 4px">No cost chart for local models — what
+    they cost is electricity, not API spend, so there is nothing to plot against
+    score here. Their speed is below.</div>
+  {% endif %}
+  <div class="foot" style="margin:14px 0 4px">Score vs <b>generation speed</b></div>
+  <div class="card chartcard">{{ speed_scatter[key] }}</div>
+</div>
 {% endfor %}
 
 <h2>Score by category — aggregated result per task · click a header to sort</h2>
@@ -1670,6 +1806,28 @@ function applyRank(){
         + 'them is arbitrary; separate them on speed or cost' : '';
   });
 }
+// Filtering the podium has to renumber it: the medals and the #N come from the
+// server-rendered order over ALL models, so hiding rows alone would leave the
+// visible cards claiming positions they do not hold in the chosen cohort.
+function applyPodium(f) {
+  const cards = [].slice.call(document.querySelectorAll('.podium .pcard'));
+  let rank = 0;
+  cards.forEach(c => {
+    const show = (f === 'all') || (c.dataset.kind === f);
+    c.style.display = show ? '' : 'none';
+    c.classList.remove('m1', 'm2', 'm3', 'm0');
+    const rk = c.querySelector('.rank');
+    if (!show) return;
+    if (c.dataset.partial === '1') {          // never ranked, in any cohort
+      c.classList.add('m0');
+      if (rk) rk.innerHTML = '<span style="color:var(--warn)">unranked</span>';
+      return;
+    }
+    rank++;
+    c.classList.add(rank <= 3 ? 'm' + rank : 'm0');
+    if (rk) rk.textContent = (rank === 1 ? '\\u2605 #1' : '#' + rank);
+  });
+}
 document.querySelectorAll('.seg').forEach(seg => {
   seg.addEventListener('click', e => {
     const btn = e.target.closest('button'); if (!btn) return;
@@ -1686,6 +1844,13 @@ document.querySelectorAll('.seg').forEach(seg => {
       document.querySelectorAll('[data-vcohort]').forEach(el => {
         el.style.display = (el.dataset.vcohort === f) ? '' : 'none';
       });
+    } else if (seg.dataset.seg === 'bump') {
+      const f = btn.dataset.f;
+      document.querySelectorAll('[data-bcohort]').forEach(el => {
+        el.style.display = (el.dataset.bcohort === f) ? '' : 'none';
+      });
+    } else if (seg.dataset.seg === 'podium') {
+      applyPodium(btn.dataset.f);
     }
   });
 });
@@ -2315,12 +2480,41 @@ def covered_models(task_data: dict, tids=None) -> set[str]:
     return {m for m, n in seen.items() if n >= len(ids)}
 
 
-def version_rankings(versions: list[tuple] | None = None) -> list[dict]:
+_LOCAL_CACHE: dict[str, bool] = {}
+
+
+def model_is_local(name: str) -> bool:
+    """Whether a model runs locally, from the registry.
+
+    build_index has a per-run version of this that reads model_meta; this one is
+    module-level because version_rankings needs it and runs outside that scope.
+    """
+    if not _LOCAL_CACHE:
+        try:
+            from .registry import load_models
+            for mo in load_models(include_disabled=True):
+                _LOCAL_CACHE[mo.name] = bool(mo.local)
+        except Exception:
+            _LOCAL_CACHE["__loaded__"] = False
+    return bool(_LOCAL_CACHE.get(name, False))
+
+
+def version_rankings(versions: list[tuple] | None = None,
+                     cohort: str = "all") -> list[dict]:
+    """Leaderboard rank per model per version.
+
+    cohort narrows to 'local' or 'remote' and re-ranks WITHIN that group, so a
+    filtered chart reads 1..n for the models shown rather than keeping the
+    positions they held among everything.
+    """
     versions = versions if versions is not None else load_versions()
     _, hidden = _model_prefs()
     out = []
     for key, task_data, _tdefs in versions:
         full = covered_models(task_data)
+        if cohort in ("local", "remote"):
+            want_local = cohort == "local"
+            full = {m for m in full if model_is_local(m) == want_local}
         scores: dict[str, list[float]] = {}
         skipped: set[str] = set()
         for info in task_data.values():
@@ -3459,6 +3653,10 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         cat_rows.append({"model": _mlink(m), "model_sort": m, "cells": cells})
 
     bump = bump_chart(vranks, slot) if len(vranks) >= 2 else ""
+    bumps = {"all": bump}
+    for _c in ("local", "remote"):
+        _vr = version_rankings(versions, cohort=_c) if versions else []
+        bumps[_c] = bump_chart(_vr, slot) if len(_vr) >= 2 else ""
 
     from .fit import task_fit
 
@@ -3527,11 +3725,19 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                 num = (fmt_cost(v) if unit == "$" else f"{v:,.0f} tok/s")
                 return f"{_mlink(m)} <span class='muted'>{num}</span>{_tag(m)}"
 
+            def _tied_disclosure(names):
+                inner = "".join(f"<span>{_mlink(m)}{_tag(m)}</span>"
+                                for m in sorted(names, key=str.lower))
+                return (f"<details class='tiepop'><summary title='every model "
+                        f"tied at this score — no order between them is real'>"
+                        f"{len(names)} tied</summary>"
+                        f"<div class='tp-list'>{inner}</div></details>")
+
             rows.append({
                 "category": row["category"],
                 "n_ok": len(ok), "n_total": len(cls),
                 "best": (f"{_mlink(tied[0])} <span class='muted'>{best_v:.2f}</span>"
-                         + (f" <span class='muted'>({len(tied)} tied)</span>"
+                         + (" " + _tied_disclosure(tied)
                             if len(tied) > 1 else "")) if tied else "—",
                 "cheap": _cell(cheap, "$"),
                 "freebie": (f"{_mlink(freebie[0])}{_tag(freebie[0])}"
@@ -3603,6 +3809,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             "app": s["att_per_pass"], "app_ctx": s["app_ctx"],
             "tps": s["tps"], "cost": s["cost"],
             "where": "local" if s["local"] else "cloud / CLI",
+            "kind": "local" if s["local"] else "remote",
             "total_time": fmt_span(s["wall_ms_sum"]),
             "coverage": f"{n}/{n_suite}",
             "partial": n < n_suite,
@@ -3714,9 +3921,10 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             spd["all"].append(p); spd[coh].append(p)
         if not s["local"] and s.get("api_cost_val"):
             cost_pts.append(_vpt(m, s["api_cost_val"], s["cost"]))
-    cost_scatter = pareto_scatter(
+    _cost_chart = pareto_scatter(
         cost_pts, "cost to run the full suite (USD) — cheaper is left; "
         "dashed = best score per dollar", x_minimize=True, x_fmt="${:,.0f}")
+    cost_scatter = {"all": _cost_chart, "remote": _cost_chart, "local": ""}
     speed_scatter = {k: pareto_scatter(
         v, "generation speed (tok/s) — faster is right; dashed = best score "
         "per tok/s", x_minimize=False, x_fmt="{:,.0f}") for k, v in spd.items()}
@@ -3906,7 +4114,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         css=BASE_CSS, tiles=tiles, runs=runs_view, run_ids=run_ids,
         mast_eyebrow=mast_eyebrow, mast_stats=mast_stats, matrix=matrix,
         podium=podium, standings=standings, task_rows=task_rows,
-        frontier=frontier, bump=bump,
+        frontier=frontier, bump=bump, bumps=bumps,
         cost_scatter=cost_scatter, speed_scatter=speed_scatter,
         scatter_js=_SCATTER_HOVER_JS, legend_html=legend_html,
         value_rows=value_rows, dataset_label=dataset_label,
@@ -6473,6 +6681,8 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
         tdefs = _task_defs(tasks_dir)
         from .util import strip_output_comments
         def _w(path, html):
+            if "</body>" in html and 'class="srail"' not in html:
+                html = html.replace("</body>", _social_rail() + "</body>", 1)
             path.write_text(strip_output_comments(html), encoding="utf-8")
         out_runs = out_dir / "runs"
         out_runs.mkdir(parents=True, exist_ok=True)

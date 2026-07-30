@@ -138,3 +138,118 @@ def test_the_mobile_block_does_not_restate_the_body_padding():
     window = base[max(0, j - 400):j]
     assert "body { padding:20px 15px 56px; }" not in window, (
         "two declarations of the narrow body padding; HEADER_CSS owns it")
+
+
+def test_the_social_rail_links_only_confirmed_accounts():
+    from harness import report
+    urls = {name: url for name, url, _c, _p in report.SOCIALS}
+    assert set(urls) == {"YouTube", "X", "TikTok", "Instagram", "GitHub"}
+    for name, url in urls.items():
+        assert url.startswith("https://"), name
+        assert "tokenwaster" in url.lower(), f"{name} does not point at us: {url}"
+    assert urls["GitHub"] == "https://github.com/tokenwaster", "profile, not repo"
+
+
+def test_every_social_icon_carries_real_path_data():
+    from harness import report
+    for name, _u, colour, path in report.SOCIALS:
+        assert re.fullmatch(r"#[0-9A-Fa-f]{6}", colour), name
+        assert len(path) >= 190, f"{name} path looks hand-drawn ({len(path)} chars)"
+        assert path.startswith("M"), name
+        assert path.count(".") > 8, f"{name} lacks sub-pixel detail"
+
+
+def test_the_rail_never_covers_the_reading_column():
+    from harness import report
+    css = report.HEADER_CSS
+    assert ".srail { position:fixed" in css
+    assert "right:calc((100vw - var(--shell-w)) / 2 - 52px)" in css
+    assert "@media (max-width:1609px)" in css
+    i = css.index("@media (max-width:1609px)")
+    docked = css[i:i + 220]
+    assert "bottom:18px" in docked and "flex-direction:row" in docked
+
+
+def test_the_rail_is_injected_once_per_page():
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    assert 'class="srail"\' not in html' in src, (
+        "the write hook must not double-inject when a page already has a rail")
+    assert 'html.replace("</body>", _social_rail() + "</body>", 1)' in src
+
+
+def test_a_tie_lists_every_model_not_just_the_first():
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    assert "_tied_disclosure" in src
+    i = src.index("def _tied_disclosure")
+    body = src[i:i + 700]
+    assert "sorted(names, key=str.lower)" in body, "no implied ranking between ties"
+    assert "_mlink(m)" in body, "each tied model must be a link"
+    assert "{len(names)} tied" in body
+
+
+def test_the_tie_list_opens_in_flow_so_it_cannot_be_clipped():
+    assert ".tiepop .tp-list { display:flex; flex-direction:column" in SRC
+    assert "position:absolute" not in SRC[SRC.index(".tiepop"):
+                                          SRC.index(".tiepop") + 700], (
+        "the fit table's card scrolls horizontally and clips positioned popups")
+    assert "overflow-y:auto" in SRC[SRC.index(".tiepop .tp-list"):
+                                    SRC.index(".tiepop .tp-list") + 300], (
+        "a 40-model tie needs to scroll rather than run off the page")
+
+
+def test_every_cohort_selector_on_the_overview_is_wired():
+    for seg in ("standings", "fit", "valspeed", "bump", "podium"):
+        assert f'data-seg="{seg}"' in SRC, f"{seg} selector missing"
+        assert f"seg.dataset.seg === '{seg}'" in SRC, f"{seg} has no handler"
+
+
+def test_version_rankings_reranks_inside_the_cohort():
+    from harness import report
+    td = {"t1": {"agg": {
+        "loc": {"score": {"status": "scored", "score": 0.5}},
+        "rem": {"score": {"status": "scored", "score": 0.9}},
+    }}}
+    vs = [("0.9", td, {"t1": None})]
+    import unittest.mock as mock
+    with mock.patch.object(report, "model_is_local",
+                           side_effect=lambda m: m == "loc"):
+        allr = report.version_rankings(vs)[0]["ranks"]
+        loc = report.version_rankings(vs, cohort="local")[0]["ranks"]
+        rem = report.version_rankings(vs, cohort="remote")[0]["ranks"]
+    assert allr["rem"]["rank"] == 1 and allr["loc"]["rank"] == 2
+    assert list(loc) == ["loc"] and loc["loc"]["rank"] == 1, (
+        "a filtered chart must renumber, not keep all-models positions")
+    assert list(rem) == ["rem"] and rem["rem"]["rank"] == 1
+
+
+def test_the_podium_renumbers_and_remedals_when_filtered():
+    i = SRC.index("function applyPodium(f)")
+    js = SRC[i:i + 1100]
+    assert "c.classList.remove('m1', 'm2', 'm3', 'm0')" in js, "stale medal"
+    assert "rank++" in js and "'m' + rank" in js
+    assert "c.dataset.partial === '1'" in js, (
+        "a partial model is unranked in every cohort")
+    assert "rank" in js.split("rank++")[0].split("let ")[1][:12]
+
+
+def test_a_partial_model_is_never_medalled_in_any_cohort():
+    i = SRC.index("function applyPodium(f)")
+    js = SRC[i:i + 1100]
+    part = js[js.index("dataset.partial === '1'"):]
+    assert "return;" in part[:260], "partial must skip before rank++ increments"
+    assert part.index("m0") < part.index("return;")
+
+
+def test_the_cost_chart_has_no_local_variant_and_says_so():
+    from harness import report
+    assert 'cost_scatter = {"all": _cost_chart, "remote": _cost_chart, "local": ""}' \
+        in SRC, "a local model's cost is electricity, not API spend"
+    assert "No cost chart for local models" in SRC
+
+
+def test_the_value_section_filters_both_charts_from_one_control():
+    i = SRC.index('<div class="seg" data-seg="valspeed">')
+    block = SRC[i:i + 1400]
+    assert 'data-vcohort="{{ key }}"' in block
+    assert "cost_scatter[key]" in block and "speed_scatter[key]" in block, (
+        "the control previously governed only the speed chart")

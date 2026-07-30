@@ -26,6 +26,45 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+## 0.7.2 — social rail, tie disclosure, cohort filters
+
+### A floating social rail, on every public page
+Five accounts with official simple-icons path data (CC0) inlined — an
+approximated X or Octocat reads as wrong at 17px. Placement is arithmetic:
+content is capped at 1480px and centred, so the gutter is `(100vw - 1480)/2` and
+a 42px rail plus air needs ~64px of it, which exists only above ~1610px. Above
+that it parks in the gutter and never touches text; below it docks bottom-right
+rather than sitting on the reading column. Injected once at the page-write hook,
+since a `position:fixed` element only needs to be in the body.
+
+### A tie in the task-fit table lists every model
+`(21 tied)` named one model and hid twenty. It is now a disclosure listing all of
+them, alphabetically so no order is implied, each a link. It opens in flow rather
+than absolutely positioned, because the fit table's card scrolls horizontally and
+would clip a positioned popup, and it scrolls past 280px — the largest tie is 40
+models across 24 ties on the overview.
+
+### Cohort filters where they were missing
+The leaderboard podium, the cross-version rankings and the Value section had no
+All / Local / API-CLI control. The podium needed renumbering, not just filtering:
+medals and #N come from the server-rendered order over every model, so hiding
+cards would leave the rest claiming positions they do not hold. A partial model
+stays unranked in every cohort.
+
+Version rankings now re-rank **inside** the cohort rather than filtering
+positions — gemma-4-31b is rank 16 among all models in 0.7 and #1 among local.
+Value gained one control above both charts; the cost chart has no local variant
+on purpose, because a local model's cost is electricity, not API spend, so that
+cohort shows one chart and says why.
+
+### One header and one measure, finished
+Follows 0.7.1's header work: operator pages carried a separate stylesheet and
+never imported BASE_CSS, so `HEADER_CSS` is now the single declaration for both
+sides, covering the page shell as well — 1480px and 30px padding everywhere,
+against widths previously set in ten places. The suite carries the **Token
+Waster** brand as an inlined 32px SVG using `currentColor`.
+
+
 ## 0.7.1 — probes, partial-row honesty, and one page shell
 
 ### Thinking-off probe: what does reasoning buy, and what does it cost?
