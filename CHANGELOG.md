@@ -26,6 +26,34 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+## 0.7.3 — a links page, and every comment out of the tree
+
+### tokenwaster.ai/links
+The five accounts now have a shareable landing page in the public export, built
+from live run data rather than a static file, so the model and task counts it
+quotes cannot drift from the site beside it. The same link block went into both
+READMEs — the public one above "About this repo", where a first-time visitor
+reaches it before the methodology.
+
+### Every comment removed, private and public
+826 across 64 files: 570 in yaml, 243 CSS/JS lines in the two page modules, the
+rest `#` and docstrings. Each class of file was verified by the property that
+actually matters rather than by eye — yaml by `safe_load` returning identical
+data, ordinary modules by an AST identical apart from docstrings, and the two
+page modules by rendering all 17 pages before and after and comparing with
+comments normalised out of both sides. That last check is the only sound one for
+those files: a CSS comment inside a page string is part of the string's value, so
+AST equality can never hold across its removal.
+
+`tasks/` and `tasks-refs/` are excluded, and stay excluded — those files are
+content-hashed, so editing one changes the task's identity and invalidates every
+result recorded against it.
+
+`requirements-studio.txt` is deleted. Stripped of comments it was empty: it
+declared no packages and nothing referenced it. Its one real fact — studio adds
+no Python dependencies, Playwright is already a harness dep, ffmpeg is an external
+binary — is in `docs/CONTENT-PLAN.md`.
+
 ## 0.7.2 — social rail, tie disclosure, cohort filters
 
 ### A floating social rail, on every public page

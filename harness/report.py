@@ -515,21 +515,10 @@ BASE_CSS = """
   --grid:#2c2c2a; --border:rgba(255,255,255,.10);
   --accent:#3987e5; --accent-soft:rgba(57,135,229,.16);
   --good:#0ca30c; --warn:#fab219; --crit:#d03b3b;
-  /* editorial layer: hairline rules, a mono for data/labels, a matrix-cell ink
-     ramp and the retrieval-miss orange — shared by every page's stat-line,
-     tables and score grids so the whole suite reads as one thing */
   --hair:rgba(255,255,255,.07); --rule:rgba(255,255,255,.15);
-  /* Matrix failure hues. --trap is NOT --warn: amber (#fab219) sits ~12 degrees
-     from the retrieval-miss orange, so the two cells read as one color in the
-     grid. This yellow is ~23 degrees off it and much brighter, separating them
-     by hue AND luminance. Kept separate from --warn because that token is text
-     on the light theme, where a yellow this bright is unreadable. */
   --trap:#ffd60a; --miss:#d9600f; --cell-rgb:242,242,240;
-  /* text sitting ON the score ramp: --cell-ink is the flip, used once the tint
-     is opaque enough that the normal ink disappears into it */
   --cell-ink:#0b0b0b;
   --mono:ui-monospace,"Cascadia Code","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
-  /* categorical series — validated dark steps, fixed assignment order */
   --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#008300;
   --s5:#9085e9; --s6:#e66767; --s7:#d55181; --s8:#d95926;
   color-scheme: dark;
@@ -541,10 +530,6 @@ BASE_CSS = """
     --grid:#e1e0d9; --border:rgba(11,11,11,.10);
     --accent:#2a78d6; --accent-soft:rgba(42,120,214,.12);
     --hair:rgba(20,20,26,.10); --rule:rgba(20,20,26,.20);
-    /* A bright yellow cannot be bright AND visible on a near-white plane. Dark
-       mode gets the vivid #ffd60a; here the hue does the separating (~25 deg
-       off the orange) while the lightness drops far enough for the cell and its
-       legend swatch to actually read against the page. */
     --trap:#a87f00; --miss:#b8460a; --cell-rgb:22,22,26;
     --cell-ink:#ffffff;
     --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --s4:#008300;
@@ -569,7 +554,6 @@ __HEADER_CSS__
 h2 { font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:.13em;
   text-transform:uppercase; color:var(--muted); margin:34px 0 10px; }
 
-/* hero stat-line — editorial, matches the overview masthead (no boxed tiles) */
 .tiles { display:flex; flex-wrap:wrap; align-items:flex-end; row-gap:14px;
   margin:18px 0 6px; padding-bottom:16px; border-bottom:2px solid var(--ink); }
 .tile { padding:0 22px; border-left:1px solid var(--hair); }
@@ -582,9 +566,6 @@ h2 { font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:
 .tile .k { font-family:var(--mono); font-size:10px; letter-spacing:.11em;
   text-transform:uppercase; color:var(--muted); margin-top:7px; }
 
-/* cards & tables */
-/* Every bordered data container is this one rule. The version-over-version
-   block used to carry its own copy and drifted out of sync. */
 .card, .vc-cats, .vc-members, .vc-catdet {
   background:var(--surface); border:1px solid var(--hair);
   border-radius:6px; padding:2px 0; overflow-x:auto; }
@@ -596,17 +577,12 @@ th { color:var(--muted); font-family:var(--mono); font-size:10px; font-weight:60
 td { padding:8px 14px; border-bottom:1px solid var(--hair); vertical-align:middle; }
 tr:last-child td { border-bottom:none; }
 tbody tr:hover td { background:var(--surface-2); }
-/* Data columns are CENTERED (header + cells aligned); text/name columns stay
-   left. One site-wide rule — every table on every page reads the same. */
 td.num, th.num, th[data-type="num"] { text-align:center; font-variant-numeric:tabular-nums; }
 th[data-type="text"], td.model { text-align:left; }  /* names left; default td is already left */
 td.nowrap, .nowrap { white-space:nowrap; }
 .model { font-weight:600; }
 .muted { color:var(--muted); }
-/* the dynamic "Ranked by" column on the standings — tinted so it's clear the
-   order follows it; its header label + cells are set by the lens JS */
 th.lenscol, td.lensval { background:var(--accent-soft); font-weight:600; }
-/* scatter chrome (score-vs-cost/speed/VRAM) — shared by overview + family */
 .chartkey { display:flex; flex-wrap:wrap; align-items:center; gap:6px 16px;
   font-size:12px; color:var(--ink-dim); margin:2px 0 6px; }
 .chartkey .k-dot { display:inline-block; width:10px; height:10px; border-radius:50%;
@@ -614,8 +590,6 @@ th.lenscol, td.lensval { background:var(--accent-soft); font-weight:600; }
 .chartkey .k-dot.dim { opacity:.4; }
 .chartkey .k-line { display:inline-block; width:26px; border-top:2px dashed var(--accent);
   vertical-align:4px; margin:0 2px 0 6px; }
-/* "N tied" in the task-fit table opens the full list. In flow, not absolute:
-   the table's card scrolls horizontally and would clip a positioned popup. */
 .tiepop { display:inline-block; vertical-align:baseline; }
 .tiepop > summary { display:inline; cursor:help; list-style:none;
   color:var(--muted); font-size:12px; border-bottom:1px dotted var(--muted); }
@@ -626,13 +600,11 @@ th.lenscol, td.lensval { background:var(--accent-soft); font-weight:600; }
 .tiepop .tp-list { display:flex; flex-direction:column; gap:2px; margin:6px 0 2px;
   padding:7px 10px; max-height:280px; overflow-y:auto; font-size:12.5px;
   background:var(--surface-2); border:1px solid var(--hair); border-radius:6px; }
-/* aggregated hover tooltip — lists every dot under the cursor */
 .szttip { position:fixed; z-index:60; pointer-events:none; display:none;
   background:var(--surface); border:1px solid var(--border); border-radius:8px;
   padding:6px 9px; font-size:12px; line-height:1.5; color:var(--ink);
   box-shadow:0 6px 20px rgba(0,0,0,.35); max-width:300px; }
 .szttip b { color:var(--ink); }
-/* click-to-sort tables */
 table.sortable th[data-type] { cursor:pointer; user-select:none; white-space:nowrap; }
 table.sortable th[data-type]:hover { color:var(--ink); }
 table.sortable th .caret { opacity:0; font-size:9px; margin-left:5px;
@@ -642,7 +614,6 @@ table.sortable th.sorted .caret { opacity:1; color:var(--accent); }
 .fitpick { font-weight:650; color:var(--good); white-space:nowrap; }
 .fitval { font-weight:600; color:var(--accent); white-space:nowrap; }
 .small { font-size:11.5px; color:var(--muted); }
-/* attribution badges — who's at fault for a failure/retry */
 .attr { display:inline-block; font-size:10.5px; font-weight:700;
   letter-spacing:.04em; text-transform:uppercase; border-radius:6px;
   padding:1px 7px; white-space:nowrap; }
@@ -659,13 +630,11 @@ table.sortable th.sorted .caret { opacity:1; color:var(--accent); }
   border-radius:20px; padding:2px 11px; color:var(--ink-2);
   font-variant-numeric:tabular-nums; }
 .rollup .pill b { color:var(--ink); }
-/* model-name links — clickable everywhere, take you to the model page */
 a.mlink { color:inherit; font-weight:600; text-decoration:none;
   border-bottom:1px dotted var(--border); }
 a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
   text-decoration:none; }
 
-/* status chips — symbol + text, never color alone */
 .chip { display:inline-flex; align-items:center; gap:6px; font-weight:600;
   font-variant-numeric:tabular-nums; white-space:nowrap; }
 .chip i { font-style:normal; font-size:11px; width:17px; height:17px; line-height:17px;
@@ -677,10 +646,6 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
   border:1.5px dashed var(--muted); line-height:14px; }
 .chip.pend { color:var(--muted); font-weight:500; }
 
-/* score cells — the matrix swatch reused inline: a score-ramped square + the
-   number, so every grid on the site (categories, per-task, score grid, model
-   comparison) reads like the overview hero. The number is tinted good/warn/crit
-   so the state never rides on color alone. */
 .scv { display:inline-flex; align-items:center; font-variant-numeric:tabular-nums;
   white-space:nowrap; }
 .scv b { font-weight:600; }
@@ -690,7 +655,6 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 .hsw { display:inline-block; width:11px; height:11px; border-radius:2px; flex:none;
   margin-right:7px; background:rgba(var(--cell-rgb),var(--a,.2)); }
 .hsw.pend { background:transparent; box-shadow:inset 0 0 0 1px var(--hair); }
-/* head-to-head compare page */
 .cmp-pick { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:6px 0 22px; }
 .cmp-sel { flex:1 1 260px; min-width:200px; font-size:15px; font-weight:600;
   padding:9px 12px; border-radius:8px; border:1px solid var(--border);
@@ -699,8 +663,6 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
   border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--ink); }
 .cmp-swap:hover { border-color:var(--accent); color:var(--accent); }
 .cmp-head { margin:0 0 28px; overflow-x:auto; }
-/* the head metric block shares .cmp-row with the per-task grid, so a column
-   lines up under its model header instead of drifting */
 .cmp-hrow { border-bottom:1px solid var(--rule); align-items:end;
   padding-bottom:8px; margin-bottom:2px; }
 .cmp-hc { text-align:center; font-size:15px; font-weight:700; }
@@ -719,10 +681,8 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 .cmp-row:hover { background:var(--surface); }
 .cmp-t { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   padding-right:10px; }
-/* A and B center under their model columns; swatches mirror around the divider */
 .cmp-row .scv { justify-content:center; font-variant-numeric:tabular-nums; }
 .cmp-row .scv.ra .hsw { margin-right:0; margin-left:7px; }
-/* the center line dividing the two model sides — the delta sits on it */
 .cmp-dc { text-align:center; align-self:stretch; display:flex; align-items:center;
   justify-content:center;
   background:linear-gradient(var(--rule),var(--rule)) center/2px 100% no-repeat; }
@@ -731,7 +691,6 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 .cmp-td.ga { color:var(--good); } .cmp-td.gb { color:var(--accent); }
 .cmp-td.tie { color:var(--muted); }
 
-/* marks */
 .spark path { fill:none; stroke:var(--accent); stroke-width:2;
   stroke-linecap:round; stroke-linejoin:round; }
 .spark circle { fill:var(--accent); }
@@ -741,7 +700,6 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 .fill { display:block; height:8px; background:var(--accent);
   border-radius:0 4px 4px 0; }
 
-/* chart + right-legend layout */
 .chartcard { padding:16px 18px; overflow:hidden; }
 .chartwrap { display:flex; gap:18px; align-items:stretch; }
 .chartsvg { flex:1 1 auto; min-width:0; }
@@ -756,15 +714,8 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 @media (max-width:900px) { .chartwrap { flex-direction:column; }
   .clegend { flex-flow:row wrap; width:auto; border-left:0; border-top:1px
   solid var(--grid); padding:12px 0 0; max-height:none; } }
-/* Phones / narrow tablets: tighter gutters, and EVERY table becomes its own
-   horizontal scroller — display:block keeps the grid intact (anonymous table
-   boxes reconstruct rows/cells) so no page can overflow sideways, even a table
-   that isn't wrapped in a .card. Verified 375px: family/info overflow → 0. */
 @media (max-width:760px) {
   h1 { font-size:19px; }
-  /* stack the header so the menu gets the full width and its links wrap
-     instead of overflowing (the nav is a flex item that otherwise sizes to
-     its one-line max-content). */
   .topbar { flex-direction:column; align-items:flex-start; gap:8px; }
   .nav { display:flex; flex-wrap:wrap; row-gap:4px; }
   .nav a { margin-left:0; margin-right:15px; }
@@ -772,28 +723,23 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
     max-width:100%; }
 }
 
-/* shared chart chrome */
 .grid, .scatter .grid { stroke:var(--grid); stroke-width:1; }
 .tick, .scatter .tick { fill:var(--muted); font-size:10px;
   font-variant-numeric:tabular-nums; }
 
-/* rankings bump chart — hover a bubble to light up every tied model */
 .bump .bm { transition:opacity .1s; }
 .bump .bmhit, .bump .bmlabel { cursor:pointer; }
 .bump.focus .bm { opacity:.12; }
 .bump.focus .bm.on { opacity:1; }
 
-/* dot marks — the only chart geometry now */
 .dot .hit { fill:transparent; }
 .dot .mk { stroke:var(--surface); stroke-width:2; transition:opacity .1s; }
 .dot:hover .mk { stroke:var(--ink); stroke-width:2.5; }
-/* legend-hover focus: dim everyone but the hovered model */
 .chartwrap.focus .dot .mk { opacity:.13; }
 .chartwrap.focus .dot.on .mk { opacity:1; }
 .clegend.focus .cl-item { opacity:.35; }
 .clegend.focus .cl-item.on { opacity:1; }
 
-/* leaderboard podium — clickable placards, medal accents for the top 3 */
 .podium { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
   gap:12px; margin:18px 0 4px; }
 .pcard { display:block; background:var(--surface); border:1px solid var(--hair);
@@ -824,7 +770,6 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
   font-size:13px; opacity:0; transition:opacity .1s; }
 .pcard:hover .cardarrow { opacity:1; }
 
-/* callouts & details */
 .delrun { background:transparent; border:none; color:var(--muted);
   cursor:pointer; font-size:13px; }
 .delrun:hover { color:var(--crit); }
@@ -840,21 +785,18 @@ details.det summary::before { content:"›"; color:var(--muted);
   transition:transform .12s; }
 details.det[open] summary::before { transform:rotate(90deg); }
 details.det .inner { padding:2px 0 14px; }
-/* the row + details a matrix cell linked to (#m-<model>) */
 details.det.hit { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
 tr.hit > td { background:var(--surface); }
 tr.hit > td:first-child { box-shadow:inset 2px 0 0 var(--accent); }
 a.filelink { font-family:var(--mono); font-size:11px; color:var(--muted);
   border:1px solid var(--hair); border-radius:4px; padding:2px 6px; white-space:nowrap; }
 a.filelink:hover { color:var(--accent); border-color:var(--accent); }
-/* a number built from more than one run says so */
 .sig { font-family:var(--mono); font-size:10px; color:var(--muted); margin-left:5px; }
 .nrun { font-family:var(--mono); font-size:10px; color:var(--accent);
   border:1px solid var(--hair); border-radius:3px; padding:0 3px; cursor:help; }
 .snote { display:block; font-family:var(--mono); font-size:9.5px; color:var(--muted);
   letter-spacing:.03em; }
 .hardmark { color:var(--accent); }
-/* version-over-version compare (model + family pages) */
 .vc-pick { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:10px; font-size:12px;
   color:var(--muted); align-items:center; }
 .vc-pick select { background:var(--plane); color:var(--fg); border:1px solid var(--grid);
@@ -863,10 +805,6 @@ a.filelink:hover { color:var(--accent); border-color:var(--accent); }
 .vc-cell { display:inline-block; min-width:36px; text-align:center; font-family:var(--mono);
   font-size:11px; border-radius:3px; padding:2px 4px; margin-right:3px;
   border:1px solid var(--hair); color:var(--ink); }
-/* The score ramp runs light-on-dark in one theme and the reverse in the other,
-   so the number has to flip ink at the point the tint overtakes it. Thresholds
-   are the WCAG crossovers for each theme's composite; worst case is 4.45:1 at
-   the crossover itself, which is the ceiling this ramp allows. */
 .vc-cell.flip-d { color:var(--cell-ink); }
 @media (prefers-color-scheme: light) {
   .vc-cell.flip-d { color:var(--ink); }
@@ -890,10 +828,7 @@ a.filelink:hover { color:var(--accent); border-color:var(--accent); }
 .vc-catdet:not([open]) > summary { border-bottom:none; }
 .vc-catdet > summary::before { content:"›"; color:var(--muted); margin-right:6px; }
 .vc-catdet[open] > summary::before { content:"⌄"; }
-/* The card rule insets nothing horizontally because a table's own td does it.
-   This wrapper holds controls and prose, which have no such padding. */
 .vc-wrap { padding:12px 14px; }
-/* as a span it sits in a flex row and must not push itself down */
 .vc-note { color:var(--muted); font-size:11px; margin:0; }
 p.vc-note { margin:8px 0 0; }
 .vc-warn { color:var(--trap); font-size:10px; margin-left:6px; }
@@ -908,19 +843,11 @@ code { background:var(--surface-2); border-radius:4px; padding:1px 6px;
 
 HEADER_CSS = """
 :root { --topbar-h:56px; --brand-h:32px; --shell-w:1480px; --shell-x:30px; }
-/* The page shell. Operator pages declared their own body width — 980, 1100 and
-   1200 across eight templates — and _OP_CHROME then forced 1200 on top, so no
-   two sides of the site were the same measure. One declaration, here. */
 body { max-width:var(--shell-w); margin:0 auto;
   padding:32px var(--shell-x) 72px; }
 @media (max-width:760px) {
   body { padding:20px 15px 56px; }
 }
-/* brand + title + nav and NOTHING else, at a fixed height, so the bar lands on
-   the same pixels on every page. A sub-line, a dataset picker or a button goes
-   in .pagebar below: content inside a header changes its geometry — a select has
-   a different baseline than 21px text, and a long sub-line wrapped and pushed
-   the nav 65px down on model pages. */
 .topbar { display:flex; align-items:center; justify-content:space-between;
   gap:20px; flex-wrap:nowrap; height:var(--topbar-h); margin:0 0 18px;
   border-bottom:1px solid var(--hair); }
@@ -935,12 +862,10 @@ body { max-width:var(--shell-w); margin:0 auto;
   gap:10px; }
 .topbar h1 { font-size:18px; font-weight:650; letter-spacing:-.01em; margin:0;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-/* the nav never shrinks and never hides a link — the title truncates instead */
 .topbar .nav { flex:none; display:block; margin:0; white-space:nowrap; }
 .topbar .nav a { margin:0 0 0 16px; font-size:13px; color:var(--accent);
   text-decoration:none; }
 .topbar .nav a:hover { text-decoration:underline; }
-/* too narrow for both: stack, same height on every page */
 @media (max-width:1080px) {
   :root { --topbar-h:auto; }
   .topbar { flex-wrap:wrap; height:auto; min-height:56px; padding-bottom:10px;
@@ -952,12 +877,6 @@ body { max-width:var(--shell-w); margin:0 auto;
 .pagebar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
   margin:0 0 20px; font-size:12.5px; color:var(--muted); }
 .pagebar .sub { margin:0; }
-/* Floating social rail. Content is capped at --shell-w and centred, so the
-   gutter is (100vw - shell)/2 — a 42px rail plus air needs about 64px of it,
-   which only exists above ~1610px. Above that it parks in the gutter beside the
-   content; below it docks to the bottom-right corner instead of sitting on top
-   of the text. The header has no room and a footer on a 10,000px page is a dead
-   end, so it floats. */
 .srail { position:fixed; z-index:30; top:50%; transform:translateY(-50%);
   right:calc((100vw - var(--shell-w)) / 2 - 52px);
   display:flex; flex-direction:column; gap:6px;
@@ -970,7 +889,6 @@ body { max-width:var(--shell-w); margin:0 auto;
 .srail .sr-i:hover { color:var(--brand); background:var(--surface-2);
   text-decoration:none; }
 @media (prefers-color-scheme: dark) {
-  /* the X and GitHub marks are near-black; on a dark plane use the ink instead */
   .srail .sr-i[title="X"]:hover, .srail .sr-i[title="GitHub"]:hover {
     color:var(--ink); }
 }
@@ -1015,7 +933,6 @@ _MATRIX_CSS = """
 .mx-rail .gp .tie { color:var(--accent); font-weight:700; margin-right:2px; cursor:help; }
 .mx-row.lead .mx-rail { box-shadow:inset 3px 0 0 var(--accent); }
 .mx-row.lead .rk, .mx-row.lead .sc, .mx-row.lead .gp { color:var(--accent); }
-/* partial rows sit below every complete one; dim them so the break is visible */
 .mx-row.partial .mx-rail { opacity:.62; }
 .mx-row.partial .pcov { font-size:9.5px; padding:0 4px; border-radius:6px;
   border:1px solid var(--warn); color:var(--warn); vertical-align:middle; }
@@ -1051,7 +968,6 @@ _MATRIX_CSS = """
 .mxlegend .sw.na { background:transparent; box-shadow:inset 0 0 0 1px var(--hair); }
 .mxlegend .k { font-family:var(--mono); font-size:10px; letter-spacing:.06em; text-transform:uppercase;
   color:var(--muted); }
-/* segmented toggle (All/Hard/Easy subset pickers) — overview + discriminate */
 .seg { display:inline-flex; gap:0; margin:4px 0 10px; border:1px solid var(--border);
   border-radius:9px; overflow:hidden; }
 .seg button { background:var(--surface); color:var(--ink-dim); border:0;
@@ -1198,8 +1114,6 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>LLM Testing · Overview</title>
 <link rel="alternate" type="application/atom+xml" title="LLM Testing — models tested" href="feed.xml">
 <style>{{ css }}
-/* .seg (segmented toggle) now lives in BASE_CSS — shared with /discriminate */
-/* ---- matrix-first overview hero (tokens live in BASE_CSS) ---- */
 .mast { border-bottom:2px solid var(--ink); padding-bottom:16px; margin:18px 0 4px; }
 .mast .eyebrow { font-family:var(--mono); font-size:11px; letter-spacing:.2em;
   text-transform:uppercase; color:var(--muted); display:flex; gap:6px 14px; flex-wrap:wrap; }
@@ -1214,7 +1128,6 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 .stat .k { font-family:var(--mono); font-size:10px; letter-spacing:.11em; text-transform:uppercase;
   color:var(--muted); margin-top:7px; }
 .stat .d { font-size:11.5px; color:var(--ink-2); margin-top:2px; }
-/* .mx-* / .mxlegend matrix styles now live in BASE_CSS (shared with the model page) */
 </style></head><body>
 <div class="topbar">{{ brand }}<div class="ttl"><h1>LLM Testing</h1></div>
 <div class="nav">{{ nav }}</div></div>
@@ -1306,10 +1219,6 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     var scored=rows.map(function(r){
       return {r:r, v:parseFloat(r.dataset[sub]),
               p:r.classList.contains('partial')}; });
-    // A partial row is not comparable to a full one, so it never competes: it
-    // sorts below every complete row, carries no rank, and is not the gap
-    // reference. Without this a 3-of-55 model takes #1 the moment a lens is
-    // clicked, and every gap on the board is then measured from it.
     scored.sort(function(a,b){
       if(a.p!==b.p) return a.p?1:-1;
       return (isNaN(b.v)?-1:b.v)-(isNaN(a.v)?-1:a.v); });
@@ -1630,8 +1539,6 @@ document.querySelectorAll('.delrun').forEach(b => b.addEventListener('click', as
   else alert('delete failed: ' + await r.text());
 }));
 
-// chart ↔ legend cross-highlight: hovering a legend entry (or a dot) dims
-// every other model so a single series is traceable without connecting lines
 document.querySelectorAll('.chartwrap').forEach(wrap => {
   const svg = wrap.querySelector('svg');
   const legend = wrap.querySelector('.clegend');
@@ -1654,8 +1561,6 @@ document.querySelectorAll('.chartwrap').forEach(wrap => {
   });
 });
 
-// rankings bump chart: hover a bubble (or a name) to highlight every model
-// sharing that rank — including overlapping tied bubbles
 (() => {
   const svg = document.querySelector('svg.bump');
   if (!svg) return;
@@ -1665,13 +1570,11 @@ document.querySelectorAll('.chartwrap').forEach(wrap => {
     groups.forEach(g => g.classList.toggle('on',
       !!slugs && slugs.indexOf(g.dataset.m) !== -1));
   };
-  // node hit targets carry the list of all models tied at that position
   svg.querySelectorAll('.bmhit').forEach(h => {
     const ms = h.dataset.ms.split(',');
     h.addEventListener('mouseenter', () => light(ms));
     h.addEventListener('mouseleave', () => light(null));
   });
-  // hovering a model's name highlights just that model's whole trajectory
   groups.forEach(g => {
     const label = g.querySelector('.bmlabel');
     if (!label) return;
@@ -1691,8 +1594,6 @@ names the upstream provider that actually served the requests.{% if not public_n
 Chart colors and overview visibility are per-model settings on the
 <a href="/run">Run</a> page.{% endif %}</div>
 <script>
-// segmented controls: standings filters by where-it-runs (+ a GPU-fit gate
-// when Local is active); fit swaps the recomputed cohort tables.
 function applyStandings() {
   const seg = document.querySelector('.seg[data-seg="standings"]');
   const f = (seg.querySelector('button.on') || {}).dataset ?
@@ -1733,9 +1634,6 @@ const RANK_WHAT = {
   nobias: 'Ranked with every human judgment removed — the automated checker alone, with the two craft-graded tasks rescaled so a full machine pass counts as 1.0. See <a href="info.html#nobias">No Bias</a>.',
   firsttry: 'Ranked by first-try-clean rate: the share of tasks nailed at 1.0 with zero retries.'
 };
-// each lens: the column HEADER label + how to render its value, derived from
-// the same data-* number the sort uses — so the "Ranked by" column always shows
-// the metric the order is based on (no more sorting on an invisible number).
 const LENS_META = {
   pure:    {label:'Score',       fmt:v=>v.toFixed(3)},
   value:   {label:'Score / $',   fmt:v=>v.toLocaleString(undefined,{maximumFractionDigits:1})},
@@ -1762,15 +1660,11 @@ function applyRank(){
   const rows = [].slice.call(document.querySelectorAll('#standings tr[data-kind]'));
   if (!rows.length) return;
   const val = tr => { const v = parseFloat(tr.dataset[lens]); return isNaN(v) ? -Infinity : v; };
-  // fill the dynamic "Ranked by" cell for each row with THIS lens's value
   rows.forEach(tr => { const cell = tr.querySelector('.lensval'); if (!cell) return;
     const raw = tr.dataset[lens]; const v = parseFloat(raw);
     cell.textContent = (raw === '' || isNaN(v)) ? '—' : meta.fmt(v);
     cell.setAttribute('data-sort', isNaN(v) ? '' : v);
   });
-  // A partial row sorts below every complete one on every lens and carries no
-  // rank. Sorting on value alone lets a 3-of-55 model lead whichever lens it
-  // happens to score well on.
   const isPart = tr => tr.dataset.partial === '1';
   rows.sort((a, b) => {
     const pa = isPart(a), pb = isPart(b);
@@ -1779,11 +1673,6 @@ function applyRank(){
   });
   const parent = rows[0].parentNode;
   rows.forEach(tr => parent.appendChild(tr));      // restack the DOM
-  // Renumber the VISIBLE rows with COMPETITION ranking: equal values share a
-  // number and the next distinct value skips to its true position (five tied
-  // at 1.000 are all 1st, the next is 6th). Sequential numbering would order
-  // models the lens cannot actually separate. Ties are judged at the printed
-  // precision so anything displayed as equal ranks as equal.
   let shown = 0, rank = 0, prev = null;
   rows.forEach(tr => {
     if (tr.style.display === 'none') return;
@@ -1806,9 +1695,6 @@ function applyRank(){
         + 'them is arbitrary; separate them on speed or cost' : '';
   });
 }
-// Filtering the podium has to renumber it: the medals and the #N come from the
-// server-rendered order over ALL models, so hiding rows alone would leave the
-// visible cards claiming positions they do not hold in the chosen cohort.
 function applyPodium(f) {
   const cards = [].slice.call(document.querySelectorAll('.podium .pcard'));
   let rank = 0;
@@ -1985,10 +1871,6 @@ document.querySelectorAll('table.sortable').forEach(function(table){
       th.querySelector('.caret').textContent = dir==='asc'?'▲':'▼';
       var rows = [].slice.call(table.rows).slice(1);
       rows.sort(function(a,b){
-        // A partial row stays below every complete one on EVERY column and in
-        // both directions. Without this, one click on "score" floats a model
-        // that attempted 1 of 55 tasks to the top — the mean of a near-empty row
-        // is not comparable to a full one, which is exactly why it was unranked.
         var pa = a.dataset.partial === '1', pb = b.dataset.partial === '1';
         if (pa !== pb) return pa ? 1 : -1;
         if (num){
@@ -2461,12 +2343,6 @@ def load_versions() -> list[tuple]:
 
 
 def covered_models(task_data: dict, tids=None) -> set[str]:
-    """Models with a scored cell for EVERY task in the set.
-
-    An aggregate over a set of tasks is only comparable between models that
-    ran the whole set: a mean over the 3 tasks a model happened to finish is
-    not the same quantity as a mean over 55.
-    """
     ids = list(task_data if tids is None else tids)
     ids = [t for t in ids if t in task_data]
     if not ids:
@@ -2484,11 +2360,6 @@ _LOCAL_CACHE: dict[str, bool] = {}
 
 
 def model_is_local(name: str) -> bool:
-    """Whether a model runs locally, from the registry.
-
-    build_index has a per-run version of this that reads model_meta; this one is
-    module-level because version_rankings needs it and runs outside that scope.
-    """
     if not _LOCAL_CACHE:
         try:
             from .registry import load_models
@@ -2501,12 +2372,6 @@ def model_is_local(name: str) -> bool:
 
 def version_rankings(versions: list[tuple] | None = None,
                      cohort: str = "all") -> list[dict]:
-    """Leaderboard rank per model per version.
-
-    cohort narrows to 'local' or 'remote' and re-ranks WITHIN that group, so a
-    filtered chart reads 1..n for the models shown rather than keeping the
-    positions they held among everything.
-    """
     versions = versions if versions is not None else load_versions()
     _, hidden = _model_prefs()
     out = []
@@ -5326,13 +5191,10 @@ DISCRIMINATE_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="u
 .note { color:var(--ink-dim); font-size:13px; line-height:1.6; }
 .legend { display:flex; flex-wrap:wrap; gap:10px; margin:14px 0; }
 .legend span.k { font-size:11px; border-radius:9px; padding:1px 8px; }
-/* the hard-subset swatches, folded into the who's-best table as one column */
 .whosbest th.tasks, .whosbest td.tasks { padding-left:18px; vertical-align:middle; }
 .whosbest .tasks .mx-cells { border:0; height:auto; padding:3px 0; }
 .whosbest th.tasks { font-weight:600; white-space:nowrap; }
 .whosbest tr.fleetrow td { border-top:1px solid var(--rule); color:var(--muted); }
-/* partial rows sit below every ranked one; dim them so the break is visible —
-   same treatment the overview matrix gives an incomplete model */
 .whosbest tr.partialrow td { opacity:.62; }
 .whosbest .pcov { font-size:9.5px; padding:0 4px; border-radius:6px;
   border:1px solid var(--warn); color:var(--warn); vertical-align:middle;
@@ -5902,7 +5764,6 @@ function sc(v){ // score -> {cls, txt, sw}
 function num(x){ return (x === null || x === undefined) ? null : x; }
 function fmtPct(v){ return v === null ? '\\u2014' : Math.round(v*100)+'%'; }
 
-// metric rows: [label, key, higherBetter, format(model)->string]
 const METRICS = [
   ['Raw score', 'score', true, m => m.score===null?'\\u2014':m.score.toFixed(3)+(m.ci!==null?' \\u00b1'+m.ci.toFixed(3).replace(/^0/,''):'')],
   ['Tasks \\u2265 0.80', 'passrate', true, m => m.graded?((m.pass/m.graded))?(m.pass+'/'+m.graded):'\\u2014':'\\u2014'],
@@ -6545,13 +6406,6 @@ PROBE_KINDS = ("spiral", "turns", "budget", "thinking")
 
 
 def probe_counts() -> dict:
-    """Trials already on record per probe, as {kind: {model: {task: n}}}.
-
-    Read by both the /special selection UI and the job that runs the probe, so
-    what the page greys out and what actually runs cannot drift apart. A
-    thinking trial is a PAIR, so its count is the smaller of the two legs — a
-    cell with 3 on-legs and 1 off-leg has one usable trial, not three.
-    """
     from . import thinking
     out: dict = {k: {} for k in PROBE_KINDS}
 
@@ -6572,10 +6426,79 @@ def probe_counts() -> dict:
 
 def probe_missing(kind: str, model: str, tasks, target: int,
                   counts: dict | None = None) -> dict:
-    """How many more trials each task needs to reach target."""
     have = (counts if counts is not None else probe_counts()).get(kind, {})
     have = have.get(model, {})
     return {t: max(0, int(target) - int(have.get(t, 0))) for t in tasks}
+
+
+LINKS_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Links · Token Waster</title><style>{{ css }}
+.lk-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+  gap:12px; margin:18px 0 26px; }
+.lk { display:flex; align-items:center; gap:14px; padding:16px 18px;
+  background:var(--surface); border:1px solid var(--hair); border-radius:10px;
+  color:var(--ink); text-decoration:none; }
+.lk:hover { border-color:var(--accent); text-decoration:none;
+  background:var(--surface-2); }
+.lk svg { width:26px; height:26px; flex:none; color:var(--muted); }
+.lk:hover svg { color:var(--brand); }
+.lk .n { font-weight:650; font-size:15px; }
+.lk .h { color:var(--muted); font-size:12.5px; }
+.lk-hero { font-size:15px; color:var(--ink-2); max-width:70ch; margin:0 0 4px; }
+.lk-stat { display:flex; gap:26px; flex-wrap:wrap; margin:6px 0 22px;
+  font-size:12.5px; color:var(--muted); }
+.lk-stat b { color:var(--ink); font-size:15px; font-family:var(--mono); }
+</style></head><body>
+<div class="topbar">{{ brand }}<div class="ttl"><h1>Links</h1></div>
+<div class="nav">{{ nav }}</div></div>
+
+<p class="lk-hero">I run a real benchmark harness on camera and publish the
+receipts — including when it says I was wrong. Everything below is the same
+project from a different angle.</p>
+<div class="lk-stat">
+  <span><b>{{ n_models }}</b> models</span>
+  <span><b>{{ n_tasks }}</b> tasks</span>
+  <span><b>{{ n_runs }}</b> runs on record</span>
+  <span>suite <b>v{{ suite_version }}</b></span>
+</div>
+
+<div class="lk-grid">
+<a class="lk" href="index.html">
+  {{ brand_svg }}
+  <span><span class="n">The leaderboard</span><br>
+  <span class="h">every model, every task, with the transcripts</span></span></a>
+{% for s in socials %}
+<a class="lk" href="{{ s.url }}" target="_blank" rel="noopener me"
+   style="--brand:{{ s.colour }}">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor"
+    d="{{ s.path }}"/></svg>
+  <span><span class="n">{{ s.name }}</span><br>
+  <span class="h">{{ s.handle }}</span></span></a>
+{% endfor %}
+</div>
+
+<div class="foot">Scores are the mean of every scored run per model·task, so
+re-running a model fleshes its number out rather than replacing it. A model that
+has not attempted the whole suite is shown but never ranked — its mean is not
+comparable. <a href="info.html">How the scoring works →</a></div>
+</body></html>"""
+
+
+def build_links_page(runs: list[dict], tdefs: dict) -> str:
+    handles = {"YouTube": "@TokenWaster", "X": "@tokenwaster",
+               "TikTok": "@tokenwaster", "Instagram": "@tokenwaster",
+               "GitHub": "the harness itself, open"}
+    socials = [{"name": n, "url": u, "colour": c, "path": p,
+                "handle": handles.get(n, "")}
+               for n, u, c, p in SOCIALS]
+    td = {tid: info for tid, info in collect_task_data(runs).items()
+          if tid in tdefs}
+    models = {m for info in td.values() for m in info["agg"]}
+    return _env.from_string(LINKS_TEMPLATE).render(
+        css=BASE_CSS, nav=_nav(""), brand=_brand(""), brand_svg=BRAND_SVG,
+        socials=socials, n_models=len(models), n_tasks=len(tdefs),
+        n_runs=len(runs), suite_version=config.suite_version())
 
 
 def build_special_page(dataset_label: str = "") -> str:
@@ -6742,6 +6665,7 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
         if dataset_key == "live":
             _w(out_dir / "feed.xml", build_feed(runs, tdefs))
             _w(out_dir / "special.html", build_special_page(dataset_label))
+            _w(out_dir / "links.html", build_links_page(runs, tdefs))
         index = out_dir / "index.html"
         _w(index, build_index(runs, tasks_dir=tasks_dir,
                               dataset_label=dataset_label, dataset_key=dataset_key,

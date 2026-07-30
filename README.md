@@ -175,6 +175,21 @@ harness/    the instrument that produced the data
 tests/      the harness's own test suite
 ```
 
+## Token Waster
+
+I run this harness on camera and publish the receipts — including when it says I
+was wrong.
+
+| | |
+|---|---|
+| **Site + full results** | https://tokenwaster.ai |
+| **All links** | https://tokenwaster.ai/links |
+| **YouTube** | [@TokenWaster](https://www.youtube.com/@TokenWaster) |
+| **X** | [@tokenwaster](https://x.com/tokenwaster) |
+| **TikTok** | [@tokenwaster](https://www.tiktok.com/@tokenwaster) |
+| **Instagram** | [@tokenwaster](https://www.instagram.com/tokenwaster/) |
+| **GitHub** | [github.com/tokenwaster](https://github.com/tokenwaster) |
+
 ## About this repo
 
 The suite is developed in a private monorepo; this is an allowlisted export of

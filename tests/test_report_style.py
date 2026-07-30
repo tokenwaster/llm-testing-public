@@ -253,3 +253,50 @@ def test_the_value_section_filters_both_charts_from_one_control():
     assert 'data-vcohort="{{ key }}"' in block
     assert "cost_scatter[key]" in block and "speed_scatter[key]" in block, (
         "the control previously governed only the speed chart")
+
+
+def test_the_links_page_is_generated_for_the_live_dataset_only():
+    assert '_w(out_dir / "links.html", build_links_page(runs, tdefs))' in SRC
+    i = SRC.index('_w(out_dir / "links.html"')
+    guard = SRC[max(0, i - 400):i]
+    assert 'if dataset_key == "live":' in guard, (
+        "an archived copy of a links page would go stale")
+
+
+def test_the_links_page_lists_every_account_with_its_handle():
+    from harness import report
+    runs = report.load_all_runs()
+    tdefs = report._task_defs(None)
+    html = report.build_links_page(runs, tdefs)
+    for _n, url, _c, _p in report.SOCIALS:
+        assert url in html, url
+    for handle in ("@TokenWaster", "@tokenwaster"):
+        assert handle in html
+    assert 'href="index.html"' in html, "must route inbound traffic to the results"
+
+
+def test_the_links_page_counts_match_the_leaderboard():
+    from harness import report
+    runs = report.load_all_runs()
+    tdefs = report._task_defs(None)
+    html = report.build_links_page(runs, tdefs)
+    td = {t: i for t, i in report.collect_task_data(runs).items() if t in tdefs}
+    models = {m for info in td.values() for m in info["agg"]}
+    assert f"<b>{len(models)}</b> models" in html, (
+        "the count on the card must match the page it links to")
+    assert f"<b>{len(tdefs)}</b> tasks" in html
+
+
+def test_both_readmes_carry_the_link_block():
+    for name in ("README.md", "README.public.md"):
+        txt = (config.ROOT / name).read_text(encoding="utf-8")
+        assert "https://tokenwaster.ai/links" in txt, name
+        for url in ("youtube.com/@TokenWaster", "x.com/tokenwaster",
+                    "tiktok.com/@tokenwaster", "instagram.com/tokenwaster",
+                    "github.com/tokenwaster"):
+            assert url in txt, f"{name} missing {url}"
+
+
+def test_the_public_readme_is_the_one_that_ships():
+    export = (config.ROOT / "tools" / "export_public.py").read_text(encoding="utf-8")
+    assert 'shutil.copy2(ROOT / "README.public.md", out / "README.md")' in export

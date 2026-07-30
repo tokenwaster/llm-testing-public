@@ -92,6 +92,8 @@ def resolve_run_data(rel: str):
     first = rel.split("/", 1)[0] if rel else ""
     if not first or (RUNS_DIR / first).exists():
         return RUNS_DIR, rel
+    if (SPECIAL_DIR / first).exists():
+        return SPECIAL_DIR, rel
     for runs_root in sorted(ARCHIVE_DIR.glob("*/runs")):
         if (runs_root / first).exists():
             return runs_root, rel
