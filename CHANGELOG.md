@@ -26,6 +26,36 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+### The public export is now serveable on a domain
+It had no `robots.txt`, `sitemap.xml`, `llms.txt`, favicon, meta description,
+canonical, or social card, and `/` had nothing to serve. `tools/seo.py` generates
+all of it on every publish, so it cannot drift from the site it describes: the
+sitemap is built by walking the rendered pages, and `llms.txt` quotes the model,
+task and run counts read back out of the export.
+
+Crawling is scoped to `/reports/`. The evidence trees are `Disallow`ed and carry
+`X-Robots-Tag: noindex` — `runs/` alone is 121 MB of JSON, which would burn the
+crawl budget that the 124 pages worth indexing need. Retrieval crawlers that cite
+(OAI-SearchBot, Claude-User, PerplexityBot, Googlebot, Bingbot and peers) are
+allowed; the training-corpus crawlers (GPTBot, ClaudeBot, CCBot,
+Google-Extended, Applebot-Extended and peers) are disallowed outright.
+
+Archived dataset pages and per-run pages are `noindex,follow` — they are near
+duplicates of the live pages and would dilute them.
+
+### 9,304 links that would have 404'd in public
+Every `/data/…` link is an operator-server route, and the export had no rewrite
+for them, so 219 published pages pointed at a browser that only exists on
+localhost. They now resolve to the same run directory in the public repo, where
+GitHub renders the JSON — the evidence is still one click from the score.
+
+### A dead nav link on every archived dataset page
+`special.html` and `links.html` are only written for the live dataset, but the nav
+emitted them unconditionally: 476 guaranteed 404s across the five archived
+datasets. `_nav` now drops any page the current dataset does not render, and a
+test asserts `_LIVE_ONLY` against what `generate_all` actually writes, so adding a
+live-only page cannot re-open this.
+
 ## 0.7.3 — a links page, and every comment out of the tree
 
 ### tokenwaster.ai/links
