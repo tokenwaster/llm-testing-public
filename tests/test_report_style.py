@@ -300,3 +300,33 @@ def test_both_readmes_carry_the_link_block():
 def test_the_public_readme_is_the_one_that_ships():
     export = (config.ROOT / "tools" / "export_public.py").read_text(encoding="utf-8")
     assert 'shutil.copy2(ROOT / "README.public.md", out / "README.md")' in export
+
+
+def test_the_nav_never_links_a_page_the_dataset_does_not_render():
+    from harness import report
+    prev, prev_pub = report._DATASET_KEY, report._PUBLIC_NAV
+    try:
+        report._PUBLIC_NAV = True
+        live = report._nav("")
+        assert "special.html" in live and "index.html" in live
+        report._DATASET_KEY = "0.5"
+        arch = report._nav("")
+        for page in report._LIVE_ONLY:
+            assert page not in arch, (
+                f"{page} is only written when dataset_key == 'live', so an "
+                f"archived dataset linking it is a guaranteed 404")
+        assert "index.html" in arch and "compare.html" in arch
+    finally:
+        report._DATASET_KEY, report._PUBLIC_NAV = prev, prev_pub
+
+
+def test_live_only_pages_match_what_generate_all_actually_writes():
+    import inspect
+
+    from harness import report
+    src = inspect.getsource(report.generate_all)
+    body = src[src.index('if dataset_key == "live":'):]
+    body = body[:body.index("index = out_dir")]
+    for page in report._LIVE_ONLY:
+        assert page in body, (
+            f"{page} is in _LIVE_ONLY but not written in the live-only block")

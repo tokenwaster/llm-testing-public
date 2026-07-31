@@ -35,6 +35,8 @@ _EXTRA_DARK, _EXTRA_LIGHT = _overflow_palette()
 _RUNS_BASE = config.RUNS_DIR
 VRAM_REF_CTX = 32768
 _PUBLIC_NAV = False
+_LIVE_ONLY = {"special.html", "links.html"}
+_DATASET_KEY = "live"
 
 _NAV = [
     ("Overview", "index.html", False), ("Families", "family.html", False),
@@ -144,6 +146,8 @@ def _nav(prefix: str = "") -> str:
     out = []
     for label, href, control in _NAV:
         if control and _PUBLIC_NAV:
+            continue
+        if href in _LIVE_ONLY and _DATASET_KEY != "live":
             continue
         target = href if control else prefix + href
         if label == "Special" and not _PUBLIC_NAV:
@@ -6593,12 +6597,14 @@ def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
 def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
                  dataset_label: str = "", dataset_key: str = "live",
                  tasks_dir: Path | None = None, public_nav: bool = False) -> Path:
-    global _RUNS_BASE, _PUBLIC_NAV
+    global _RUNS_BASE, _PUBLIC_NAV, _DATASET_KEY
     runs_dir = runs_dir or config.RUNS_DIR
     out_dir = out_dir or config.REPORTS_DIR
     prev_base, prev_public = _RUNS_BASE, _PUBLIC_NAV
+    prev_key = _DATASET_KEY
     _RUNS_BASE = runs_dir
     _PUBLIC_NAV = public_nav
+    _DATASET_KEY = dataset_key
     try:
         runs = load_all_runs(runs_dir)
         tdefs = _task_defs(tasks_dir)
@@ -6674,3 +6680,4 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
     finally:
         _RUNS_BASE = prev_base
         _PUBLIC_NAV = prev_public
+        _DATASET_KEY = prev_key
