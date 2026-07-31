@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maze Explorers — 24 Bots</title>
+<style>
+  :root { --bg:#12141a; --panel:#1b1f29; --ink:#e8ecf4; --muted:#8b94a7; --wall:#cfd8ea; }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:20px; background:var(--bg); color:var(--ink);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    display:flex; flex-direction:column; align-items:center; gap:14px;
+  }
+  h1 { font-size:16px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); margin:0; font-weight:600; }
+  #hud {
+    display:flex; gap:10px; align-items:stretch; flex-wrap:wrap; justify-content:center;
+  }
+  .stat {
+    background:var(--panel); border:1px solid #2a3040; border-radius:8px;
+    padding:8px 14px; min-width:104px; text-align:center;
+  }
+  .stat .k { font-size:10px; letter-spacing:.12em; color:var(--muted); text-transform:uppercase; }
+  .stat .v { font-size:20px; font-variant-numeric:tabular-nums; margin-top:2px; }
+  button {
+    background:#2b3purple; background:#283246; color:var(--ink); border:1px solid #3a4considerable;
+    border:1px solid #3a4560; border-radius:8px; padding:0 18px; font:inherit; font-size:13px; cursor:pointer;
+  }
+  button:hover { background:#334065; }
+  #maze { background:var(--panel); border:1px solid #2a3040; border-radius:10px; padding:9px; line-height:0; }
+  canvas { display:block; border-radius:4px; background:#0e1016; }
+  #legend { color:var(--muted); font-size:11px; max-width:560px; text-align:center; line-height:1.5; }
+</style>
+</head>
+<body>
+
+<h1>Maze Explorers</h1>
+
+<div id="hud">
+  <div class="stat"><div class="k">Completed</div><div class="v" id="completed">0</div></div>
+  <div class="stat"><div class="k">Timer (ticks)</div><div class="v" id="timer">0</div></div>
+  <div class="stat"><div class="k">Seed</div><div class="v" id="seedout">—</div></div>
+  <button id="reset">Reset</button>
+  <button id="pause">Pause</button>
+</div>
+
+<div id="maze"><canvas id="cv" width="442" height="442"></canvas></div>
+
+<div id="legend">
+  24 independent bots, each blind to the maze. Every bot does its own Tremaux/DFS walk:
+  step into an unknown neighbour, and when a branch is exhausted mark it dead and back out.
+  Green = spawn, gold = exit.
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------------- deterministic RNG ---------------- */
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /* ---------------- constants ---------------- */
+  var ROWS = 17, COLS = 17, NBOTS = 24;
+  var CELL = 24, PAD = 5;
+  var CANVAS_W = COLS * CELL + PAD * 2;   // 442
+  var CANVAS_H = ROWS * CELL + PAD * 2;   // 442
+  var TICK_MS = 110;
+
+  // direction indices: 0=N 1=E 2=S 3=W
+  var DR = [-1, 0, 1, 0], DC = [0, 1, 0, -1];
+  var DNAME = ["n", "e", "s", "w"], OPP = [2, 3, 0, 1];
+
+  // all 24 permutations of [0,1,2,3] -> one exploration preference per bot
+  var PERMS = (function () {
+    var out = [];
+    (function perm(cur, rest) {
+      if (!rest.length) { out.push(cur.slice()); return; }
+      for (var i = 0; i < rest.length; i++) {
+        var r = rest.slice(); var v = r.splice(i, 1)[0];
+        perm(cur.concat([v]), r);
+      }
+    })([], [0, 1, 2, 3]);
+    return out;
+  })();
+
+  var cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+  var elCompleted = document.getElementById("completed");
+  var elTimer = document.getElementById("timer");
+  var elSeed = document.getElementById("seedout");
+  var elReset = document.getElementById("reset");
+  var elPause = document.getElementById("pause");
+
+  /* ---------------- state ---------------- */
+  var grid, spawn, exitCell, bots, elapsed, seed, running = true;
+  var lastTickAt = 0, alpha = 1;
+
+  function key(r, c) { return r * COLS + c; }
+
+  /* ---------------- maze generation (perfect maze, iterative DFS) ------------- */
+  function buildMaze(rng) {
+    var g = new Array(ROWS);
+    for (var r = 0; r < ROWS; r++) {
+      g[r] = new Array(COLS);
+      for (var c = 0; c < COLS; c++) g[r][c] = { n: true, e: true, s: true, w: true };
+    }
+    var seen = new Uint8Array(ROWS * COLS);
+    var sr = Math.floor(rng() * ROWS), sc = Math.floor(rng() * COLS);
+    var stack = [[sr, sc]];
+    seen[key(sr, sc)] = 1;
+    while (stack.length) {
+      var top = stack[stack.length - 1], r0 = top[0], c0 = top[1];
+      var opts = [];
+      for (var d = 0; d < 4; d++) {
+        var nr = r0 + DR[d], nc = c0 + DC[d];
+        if (nr < 0 || nc < 0 || nr >= ROWS || nc >= COLS) continue;
+        if (seen[key(nr, nc)]) continue;
+        opts.push(d);
+      }
+      if (!opts.length) { stack.pop(); continue; }
+      var dir = opts[Math.floor(rng() * opts.length)];
+      var tr = r0 + DR[dir], tc = c0 + DC[dir];
+      g[r0][c0][DNAME[dir]] = false;
+      g[tr][tc][DNAME[OPP[dir]]] = false;
+      seen[key(tr, tc)] = 1;
+      stack.push([tr, tc]);
+    }
+    return g;
+  }
+
+  // distance map purely for placing a far-away exit at generation time
+  function farthestFrom(g, sr, sc) {
+    var dist = new Int32Array(ROWS * COLS).fill(-1);
+    var q = [[sr, sc]], head = 0;
+    dist[key(sr, sc)] = 0;
+    var best = [sr, sc], bestD = 0;
+    while (head < q.length) {
+      var cur = q[head++], r = cur[0], c = cur[1], d0 = dist[key(r, c)];
+      if (d0 > bestD) { bestD = d0; best = [r, c]; }
+      for (var d = 0; d < 4; d++) {
+        if (g[r][c][DNAME[d]]) continue;
+        var nr = r + DR[d], nc = c + DC[d];
+        if (nr < 0 || nc < 0 || nr >= ROWS || nc >= COLS) continue;
+        if (dist[key(nr, nc)] !== -1) continue;
+        dist[key(nr, nc)] = d0 + 1;
+        q.push([nr, nc]);
+      }
+    }
+    return best;
+  }
+
+  /* ---------------- bots ---------------- */
+  function makeBot(i, order) {
+    return {
+      id: i,
+      color: "hsl(" + Math.round((i * 360) / NBOTS) + ",78%,60%)",
+      order: order,
+      r: spawn.r, c: spawn.c,
+      pr: spawn.r, pc: spawn.c,             // previous cell (for interpolation)
+      stack: [],                            // DFS route back to spawn
+      visited: new Set([key(spawn.r, spawn.c)]),
+      dead: new Set(),
+      path: [{ r: spawn.r, c: spawn.c }],
+      deadEnds: [],
+      finishTick: null
+    };
+  }
+
+  function setup(newSeed) {
+    seed = (typeof newSeed === "number" && isFinite(newSeed))
+      ? (newSeed >>> 0)
+      : (Math.floor(Math.random() * 0xFFFFFFFF) >>> 0);
+
+    var rng = mulberry32(seed);
+    grid = buildMaze(rng);
+
+    spawn = { r: Math.floor(rng() * ROWS), c: Math.floor(rng() * COLS) };
+    var far = farthestFrom(grid, spawn.r, spawn.c);
+    exitCell = { r: far[0], c: far[1] };
+
+    var rot = Math.floor(rng() * PERMS.length);
+    bots = [];
+    for (var i = 0; i < NBOTS; i++) bots.push(makeBot(i, PERMS[(i + rot) % PERMS.length]));
+
+    elapsed = 0;
+    alpha = 1;
+    lastTickAt = now();
+    elSeed.textContent = String(seed);
+    syncHud();
+    draw();
+  }
+
+  function allDone() {
+    for (var i = 0; i < bots.length; i++) if (bots[i].finishTick === null) return false;
+    return true;
+  }
+
+  function stepBot(b, t) {
+    if (b.finishTick !== null) return;
+    var cell = grid[b.r][b.c];
+
+    // 1) prefer an unknown, non-dead, reachable neighbour (forward exploration)
+    for (var i = 0; i < 4; i++) {
+      var d = b.order[i];
+      if (cell[DNAME[d]]) continue;                       // wall between us
+      var nr = b.r + DR[d], nc = b.c + DC[d];
+      if (nr < 0 || nc < 0 || nr >= ROWS || nc >= COLS) continue;
+      var k = key(nr, nc);
+      if (b.visited.has(k) || b.dead.has(k)) continue;
+      b.pr = b.r; b.pc = b.c;
+      b.stack.push({ r: b.r, c: b.c });
+      b.r = nr; b.c = nc;
+      b.visited.add(k);
+      b.path.push({ r: nr, c: nc });
+      if (nr === exitCell.r && nc === exitCell.c) b.finishTick = t;
+      return;
+    }
+
+    // 2) nothing new here -> this branch is exhausted: mark dead and back out
+    var ck = key(b.r, b.c);
+    if (!b.dead.has(ck)) {
+      b.dead.add(ck);
+      b.deadEnds.push({ r: b.r, c: b.c });
+    }
+    if (!b.stack.length) return;                          // fully exhausted (cannot happen in a perfect maze)
+    var back = b.stack.pop();
+    b.pr = b.r; b.pc = b.c;
+    b.r = back.r; b.c = back.c;
+    b.path.push({ r: back.r, c: back.c });
+    if (back.r === exitCell.r && back.c === exitCell.c) b.finishTick = t;
+  }
+
+  function stepOnce() {
+    if (allDone()) return false;                          // timer frozen after last arrival
+    var t = elapsed + 1;
+    for (var i = 0; i < bots.length; i++) stepBot(bots[i], t);
+    elapsed = t;
+    return true;
+  }
+
+  function tick(n) {
+    n = (n === undefined || n === null) ? 1 : Math.floor(n);
+    for (var i = 0; i < n; i++) stepOnce();
+    alpha = 1;
+    lastTickAt = now();
+    syncHud();
+    draw();
+    return elapsed;
+  }
+
+  /* ---------------- rendering ---------------- */
+  function cx(c) { return PAD + c * CELL + CELL / 2; }
+  function cy(r) { return PAD + r * CELL + CELL / 2; }
+
+  function draw() {
+    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.fillStyle = "#0e1016";
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // spawn + exit tiles
+    ctx.fillStyle = "rgba(74,222,128,0.30)";
+    ctx.fillRect(PAD + spawn.c * CELL + 2, PAD + spawn.r * CELL + 2, CELL - 4, CELL - 4);
+    ctx.fillStyle = "rgba(250,204,21,0.42)";
+    ctx.fillRect(PAD + exitCell.c * CELL + 2, PAD + exitCell.r * CELL + 2, CELL - 4, CELL - 4);
+
+    // walls
+    ctx.strokeStyle = "#cfd8ea";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "square";
+    ctx.beginPath();
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var x = PAD + c * CELL, y = PAD + r * CELL, w = grid[r][c];
+        if (w.n) { ctx.moveTo(x, y); ctx.lineTo(x + CELL, y); }
+        if (w.w) { ctx.moveTo(x, y); ctx.lineTo(x, y + CELL); }
+        if (w.s) { ctx.moveTo(x, y + CELL); ctx.lineTo(x + CELL, y + CELL); }
+        if (w.e) { ctx.moveTo(x + CELL, y); ctx.lineTo(x + CELL, y + CELL); }
+      }
+    }
+    ctx.stroke();
+
+    // bots — interpolated between previous and current cell
+    var a = alpha < 0 ? 0 : (alpha > 1 ? 1 : alpha);
+    var ease = a * a * (3 - 2 * a);
+    for (var i = 0; i < bots.length; i++) {
+      var b = bots[i];
+      var px = cx(b.pc) + (cx(b.c) - cx(b.pc)) * ease;
+      var py = cy(b.pr) + (cy(b.r) - cy(b.pr)) * ease;
+      // tiny fan-out so overlapping bots stay visible, still well inside the corridor
+      var ang = (i / NBOTS) * Math.PI * 2, rad = b.finishTick === null ? CELL * 0.13 : CELL * 0.22;
+      px += Math.cos(ang) * rad;
+      py += Math.sin(ang) * rad;
+
+      ctx.beginPath();
+      ctx.arc(px, py, CELL * 0.19, 0, Math.PI * 2);
+      ctx.fillStyle = b.color;
+      ctx.globalAlpha = b.finishTick === null ? 1 : 0.55;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function syncHud() {
+    var done = 0;
+    for (var i = 0; i < bots.length; i++) if (bots[i].finishTick !== null) done++;
+    elCompleted.textContent = String(done);
+    elTimer.textContent = String(elapsed);
+  }
+
+  /* ---------------- animation loop ---------------- */
+  function now() {
+    return (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+  }
+
+  function frame() {
+    var t = now();
+    if (running && !allDone()) {
+      var dt = t - lastTickAt;
+      if (dt >= TICK_MS) {
+        var steps = Math.min(8, Math.floor(dt / TICK_MS));
+        for (var i = 0; i < steps; i++) stepOnce();
+        lastTickAt += steps * TICK_MS;
+        alpha = (now() - lastTickAt) / TICK_MS;
+        syncHud();
+      } else {
+        alpha = dt / TICK_MS;
+      }
+    } else {
+      alpha = 1;
+    }
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  /* ---------------- controls ---------------- */
+  elReset.addEventListener("click", function () { setup(); });
+  elPause.addEventListener("click", function () {
+    running = !running;
+    lastTickAt = now();
+    elPause.textContent = running ? "Pause" : "Resume";
+  });
+
+  /* ---------------- public API ---------------- */
+  var game = {
+    tick: tick,
+    reset: function (s) { setup(s); return game; },
+    size: { rows: ROWS, cols: COLS },
+    walls: function (r, c) {
+      if (r < 0 || c < 0 || r >= ROWS || c >= COLS) return null;
+      var w = grid[r][c];
+      return { n: w.n, e: w.e, s: w.s, w: w.w };
+    }
+  };
+  Object.defineProperty(game, "elapsed", { get: function () { return elapsed; }, enumerable: true });
+  Object.defineProperty(game, "spawn", { get: function () { return { r: spawn.r, c: spawn.c }; }, enumerable: true });
+  Object.defineProperty(game, "exit", { get: function () { return { r: exitCell.r, c: exitCell.c }; }, enumerable: true });
+  Object.defineProperty(game, "bots", { get: function () { return bots; }, enumerable: true });
+  Object.defineProperty(game, "seed", { get: function () { return seed; }, enumerable: true });
+  window.game = game;
+
+  setup();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
