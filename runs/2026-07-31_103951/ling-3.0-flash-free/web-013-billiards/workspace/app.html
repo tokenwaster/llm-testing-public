@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Billiards</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:'Segoe UI',Arial,sans-serif;color:#e0e0e0;user-select:none}
+#wrapper{display:flex;flex-direction:column;align-items:center}
+canvas{border-radius:4px;cursor:crosshair;box-shadow:0 4px 30px rgba(0,0,0,0.6);max-width:98vw}
+#controls{margin-top:14px;display:flex;gap:12px;align-items:center}
+button{padding:10px 28px;font-size:15px;font-weight:bold;cursor:pointer;background:#e94560;color:white;border:none;border-radius:6px;transition:background .2s;letter-spacing:.5px}
+button:hover{background:#c73650}
+button:active{transform:scale(.97)}
+#instructions{margin-top:10px;font-size:13px;color:#999;text-align:center;max-width:620px;line-height:1.6}
+#instructions strong{color:#e94560}
+</style>
+</head>
+<body>
+<div id="wrapper">
+<canvas id="game"></canvas>
+<div id="controls"><button id="resetBtn">Reset / Rack</button></div>
+<div id="instructions">
+<strong>How to shoot:</strong> Click and drag on the white cue ball to aim.
+Drag <em>backward</em> — the shot goes in the opposite direction.
+Longer drag = harder shot. Press <strong>Reset / Rack</strong> to re-rack.
+</div>
+</div>
+<script>
+(function(){
+const canvas=document.getElementById('game');
+const ctx=canvas.getContext('2d');
+
+const W=860,H=430,R=11;
+const RAIL=22;
+const CW=W+2*RAIL,CH=H+2*RAIL;
+canvas.width=CW;canvas.height=CH;
+
+const POCKETS=[
+{x:0,y:0},{x:W,y:0},{x:0,y:H},{x:W,y:H},
+{x:W/2,y:0},{x:W/2,y:H}
+];
+const POCKET_R=R*2.4;
+
+const FRICTION=0.45;
+const WALL_REST=0.78;
+const BALL_REST=0.96;
+const STOP_SPEED=0.08;
+
+let balls=[];
+let animId=null;
+let paused=false;
+let lastTS=0;
+let aiming=false;
+let dragStart=null;
+let dragCurr=null;
+
+function cueBall(){return balls.find(b=>b.cue&&!b.potted);}
+function toCanvas(px,py){return{x:px+RAIL,y:py+RAIL};}
+function toPlayfield(cx,cy){return{x:cx-RAIL,y:cy-RAIL};}
+
+function createRack(){
+const rack=[];
+rack.push({x:W*.25,y:H/2,vx:0,vy:0,cue:true,number:0,potted:false,color:'#FFFFFF'});
+const colors=[
+'#FFD700','#0055AA','#CC0000','#6B0080','#FF6600',
+'#006600','#800000','#1a1a1a','#FFD700','#0055AA',
+'#CC0000','#6B0080','#FF6600','#006600','#800000'
+];
+const rx=W*.72,ry=H/2,gap=R*2.08;
+let n=0;
+for(let row=0;row<5&&n<15;row++){
+for(let col=0;col<=row&&n<15;col++){
+const x=rx+row*gap*Math.cos(Math.PI/6);
+const y=ry+(col-row/2)*gap;
+rack.push({x,y,vx:0,vy:0,cue:false,number:n+1,potted:false,color:colors[n]});
+n++;
+}
+}
+return rack;
+}
+
+function resetBalls(arr){
+balls=arr.map(function(b){
+return{
+x:b.x,y:b.y,
+vx:b.vx||0,vy:b.vy||0,
+cue:!!b.cue,
+number:b.number||0,
+potted:false,
+color:b.color||(b.cue?'#FFFFFF':'#FFD700')
+};
+});
+}
+
+function step(dt){
+if(dt<=0||dt>0.05)dt=Math.min(dt,0.05);
+
+for(let i=0;i<balls.length;i++){
+let b=balls[i];
+if(b.potted)continue;
+let spd=Math.hypot(b.vx,b.vy);
+if(spd>STOP_SPEED){
+let decay=Math.exp(-FRICTION*dt);
+b.vx*=decay;b.vy*=decay;
+if(Math.hypot(b.vx,b.vy)<STOP_SPEED){b.vx=0;b.vy=0;}
+}else{b.vx=0;b.vy=0;}
+b.x+=b.vx*dt;b.y+=b.vy*dt;
+}
+
+for(let b of balls){
+if(b.potted)continue;
+if(b.x-R<0){b.x=R;b.vx=Math.abs(b.vx)*WALL_REST;}
+if(b.x+R>W){b.x=W-R;b.vx=-Math.abs(b.vx)*WALL_REST;}
+if(b.y-R<0){b.y=R;b.vy=Math.abs(b.vy)*WALL_REST;}
+if(b.y+R>H){b.y=H-R;b.vy=-Math.abs(b.vy)*WALL_REST;}
+}
+
+for(let iter=0;iter<4;iter++){
+for(let i=0;i<balls.length;i++){
+if(balls[i].potted)continue;
+for(let j=i+1;j<balls.length;j++){
+if(balls[j].potted)continue;
+let dx=balls[j].x-balls[i].x;
+let dy=balls[j].y-balls[i].y;
+let dist=Math.hypot(dx,dy);
+if(dist<R*2&&dist>1e-4){
+let nx=dx/dist,ny=dy/dist;
+let overlap=R*2-dist;
+balls[i].x-=nx*overlap*.5;balls[i].y-=ny*overlap*.5;
+balls[j].x+=nx*overlap*.5;balls[j].y+=ny*overlap*.5;
+let dvn=(balls[i].vx-balls[j].vx)*nx+(balls[i].vy-balls[j].vy)*ny;
+if(dvn>0){
+balls[i].vx-=dvn*nx*BALL_REST;balls[i].vy-=dvn*ny*BALL_REST;
+balls[j].vx+=dvn*nx*BALL_REST;balls[j].vy+=dvn*ny*BALL_REST;
+}
+}
+}
+}
+}
+
+for(let b of balls){
+if(b.potted)continue;
+for(let p of POCKETS){
+if(Math.hypot(b.x-p.x,b.y-p.y)<POCKET_R){
+b.potted=true;b.vx=0;b.vy=0;break;
+}
+}
+}
+}
+
+function draw(){
+ctx.clearRect(0,0,CW,CH);
+
+ctx.fillStyle='#1a7a3c';
+ctx.fillRect(RAIL,RAIL,W,H);
+ctx.fillStyle='rgba(0,0,0,0.012)';
+for(let i=0;i<W;i+=6){for(let j=0;j<H;j+=6){
+if((i*7+j*13)%12<6)ctx.fillRect(RAIL+i,RAIL+j,3,3);
+}}
+
+ctx.strokeStyle='rgba(255,255,255,0.07)';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+ctx.beginPath();ctx.moveTo(RAIL+W*.25,RAIL);ctx.lineTo(RAIL+W*.25,RAIL+H);ctx.stroke();
+ctx.setLineDash([]);
+
+ctx.fillStyle='#6B3A1F';
+ctx.fillRect(RAIL-RAIL,RAIL-RAIL,W+2*RAIL,RAIL);
+ctx.fillRect(RAIL-RAIL,RAIL+H,W+2*RAIL,RAIL);
+ctx.fillRect(RAIL-RAIL,RAIL,RAIL,H);
+ctx.fillRect(RAIL+W,RAIL,RAIL,H);
+
+ctx.fillStyle='rgba(255,255,255,0.05)';
+ctx.fillRect(RAIL-RAIL,RAIL-RAIL,W+2*RAIL,2);
+ctx.fillRect(RAIL-RAIL,RAIL-RAIL,2,H+2*RAIL);
+ctx.fillStyle='rgba(0,0,0,0.18)';
+ctx.fillRect(RAIL-RAIL,RAIL+H,W+2*RAIL,2);
+ctx.fillRect(RAIL+W,RAIL,2,H);
+
+ctx.strokeStyle='#3a1a0a';ctx.lineWidth=2;
+ctx.strokeRect(RAIL-RAIL,RAIL-RAIL,W+2*RAIL,H+2*RAIL);
+
+for(let p of POCKETS){
+let cp=toCanvas(p.x,p.y);
+ctx.beginPath();ctx.arc(cp.x,cp.y,POCKET_R+3,0,Math.PI*2);
+ctx.fillStyle='#2a1005';ctx.fill();
+ctx.beginPath();ctx.arc(cp.x,cp.y,POCKET_R,0,Math.PI*2);
+ctx.fillStyle='#0a0a0a';ctx.fill();
+ctx.beginPath();ctx.arc(cp.x,cp.y,POCKET_R,0,Math.PI*2);
+ctx.strokeStyle='#8B6914';ctx.lineWidth=2;ctx.stroke();
+}
+
+for(let b of balls){
+if(b.potted)continue;
+let cp=toCanvas(b.x,b.y);
+
+ctx.beginPath();ctx.arc(cp.x+1.5,cp.y+1.5,R,0,Math.PI*2);
+ctx.fillStyle='rgba(0,0,0,0.22)';ctx.fill();
+
+ctx.beginPath();ctx.arc(cp.x,cp.y,R,0,Math.PI*2);
+if(b.cue){
+let g=ctx.createRadialGradient(cp.x-3,cp.y-3,1,cp.x,cp.y,R);
+g.addColorStop(0,'#ffffff');g.addColorStop(1,'#cccccc');
+ctx.fillStyle=g;
+}else{ctx.fillStyle=b.color;}
+ctx.fill();
+
+ctx.strokeStyle='rgba(0,0,0,0.18)';ctx.lineWidth=.5;ctx.stroke();
+
+if(!b.cue&&b.number>0){
+ctx.beginPath();ctx.arc(cp.x,cp.y,R*.42,0,Math.PI*2);
+ctx.fillStyle='#fff';ctx.fill();
+ctx.fillStyle='#111';
+ctx.font='bold '+Math.round(R*.65)+'px Arial';
+ctx.textAlign='center';ctx.textBaseline='middle';
+ctx.fillText(b.number,cp.x,cp.y+.5);
+}
+
+ctx.beginPath();ctx.arc(cp.x-R*.3,cp.y-R*.3,R*.22,0,Math.PI*2);
+ctx.fillStyle='rgba(255,255,255,0.4)';ctx.fill();
+}
+
+if(aiming&&dragStart&&dragCurr){
+let cue=cueBall();
+if(cue){
+let cpos=toCanvas(cue.x,cue.y);
+let ddx=dragCurr.x-dragStart.x;
+let ddy=dragCurr.y-dragStart.y;
+let ddist=Math.hypot(ddx,ddy);
+if(ddist>8){
+let sdx=-ddx/ddist,sdy=-ddy/ddist;
+let lineLen=Math.min(ddist*1.8,350);
+ctx.beginPath();ctx.moveTo(cpos.x,cpos.y);
+ctx.lineTo(cpos.x+sdx*lineLen,cpos.y+sdy*lineLen);
+ctx.strokeStyle='rgba(255,255,255,0.5)';ctx.lineWidth=2;
+ctx.setLineDash([10,5]);ctx.stroke();ctx.setLineDash([]);
+
+let ax=cpos.x+sdx*lineLen,ay=cpos.y+sdy*lineLen;
+ctx.beginPath();ctx.moveTo(ax,ay);
+ctx.lineTo(ax-sdx*8+sdy*4,ay-sdy*8-sdx*4);
+ctx.lineTo(ax-sdx*8-sdy*4,ay-sdy*8+sdx*4);
+ctx.closePath();ctx.fillStyle='rgba(255,255,255,0.5)';ctx.fill();
+
+let stickLen=Math.min(ddist*1.2,200);
+ctx.beginPath();
+ctx.moveTo(cpos.x-sdx*R,cpos.y-sdy*R);
+ctx.lineTo(cpos.x-sdx*(R+stickLen),cpos.y-sdy*(R+stickLen));
+ctx.strokeStyle='#C8A86E';ctx.lineWidth=4;ctx.lineCap='round';ctx.stroke();
+ctx.beginPath();
+ctx.arc(cpos.x-sdx*(R+2),cpos.y-sdy*(R+2),2.5,0,Math.PI*2);
+ctx.fillStyle='#8B7355';ctx.fill();
+
+let power=Math.min(ddist/80,1);
+let barW=120,barH=8;
+let barX=CW/2-barW/2,barY=CH-18;
+ctx.fillStyle='rgba(0,0,0,0.4)';
+ctx.fillRect(barX-1,barY-1,barW+2,barH+2);
+ctx.fillStyle=power<.5
+?'rgba(0,'+Math.round(power*2*255)+',0,0.8)'
+:'rgba(255,'+Math.round((1-power)*2*255)+',0,0.8)';
+ctx.fillRect(barX,barY,barW*power,barH);
+ctx.strokeStyle='rgba(255,255,255,0.3)';ctx.lineWidth=1;
+ctx.strokeRect(barX,barY,barW,barH);
+ctx.fillStyle='#fff';ctx.font='11px Arial';ctx.textAlign='center';
+ctx.fillText(Math.round(power*100)+'%',CW/2,barY-4);
+}
+}
+}
+}
+
+function animate(ts){
+if(paused)return;
+if(!lastTS)lastTS=ts;
+let dt=(ts-lastTS)/1000;
+lastTS=ts;
+dt=Math.min(dt,1/20);
+step(dt);
+draw();
+animId=requestAnimationFrame(animate);
+}
+
+canvas.addEventListener('mousedown',function(e){
+if(paused)return;
+let rect=canvas.getBoundingClientRect();
+let mx=e.clientX-rect.left,my=e.clientY-rect.top;
+let cue=cueBall();
+if(!cue)return;
+let cp=toCanvas(cue.x,cue.y);
+if(Math.hypot(mx-cp.x,my-cp.y)<R*3.5){
+aiming=true;dragStart={x:mx,y:my};dragCurr={x:mx,y:my};
+}
+});
+
+canvas.addEventListener('mousemove',function(e){
+let rect=canvas.getBoundingClientRect();
+let mx=e.clientX-rect.left,my=e.clientY-rect.top;
+if(aiming)dragCurr={x:mx,y:my};
+});
+
+canvas.addEventListener('mouseup',function(e){
+if(!aiming)return;
+let rect=canvas.getBoundingClientRect();
+let mx=e.clientX-rect.left,my=e.clientY-rect.top;
+let cue=cueBall();
+if(cue&&dragStart){
+let ddx=mx-dragStart.x,ddy=my-dragStart.y;
+let ddist=Math.hypot(ddx,ddy);
+if(ddist>8){
+let sdx=-ddx/ddist,sdy=-ddy/ddist;
+let speed=ddist*3;
+cue.vx=sdx*speed;cue.vy=sdy*speed;
+}
+}
+aiming=false;dragStart=null;dragCurr=null;
+});
+
+canvas.addEventListener('mouseleave',function(){
+if(aiming){aiming=false;dragStart=null;dragCurr=null;}
+});
+
+document.getElementById('resetBtn').addEventListener('click',function(){
+resetBalls(createRack());lastTS=0;
+});
+
+window.sim={
+W:W,H:H,R:R,
+reset:function(ballsArr){resetBalls(ballsArr);lastTS=0;},
+step:function(dt){step(dt);draw();},
+state:function(){return balls.map(function(b){return{x:b.x,y:b.y,vx:b.vx,vy:b.vy,potted:!!b.potted,cue:!!b.cue};});},
+shoot:function(vx,vy){let c=cueBall();if(c){c.vx=vx;c.vy=vy;}},
+pause:function(){paused=true;if(animId){cancelAnimationFrame(animId);animId=null;}},
+resume:function(){paused=false;lastTS=0;animId=requestAnimationFrame(animate);}
+};
+
+resetBalls(createRack());
+animId=requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

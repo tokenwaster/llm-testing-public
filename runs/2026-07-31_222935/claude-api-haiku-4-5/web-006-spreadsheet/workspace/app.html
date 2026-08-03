@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Spreadsheet</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background: #f5f5f5;
+            min-height: 100vh;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            min-width: 600px;
+            min-height: 400px;
+        }
+        
+        h1 {
+            margin-bottom: 20px;
+            font-size: 24px;
+            color: #333;
+        }
+        
+        .controls {
+            margin-bottom: 20px;
+        }
+        
+        button {
+            padding: 8px 16px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        
+        button:hover {
+            background: #45a049;
+        }
+        
+        .grid-wrapper {
+            overflow: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        table {
+            border-collapse: collapse;
+            background: white;
+            width: 100%;
+        }
+        
+        th, td {
+            border: 1px solid #ddd;
+            padding: 0;
+            text-align: center;
+        }
+        
+        th {
+            background: #f0f0f0;
+            padding: 8px;
+            font-weight: bold;
+            min-width: 60px;
+            height: 30px;
+        }
+        
+        td {
+            min-width: 60px;
+            height: 30px;
+            padding: 0;
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            height: 100%;
+            border: none;
+            padding: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            text-align: right;
+        }
+        
+        input[type="text"]:focus {
+            outline: none;
+            background: #e3f2fd;
+        }
+        
+        .csv-section {
+            margin-top: 20px;
+        }
+        
+        textarea#csv {
+            width: 100%;
+            height: 150px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            resize: vertical;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 10px;
+            font-weight: bold;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Mini Spreadsheet</h1>
+        
+        <div class="controls">
+            <button id="export">Export CSV</button>
+        </div>
+        
+        <div class="grid-wrapper">
+            <table id="sheet">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>A</th>
+                        <th>B</th>
+                        <th>C</th>
+                        <th>D</th>
+                        <th>E</th>
+                        <th>F</th>
+                        <th>G</th>
+                        <th>H</th>
+                        <th>I</th>
+                        <th>J</th>
+                    </tr>
+                </thead>
+                <tbody id="grid"></tbody>
+            </table>
+        </div>
+        
+        <div class="csv-section">
+            <label for="csv">Exported CSV:</label>
+            <textarea id="csv" readonly></textarea>
+        </div>
+    </div>
+
+    <script>
+        const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+        const ROWS = 10;
+        
+        // Storage: cellId -> raw text content
+        const cells = {};
+        
+        // Computed values cache
+        const computed = {};
+        
+        // Track computation stack for cycle detection
+        let computationStack = [];
+        let cycleDetected = new Set();
+        
+        // Initialize cells
+        for (let r = 1; r <= ROWS; r++) {
+            for (const col of COLS) {
+                const cellId = `${col}${r}`;
+                cells[cellId] = '';
+                computed[cellId] = '';
+            }
+        }
+        
+        // Build the grid
+        function buildGrid() {
+            const tbody = document.getElementById('grid');
+            tbody.innerHTML = '';
+            
+            for (let r = 1; r <= ROWS; r++) {
+                const tr = document.createElement('tr');
+                
+                // Row header
+                const th = document.createElement('th');
+                th.textContent = r;
+                tr.appendChild(th);
+                
+                // Cells
+                for (const col of COLS) {
+                    const td = document.createElement('td');
+                    const cellId = `${col}${r}`;
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.id = cellId;
+                    input.value = computed[cellId] || '';
+                    
+                    input.addEventListener('focus', () => {
+                        input.value = cells[cellId];
+                    });
+                    
+                    input.addEventListener('blur', () => {
+                        commitCell(cellId, input.value);
+                    });
+                    
+                    input.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter') {
+                            commitCell(cellId, input.value);
+                            input.blur();
+                        }
+                    });
+                    
+                    td.appendChild(input);
+                    tr.appendChild(td);
+                }
+                
+                tbody.appendChild(tr);
+            }
+        }
+        
+        function commitCell(cellId, rawText) {
+            cells[cellId] = rawText;
+            recalculate();
+            updateDisplay();
+        }
+        
+        function recalculate() {
+            cycleDetected.clear();
+            computed = {};
+            
+            for (const cellId of Object.keys(cells)) {
+                computationStack = [];
+                evaluate(cellId);
+            }
+        }
+        
+        function evaluate(cellId) {
+            if (computed.hasOwnProperty(cellId)) {
+                return computed[cellId];
+            }
+            
+            if (computationStack.includes(cellId)) {
+                // Cycle detected
+                cycleDetected.add(cellId);
+                return '#CYCLE';
+            }
+            
+            computationStack.push(cellId);
+            
+            const raw = cells[cellId];
+            let result;
+            
+            if (raw.startsWith('=')) {
+                const formula = raw.substring(1);
+                try {
+                    result = evaluateFormula(formula);
+                } catch (e) {
+                    result = '#ERR';
+                }
+            } else if (raw === '') {
+                result = '';
+            } else if (!isNaN(raw) && raw !== '') {
+                result = parseFloat(raw);
+            } else {
+                result = raw;
+            }
+            
+            computationStack.pop();
+            computed[cellId] = result;
+            return result;
+        }
+        
+        function evaluateFormula(formula) {
+            // Tokenize and parse
+            const tokens = tokenize(formula);
+            const parser = new Parser(tokens);
+            const ast = parser.parse();
+            return evaluateAST(ast);
+        }
+        
+        function tokenize(formula) {
+            const tokens = [];
+            let i = 0;
+            
+            while (i < formula.length) {
+                const ch = formula[i];
+                
+                if (/\s/.test(ch)) {
+                    i++;
+                } else if (/[+\-*/().]/.test(ch)) {
+                    tokens.push(ch);
+                    i++;
+                } else if (/\d/.test(ch)) {
+                    let num = '';
+                    while (i < formula.length && /[\d.]/.test(formula[i])) {
+                        num += formula[i];
+                        i++;
+                    }
+                    tokens.push({ type: 'number', value: parseFloat(num) });
+                } else if (/[A-Za-z]/.test(ch)) {
+                    let ref = '';
+                    while (i < formula.length && /[A-Za-z0-9]/.test(formula[i])) {
+                        ref += formula[i];
+                        i++;
+                    }
+                    tokens.push({ type: 'ref', value: ref });
+                } else {
+                    throw new Error(`Unknown character: ${ch}`);
+                }
+            }
+            
+            return tokens;
+        }
+        
+        class Parser {
+            constructor(tokens) {
+                this.tokens = tokens;
+                this.pos = 0;
+            }
+            
+            parse() {
+                return this.parseAddSub();
+            }
+            
+            parseAddSub() {
+                let left = this.parseMulDiv();
+                
+                while (this.pos < this.tokens.length) {
+                    const token = this.tokens[this.pos];
+                    if (token === '+' || token === '-') {
+                        this.pos++;
+                        const right = this.parseMulDiv();
+                        left = { op: token, left, right };
+                    } else {
+                        break;
+                    }
+                }
+                
+                return left;
+            }
+            
+            parseMulDiv() {
+                let left = this.parsePrimary();
+                
+                while (this.pos < this.tokens.length) {
+                    const token = this.tokens[this.pos];
+                    if (token === '*' || token === '/') {
+                        this.pos++;
+                        const right = this.parsePrimary();
+                        left = { op: token, left, right };
+                    } else {
+                        break;
+                    }
+                }
+                
+                return left;
+            }
+            
+            parsePrimary() {
+                const token = this.tokens[this.pos];
+                
+                if (!token) {
+                    throw new Error('Unexpected end of formula');
+                }
+                
+                if (token === '(') {
+                    this.pos++;
+                    const expr = this.parseAddSub();
+                    if (this.tokens[this.pos] !== ')') {
+                        throw new Error('Expected )');
+                    }
+                    this.pos++;
+                    return expr;
+                } else if (token.type === 'number') {
+                    this.pos++;
+                    return { type: 'number', value: token.value };
+                } else if (token.type === 'ref') {
+                    this.pos++;
+                    return { type: 'ref', value: token.value };
+                } else if (token === '-') {
+                    this.pos++;
+                    const expr = this.parsePrimary();
+                    return { op: 'unary-', operand: expr };
+                } else if (token === '+') {
+                    this.pos++;
+                    return this.parsePrimary();
+                } else {
+                    throw new Error(`Unexpected token: ${token}`);
+                }
+            }
+        }
+        
+        function evaluateAST(ast) {
+            if (ast.type === 'number') {
+                return ast.value;
+            }
+            
+            if (ast.type === 'ref') {
+                const cellId = normalizeCellRef(ast.value);
+                if (!cells.hasOwnProperty(cellId)) {
+                    throw new Error(`Invalid cell reference: ${ast.value}`);
+                }
+                const val = evaluate(cellId);
+                if (val === '#CYCLE') {
+                    throw new Error('Cycle detected');
+                }
+                if (typeof val === 'number') {
+                    return val;
+                }
+                if (val === '' || val === '#ERR') {
+                    return 0;
+                }
+                const num = parseFloat(val);
+                return isNaN(num) ? 0 : num;
+            }
+            
+            if (ast.op === 'unary-') {
+                return -evaluateAST(ast.operand);
+            }
+            
+            const left = evaluateAST(ast.left);
+            const right = evaluateAST(ast.right);
+            
+            switch (ast.op) {
+                case '+': return left + right;
+                case '-': return left - right;
+                case '*': return left * right;
+                case '/': return right === 0 ? 0 : left / right;
+                default: throw new Error(`Unknown operator: ${ast.op}`);
+            }
+        }
+        
+        function normalizeCellRef(ref) {
+            const match = ref.match(/^([A-J])(\d+)$/i);
+            if (!match) {
+                throw new Error(`Invalid cell reference: ${ref}`);
+            }
+            const col = match[1].toUpperCase();
+            const row = parseInt(match[2], 10);
+            
+            if (!COLS.includes(col) || row < 1 || row > ROWS) {
+                throw new Error(`Cell out of range: ${ref}`);
+            }
+            
+            return col + row;
+        }
+        
+        function updateDisplay() {
+            for (const cellId of Object.keys(cells)) {
+                const input = document.getElementById(cellId);
+                if (input !== document.activeElement) {
+                    const val = computed[cellId];
+                    if (cycleDetected.has(cellId)) {
+                        input.value = '#CYCLE';
+                    } else if (val === '#ERR') {
+                        input.value = '#ERR';
+                    } else if (typeof val === 'number') {
+                        input.value = val.toString();
+                    } else {
+                        input.value = val === undefined ? '' : val;
+                    }
+                }
+            }
+        }
+        
+        function exportCSV() {
+            const rows = [];
+            for (let r = 1; r <= ROWS; r++) {
+                const row = [];
+                for (const col of COLS) {
+                    const cellId = `${col}${r}`;
+                    let val = computed[cellId];
+                    if (cycleDetected.has(cellId)) {
+                        val = '#CYCLE';
+                    } else if (val === '#ERR') {
+                        val = '#ERR';
+                    } else if (typeof val === 'number') {
+                        val = val.toString();
+                    } else if (val === undefined || val === '') {
+                        val = '';
+                    }
+                    // Escape quotes and wrap in quotes
+                    val = '"' + (val + '').replace(/"/g, '""') + '"';
+                    row.push(val);
+                }
+                rows.push(row.join(','));
+            }
+            document.getElementById('csv').value = rows.join('\n');
+        }
+        
+        // Public API for testing
+        window.sheet = {
+            set: function(cellId, rawText) {
+                commitCell(cellId, rawText);
+            },
+            get: function(cellId) {
+                const input = document.getElementById(cellId);
+                return input ? input.value : '';
+            },
+            raw: function(cellId) {
+                return cells[cellId] || '';
+            }
+        };
+        
+        // Event listeners
+        document.getElementById('export').addEventListener('click', exportCSV);
+        
+        // Initialize
+        buildGrid();
+        recalculate();
+        updateDisplay();
+    </script>
+</body>
+</html>

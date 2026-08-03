@@ -142,3 +142,144 @@ def test_a_real_test_failure_still_reports_the_count(tmp_path, monkeypatch):
 def test_a_capped_task_keeps_its_ceiling_on_a_real_failure(tmp_path, monkeypatch):
     r = _summary(REAL_FAILURE, tmp_path, monkeypatch, cap=0.8)
     assert r["score"] == round((8 / 9) * 0.8, 4)
+
+
+def test_a_cell_that_never_reached_the_provider_is_not_a_score():
+    from harness.runner import never_reached_provider
+    assert never_reached_provider([
+        {"error": "connect failed: [Errno 11001] getaddrinfo failed",
+         "error_kind": "connect"},
+        {"error": "connection forcibly closed", "error_kind": "connect"}]), (
+        "no request was ever delivered, so nothing about the model was "
+        "measured; scoring that 0 charges a DNS failure to the model")
+
+
+def test_a_provider_that_answered_badly_still_earns_its_zero():
+    from harness.runner import never_reached_provider
+    reached = [
+        [{"error": "ResourceExhausted: Worker local total request limit "
+                   "reached (32/32)", "error_kind": "api"}],
+        [{"error": "Provider returned an empty response", "error_kind": "api"}],
+        [{"error": "no html code block in response", "error_kind": "runaway",
+          "tokens_out": 65536}],
+        [{"error": "exceeded the 600s budget", "error_kind": "timeout"}],
+        [{"error": "HTTP 400: request exceeds the available context",
+          "error_kind": "api"}],
+    ]
+    for attempts in reached:
+        assert not never_reached_provider(attempts), (
+            f"{attempts[0]['error'][:40]!r} came back FROM the provider — a "
+            f"full endpoint or an empty reply is the product behaving badly, "
+            f"which is a real mark against buying the model that way")
+
+
+def test_one_delivered_attempt_is_enough_to_score_the_cell():
+    from harness.runner import never_reached_provider
+    assert not never_reached_provider([
+        {"error": "stream broke", "error_kind": "connect"},
+        {"tokens_out": 500}])
+    assert not never_reached_provider([
+        {"error": "stream broke", "error_kind": "connect",
+         "tokens_out": 120}]), (
+        "tokens arrived, so the model did speak; a truncated answer is a "
+        "measurement, not a missed connection")
+    assert not never_reached_provider([])
+    assert not never_reached_provider([{"tokens_out": 900}])
+
+
+def test_the_runner_writes_no_score_when_nothing_was_reached():
+    import inspect
+
+    from harness import runner
+    src = inspect.getsource(runner.TaskRunner.run_task)
+    i = src.index("never_reached_provider(attempts)")
+    seg = src[i:i + 700]
+    assert 'unlink(missing_ok=True)' in seg, (
+        "an unscored cell must leave no score.json at all; a score.json with "
+        "status=unscored would still be a file the next reader has to reason "
+        "about")
+    assert '"score": None' in seg
+    assert "self._score(" in seg.split("else:")[-1], (
+        "every other outcome still goes through the normal scoring lane")
+
+
+def test_endpoint_and_model_failures_are_told_apart():
+    from harness.report import attempt_blame
+    endpoint = [
+        {"error": "HTTP 429: Provider returned error", "error_kind": "rate_limit"},
+        {"error": "connect failed: getaddrinfo failed", "error_kind": "connect"},
+        {"error": "empty response from the provider", "error_kind": "transport"},
+        {"error": "in-body error: Upstream error from Nvidia: "
+                  "ResourceExhausted: Worker local total request limit reached "
+                  "(33/32)", "error_kind": "api"},
+        {"error": "in-body error: Provider returned an empty response",
+         "error_kind": "api"},
+    ]
+    model = [
+        {"error": "no ANSWER: line in response", "error_kind": "format"},
+        {"error": "no html code block in response", "error_kind": "runaway"},
+        {"error": "exceeded the 600s budget", "error_kind": "timeout"},
+        {"error": "repetition loop", "error_kind": "repetition_loop"},
+        {"error": 'HTTP 400: request (188599 tokens) exceeds the available '
+                  'context', "error_kind": "api"},
+        {"error": "claude CLI failed: error_max_turns", "error_kind": "api"},
+    ]
+    for a in endpoint:
+        assert attempt_blame(a) == "endpoint", a["error"][:50]
+    for a in model:
+        assert attempt_blame(a) == "model", a["error"][:50]
+    assert attempt_blame({"tokens_out": 100}) == "clean"
+
+
+def test_an_unrecognised_failure_is_charged_to_the_model():
+    from harness.report import attempt_blame
+    assert attempt_blame({"error": "something nobody has seen before",
+                          "error_kind": "api"}) == "model", (
+        "the wording list is best-effort; an unknown phrase must never invent "
+        "an excuse for a model, so the conservative default is to blame it")
+
+
+def test_availability_counts_attempts_not_cells():
+    from harness.report import availability
+    rs = [
+        {"model": "m", "task": "t1", "attempts": [
+            {"error": "HTTP 429", "error_kind": "rate_limit"},
+            {"tokens_out": 50}]},
+        {"model": "m", "task": "t2", "attempts": [{"tokens_out": 80}]},
+    ]
+    a = availability(rs)
+    assert a["attempts"] == 3 and a["endpoint_failures"] == 1
+    assert a["availability"] == round(2 / 3, 4)
+    assert a["cells"] == ["t1"] and a["n_cells"] == 1
+    assert availability([])["availability"] is None
+
+
+def test_a_throttled_model_still_loses_its_score():
+    from harness.report import availability
+    rs = [{"model": "m", "task": "t", "score": {"status": "scored",
+                                                "score": 0.0},
+           "attempts": [{"error": "HTTP 429", "error_kind": "rate_limit"}]}]
+    a = availability(rs)
+    assert a["endpoint_failures"] == 1
+    assert "score" not in a, (
+        "availability reports blame, it does not adjust or forgive the score — "
+        "a model you cannot get an answer out of is a worse model to buy")
+
+
+def test_the_uptime_column_and_row_are_on_the_pages():
+    from harness import config
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    assert ">Uptime</th>" in src
+    assert "{{ r.avail }}" in src and "{{ r.avail_why }}" in src
+    assert "def _availability_row" in src
+    assert 'id="availability"' in src, "the split needs an info-page anchor"
+    assert 'href="info.html#availability"' in src
+
+
+def test_a_100_percent_model_says_so_plainly():
+    from harness.report import _availability_row
+    row = _availability_row({"avail": {"attempts": 116, "endpoint_failures": 0,
+                                       "kinds": {}, "cells": [], "n_cells": 0},
+                             "avail_pct": 100.0})
+    assert "100%" in row["v"] and "116" in row["v"]
+    assert _availability_row({"avail": {"attempts": 0}}) is None

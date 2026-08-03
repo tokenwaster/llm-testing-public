@@ -112,11 +112,9 @@ def test_self_collision_kills(page):
     dead = page.evaluate("""() => {
         const g = window.game; g.reset();        // head (10,12), moving right, len3
         g.setDir('right');
-        // grow to length 6 by eating straight ahead
         for (let i = 1; i <= 3; i++) { const h = g.snake()[0];
             g.setFood(h[0]+1, h[1]); g.tick(); }
         g.setFood(-1,-1);                         // park food off-path
-        // a tight up/left/down loop turns the head back into its own body
         g.setDir('up');   g.tick();
         g.setDir('left'); g.tick();
         g.setDir('down'); g.tick();

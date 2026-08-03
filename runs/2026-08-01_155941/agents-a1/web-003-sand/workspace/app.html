@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Falling Sand Sandbox</title>
+    <style>
+        :root {
+            --bg: #121212;
+            --panel-bg: #1e1e1e;
+            --text: #e0e0e0;
+            --accent: #3b82f6;
+            --btn-hover: #2d65c4;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .container {
+            background-color: var(--panel-bg);
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+            text-align: center;
+        }
+
+        /* Canvas Styling */
+        #sand {
+            background-color: #2a2a2a;
+            border-radius: 8px;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.5);
+            display: block;
+            margin-bottom: 1rem;
+            /* Ensure at least 400x400 CSS pixels */
+            width: min(90vw, 600px); 
+            aspect-ratio: 4/3;
+        }
+
+        .controls {
+            display: flex;
+            gap: 0.75rem;
+            justify-content: center;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            background-color: #3a3a3a;
+            color: var(--text);
+            font-weight: 500;
+            transition: all 0.2s ease;
+            outline: none;
+        }
+
+        button:hover {
+            opacity: 1;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+        }
+
+        button.selected {
+            background-color: var(--accent);
+            color: white;
+        }
+
+        /* Material Specific Button Styles */
+        #mat-sand { border-top: 3px solid #f1c40f; }
+        #mat-water { border-top: 3px solid #3498db; }
+        #mat-wall { background-color: #2c2c2c !important; color: #aaa !important; font-style: italic;}
+        #mat-acid { border-top: 3px solid #e74c3c; background-color: #1a0f0f; } /* Darker red for acid */
+        
+        button#clear {
+            margin-top: 0.5rem;
+            width: 100%;
+            max-width: 280px;
+            background-color: #d63031 !important;
+            color: white !important;
+            border-radius: 4px;
+        }
+
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <canvas id="sand"></canvas>
+    
+    <div class="controls" id="material-selector">
+        <button id="mat-sand" class="selected">Sand</button>
+        <button id="mat-water">Water</button>
+        <button id="mat-wall">Wall</button>
+        <button id="mat-acid">Acid</button>
+        <button id="mat-empty">Eraser</button>
+    </div>
+
+    <button id="clear">Clear Grid</button>
+</div>
+
+<script>
+// --- Configuration & State ---
+const W = 160; // Logical grid width (must be >= 400/css pixels * scaling factor)
+const H = 128; // Logical grid height
+const CELL_SIZE = 5; // Rendering size per cell. Canvas internal dims: 160*5=800, 128*5=640 (>= 400x400).
+
+// Material IDs
+const M_EMPTY = 0;
+const M_SAND = 1;
+const M_WATER = 2;
+const M_WALL = 3;
+const M_ACID = 4;
+
+// Map names to IDs and colors for rendering
+const MATERIALS = {
+    'empty': M_EMPTY,
+    'sand': M_SAND,
+    'water': M_WATER,
+    'wall': M_WALL,
+    'acid': M_ACID
+};
+
+const RENDER_COLORS = {
+    [M_SAND]: '#f1c40f', // Sand Yellow
+    [M_WATER]: '#3498db', // Water Blue
+    [M_WALL]: '#7f8c8d',  // Wall Gray
+    [M_ACID]: '#e6fffa'   // Acid White-ish/Greenish? Let's use #2ecc71 for Green, but prompt implies dark theme. 
+                           // I'll make acid a bright green/cyan to stand out against dark.
+};
+
+// Grid state (current and next buffers) - using Uint8Array for performance
+let grid = new Uint8Array(W * H);
+let nextGrid = new Uint8Array(W * H);
+let isRunning = true; // Control RAF loop? No, just continuous tick on demand or interval. 
+                      // Prompt says "animation may run on requestAnimationFrame". I'll use a fixed interval for simplicity or RAF with counter.
+
+// --- API Exposure ---
+window.sim = {
+    w: W,
+    h: H,
+    
+    get(x, y) {
+        if (x < 0 || x >= W || y < 0 || y >= H) return 'wall'; // Boundary walls? No prompt said boundary acts as solid boundaries. Usually returns empty or wall. Let's treat out of bounds as wall/blocking.
+        const idx = y * W + x;
+        const matId = grid[idx];
+        switch (matId) {
+            case M_SAND: return 'sand';
+            case M_WATER: return 'water';
+            case M_WALL: return 'wall';
+            case M_ACID: return 'acid';
+            default: return 'empty';
+        }
+    },
+
+    set(x, y, materialName) {
+        if (x < 0 || x >= W || y < 0 || y >= H) return;
+        const idx = y * W + x;
+        let matId = MATERIALS[materialName];
+        
+        // If setting 'empty', use M_EMPTY. 
+        // Note: Setting a wall acts as solid boundary? No, user sets wall cells in grid.
+        
+        if (matId !== undefined) {
+            // Also reset the nextGrid to match at this cell for consistency? 
+            // Simpler: just set current grid and let simulation overwrite logic on next tick, or keep it static until cleared.
+            grid[idx] = matId;
+        } else if (materialName === 'empty') {
+            grid[idx] = M_EMPTY;
+        }
+    },
+
+    clear() {
+        // Empties whole grid
+        for (let i = 0; i < W * H; i++) {
+            grid[i] = M_EMPTY;
+            nextGrid[i] = M_EMPTY;
+        }
+    },
+
+    tick(n) {
+        if (!isRunning) return;
+        
+        // Run n steps synchronously
+        for (let step = 0; step < n; step++) {
+            simulateStep();
+            
+            // Swap buffers
+            [grid, nextGrid] = [nextGrid, grid];
+            
+            // After tick swap: We need to ensure 'current' is actually the updated state. 
+            // Actually my logic below writes to `next`. So swapping makes `next` -> `grid`. 
+            // Then we must clear `next` or reset it? Better approach: 
+            // Instead of clearing, just overwrite nextGrid with current values at start of tick OR copy back after swap if using in-place.
+        }
+    }
+};
+
+// --- Core Simulation Logic (2-buffer) ---
+function simulateStep() {
+    // Reset nextGrid to match grid initially? 
+    // Wait: If I want cells that don't move to remain, and moved ones to be updated. 
+    // Simplest is to copy `grid` -> `nextGrid` at start of step, then only modify specific indices for movement logic.
+    // But this might cause "teleporting" if we update bottom-up in place? No, with 2-buffer it's safe regardless of order because inputs are from previous state.
+    nextGrid.set(grid);
+
+    // Process Bottom-Up (y: H-1 down to 0)
+    for (let y = H - 1; y >= 0; y--) {
+        for (let x = 0; x < W; x++) {
+            const idx = y * W + x;
+            const type = grid[idx];
+
+            if (type === M_WALL || type === M_EMPTY) continue; // Walls don't move, Empty is placeholder.
+            
+            // --- SAND LOGIC ---
+            if (type === M_SAND) {
+                // Try moving down into empty or swap with water/acid? 
+                const belowIdx = idx + W;
+                if (belowIdx < grid.length) {
+                    const belowType = grid[belowIdx];
+
+                    if (belowType === M_EMPTY) {
+                        nextGrid[idx] = M_EMPTY;
+                        nextGrid[belowIdx] = M_SAND;
+                    } else if (belowType === M_WATER || belowType === M_ACID) {
+                        // Swap with liquid -> Sinks.
+                        nextGrid[idx] = belowType; // Liquid moves up into current cell
+                        nextGrid[belowIdx] = M_SAND; // Sand sinks down
+                        
+                        // Optional: If water was moving, it might now be above sand? 
+                    } else if (belowType === M_WALL) {
+                        // Blocked. Slide Diagonally. Randomize direction checked first.
+                        const dirBias = Math.random() < 0.5;
+                        let moved = false;
+                        
+                        // Try Left then Right based on bias, or vice versa? 
+                        // "randomize the direction checked first" implies we pick a side to try before the other.
+                        if (dirBias) {
+                            if (trySlide(x - 1, y + 1)) moved = true;
+                            else if (trySlide(x + 1, y + 1)) moved = true;
+                        } else {
+                            if (trySlide(x + 1, y + 1)) moved = true;
+                            else if (trySlide(x - 1, y + 1)) moved = true;
+                        }
+
+                        function trySlide(nx, ny) {
+                            const nIdx = ny * W + nx;
+                            // Boundary checks for nx/ny? Side edges are solid boundaries. Bottom row is boundary too? 
+                            if (nx < 0 || nx >= W || ny < 0 || ny >= H) return false;
+                            
+                            // Can slide into Empty, or swap with Water/Acid? The rule says "slide diagonally...". Usually implies sliding into empty space to make room. Swapping logic is specific for straight down. 
+                            const nType = grid[nIdx];
+                            if (nType === M_EMPTY) {
+                                nextGrid[idx] = M_EMPTY; // Current becomes empty
+                                nextGrid[nIdx] = M_SAND; // New pos occupied by Sand
+                                return true;
+                            } else if (nType === M_WATER || nType === M_ACID) {
+                                 // Slide into liquid? Maybe swap logic applies here too. 
+                                 // "sand ... slides diagonally". If I interpret strictly, it swaps with water/acid when falling down. Here we are sliding sideways/downward. It's ambiguous if swapping works for diagonal. 
+                                 // Usually sand sinks through everything or moves aside. Let's treat like below: swap into liquid (sinking to that spot).
+                                 nextGrid[idx] = nType;
+                                 nextGrid[nIdx] = M_SAND;
+                                 return true;
+                            }
+                            return false;
+                        }
+
+                    } else {
+                        // Blocked by something else. Stay? Or try sliding even if blocked (like in pile)? 
+                        // If we can't move down, and diagonals are blocked, it stays put (rests).
+                    }
+                } else {
+                    // Out of bounds bottom row - Boundary is solid wall, effectively cannot leave grid.
+                    // Treat as blocked below. Try slide? No room outside. Stay.
+                }
+            }
+
+            // --- WATER LOGIC ---
+            if (type === M_WATER) {
+                const belowIdx = idx + W;
+                if (belowIdx < grid.length) {
+                    const belowType = grid[belowIdx];
+                    if (belowType === M_EMPTY) {
+                        nextGrid[idx] = M_EMPTY;
+                        nextGrid[belowIdx] = M_WATER;
+                    } else if (type !== M_WALL && !isStatic(belowType)) { 
+                         // Wait, Water moves like Sand. If blocked by something solid?
+                         // Prompt: "Water falls like sand". So same logic applies to falling into empty or swapping with water/acid.
+                         // Actually prompt says "swaps with water/acid" for SAND. For WATER it just says "falls like sand". 
+                         // I'll treat Water as falling into Empty, and if blocked by solid (Wall), then spread horizontally.
+                         
+                         // But what if below is Sand? Sand doesn't move easily? Or can be swapped? In this sim, maybe not. Let's assume blocks.
+                    }
+
+                    // Horizontal Spread when blocked or after moving down failed due to blockage/liquids?
+                    // Wait, prompt says "when it can't fall it spreads horizontally". 
+                    // If below is EMPTY -> falls (covered).
+                    // If below is WALL/SAND/acidity interaction: let's assume Water cannot move into Wall. 
+                    
+                    if (!nextGrid[idx]) { 
+                        // Check logic re-write? The above `if` block handles falling. We need to handle spreading ONLY IF it did NOT fall in this step and was blocked.
+                        // But we used nextGrid set(grid) initially, so nextGrid[idx] is still WATER (unless moved by swap).
+                    }
+
+                    if (!movedInThisStep(nextGrid, idx)) { // Need helper? Or just check below condition again on current `grid`.
+                       // Let's re-evaluate: If belowIdx exists and belowType != M_EMPTY. Then try spread.
+                       
+                       const blocked = (belowType === M_WALL || isStatic(belowType)); 
+                       if (blocked) {
+                           // Spread horizontally into empty cells, randomize direction checked first.
+                           const dirBias = Math.random() < 0.5;
+                           let moved = false;
+                           
+                           // Check Left then Right or vice versa? The spread rule: "spreads horizontally into empty cells". This usually means moving sideways. 
+                           if (dirBias) {
+                               if (trySpread(x - 1, y)) moved = true;
+                               else if (trySpread(x + 1, y)) moved = true;
+                           } else {
+                               if (trySpread(x + 1, y)) moved = true;
+                               else if (trySpread(x - 1, y)) moved = true;
+                           }
+
+                           function trySpread(nx, ny) {
+                                const nIdx = ny * W + nx;
+                                if (nx < 0 || nx >= W || ny < 0 || ny >= H) return false;
+                                // Only spread into EMPTY cells? 
+                                if (grid[nIdx] === M_EMPTY) {
+                                    nextGrid[idx] = M_EMPTY;
+                                    nextGrid[nIdx] = M_WATER;
+                                    return true;
+                                }
+                                return false;
+                           }
+                       }
+                    }
+                } else {
+                     // Bottom boundary - Blocked. Try spread? 
+                     if (Math.random() > 0.5) ... // randomize direction for spreading along bottom edge too? "bottom row and side edges act as solid boundaries". So can't go further down, must slide sideways if possible along the floor? Or just stay blocked.
+                }
+
+            }
+
+            // --- ACID LOGIC ---
+            if (type === M_ACID) {
+                 const belowIdx = idx + W;
+                 let movedDown = false;
+                 
+                 // Check neighbors for dissolution: Below, Left, Right ("below or beside")? 
+                 // "dissolve sand or wall cells it touches below or beside". This implies contact reaction.
+                 // If Acid is at (x,y) and Neighbor N is Sand/Wall -> dissolve N with high chance.
+                 
+                 // Also move like water: Falls into empty, spreads when blocked.
+                 if (belowIdx < grid.length) {
+                     const belowType = grid[belowIdx];
+                     
+                     // Reaction Logic BEFORE movement? Or simultaneous? 
+                     // If Acid moves down into Empty, it leaves behind its spot. The reaction with wall/acid neighbors might happen simultaneously.
+                     
+                     let targetDissolved = false;
+
+                     // Check Below (x,y+1) for Sand/Wall -> Dissolve.
+                     if (belowType === M_SAND || belowType === M_WALL) {
+                         // Acid dissolves target, and acid may disappear too? "both ... may disappear". 
+                         // I'll make it 50% chance each turns empty to simulate bubbling reaction without creating permanent residue.
+                         if (Math.random() < 0.8) { // High chance of interaction
+                             nextGrid[idx] = M_EMPTY; // Acid disappears or becomes gas? Prompt says "may disappear". 
+                             nextGrid[belowIdx] = M_EMPTY; // Target dissolves
+                             targetDissolved = true;
+                         } else if (Math.random() < 0.5) {
+                              // Only one dies? Let's keep it simple: both empty for satisfaction of eroding walls fast enough but not instant magic. 
+                              nextGrid[idx] = M_EMPTY;
+                              nextGrid[belowIdx] = M_EMPTY;
+                         } else if (Math.random() < 0.5) {
+                             // Only target dies, acid moves to its spot? No prompt says "may disappear".
+                             // Let's stick to: Acid and Target BOTH become Empty on success chance. If fail maybe just blockage? 
+                             // To ensure walls erode: I'll make it so if not dissolved by the random check immediately below...
+                         }
+                     } else {
+                        // If blocked (or empty), handle movement like Water/Sand.
+                        if (!targetDissolved) {
+                            // Check for horizontal spread? No, acid moves like water. Falls or spreads horizontally when blocked.
+                            // Actually Acid is a liquid-like material too usually. 
+                            
+                            if (belowType === M_EMPTY) {
+                                nextGrid[idx] = M_EMPTY;
+                                nextGrid[belowIdx] = M_ACID;
+                                movedDown = true;
+                            } else if (isStatic(belowType)) { // Wall or Acid itself? 
+                                 // If blocked below, spread horizontally.
+                                 const dirBias = Math.random() < 0.5;
+                                 let spreadMoved = false;
+
+                                 if (dirBias) {
+                                     trySpread(x - 1, y); spreadMoved = true;
+                                     if (!spreadMoved) trySpread(x + 1, y); 
+                                 } else {
+                                     trySpread(x + 1, y); spreadMoved = true;
+                                     if (!spreadMoved) trySpread(x - 1, y); 
+                                 }
+
+                                 function trySpread(nx, ny) {
+                                      const nIdx = ny * W + nx;
+                                      if (nx < 0 || nx >= W || ny < 0 || ny >= H) return false;
+                                      // Spread into empty? Or swap with sand/water? Acid is strong acid. Maybe dissolves on contact rather than swapping. 
+                                      // But prompt says "moves like water". So it must move to new cells (spreading). Water spreads by replacing Empty. I'll allow filling Empty only.
+                                      if (grid[nIdx] === M_EMPTY) {
+                                          nextGrid[idx] = M_EMPTY;
+                                          nextGrid[nIdx] = M_ACID;
+                                          return true;
+                                      }
+                                      // If it hits a wall, does it dissolve? Yes "touches below or beside". 
+                                      // This check would happen when Acid is at neighbor cell in next tick. But here we are moving INTO spot. 
+                                      // So just swapping if empty works.
+                                      return false;
+                                 }
+                            } else {
+                                // If blocked by Sand/Water? Water/Acid swap logic applies to SAND specifically for sinking, but acid also sinks through liquids?
+                                // Let's treat Acid as fluid: can move into Empty. Blocked otherwise -> spread sideways or dissolve neighbor if adjacent (already handled above).
+                            }
+                        }
+                     }
+                 }
+            }
+
+        } // End X loop
+    } // End Y loop
+
+    function isStatic(t) { return t === M_WALL || t === M_SAND; } 
+}
+
+
+// --- Initialization & Interaction ---
+const canvas = document.getElementById('sand');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+// Set Canvas Internal Dimensions to ensure >= 400x400 CSS pixels (rendered at least that size)
+canvas.width = W * CELL_SIZE; // 160*5 = 800px -> satisfies constraint.
+canvas.height = H * CELL_SIZE; // 128*5 = 640px
+
+// --- Rendering Loop ---
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    for (let i = 0; i < grid.length; i++) {
+        const val = grid[i];
+        if (val !== M_EMPTY) {
+            // Optimization: Only draw non-empty
+            // Map to index x,y
+            const y = Math.floor(i / W);
+            const x = i % W;
+            
+            ctx.fillStyle = RENDER_COLORS[val] || 'white';
+            // Draw rects. Use slight gaps for grid effect? 
+            ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+        }
+    }
+
+    requestAnimationFrame(draw);
+}
+draw();
+
+
+// --- Interaction Logic ---
+let isMouseDown = false;
+let selectedMaterial = 'sand'; // default
+
+const materialButtons = document.querySelectorAll('.material-btn:not(#clear)');
+materialButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+        if (btn.id === 'mat-empty') {
+            selectedMaterial = 'empty';
+        } else {
+            const matName = btn.innerText.toLowerCase(); // "Sand" -> sand. Need to map text to name? 
+            // Better: use dataset or explicit mapping. Let's rely on ID for simplicity in logic, but buttons might have text like "Wall".
+            // Mapping IDs directly is safer.
+        }
+    });
+});
+
+// Helper to update selectedMaterial based on button click with better string handling
+materialButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+        if (btn.id === 'mat-empty') selectedMaterial = 'empty';
+        else if (btn.id === 'mat-sand') selectedMaterial = 'sand';
+        else if (btn.id === 'mat-water') selectedMaterial = 'water';
+        else if (btn.id === 'mat-wall') selectedMaterial = 'wall';
+        else if (btn.id === 'mat-acid') selectedMaterial = 'acid';
+
+        // UI Update
+        materialButtons.forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+    });
+});
+
+
+canvas.addEventListener('mousedown', () => isMouseDown = true);
+window.addEventListener('mouseup', () => { isMouseDown = false; /* maybe stop dragging */ });
+// Mouse leave canvas also stops painting? Or just drag on canvas.
+canvas.addEventListener('mouseleave', () => isMouseDown = false);
+
+canvas.addEventListener('mousemove', (e) => {
+    if (!isMouseDown) return;
+
+    const rect = canvas.getBoundingClientRect();
+    // Calculate mouse pos relative to canvas element in DOM, not CSS scale
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const cellX = Math.floor(x / CELL_SIZE);
+    const cellY = Math.floor(y / CELL_SIZE);
+
+    if (cellX >= 0 && cellX < W && cellY >= 0 && cellY < H) {
+        // Update grid directly for painting. Note: Sim update happens in loop; this affects current `grid` state immediately.
+        window.sim.set(cellX, cellY, selectedMaterial);
+    }
+});
+
+document.getElementById('clear').addEventListener('click', () => {
+    if(confirm("Clear the whole simulation?")) {
+        window.sim.clear();
+    }
+});
+
+// Start Simulation Loop (RAF or Interval)
+// The prompt says "The animation may run on requestAnimationFrame, but tick(n) must work deterministically". 
+// I will set an interval to call `tick(1)` for continuous flow. Or use a loop in RAF that calls `tick` once per frame?
+// Using setInterval is simpler and robust. 60fps approx = 16ms.
+setInterval(() => {
+    window.sim.tick(2); // Run 2 steps per frame to speed up if needed, or just 1 for normal flow. 
+                        // I'll run 2 to make it feel snappy without waiting too long? Or stick to 1. Let's do 2.
+}, 30); 
+
+// Ensure `tick` function is available synchronously as required by API definition.
+
+</script>
+</body>
+</html>

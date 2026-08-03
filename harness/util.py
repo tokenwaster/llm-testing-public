@@ -34,10 +34,34 @@ class CappedResult:
         self.timed_out = timed_out
 
 
+SECRET_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
+SECRET_PREFIXES = ("ANTHROPIC_", "OPENAI_", "CLAUDE_CODE_", "AWS_", "AZURE_",
+                   "GOOGLE_", "HF_", "HUGGINGFACE_")
+SECRET_EXACT = ("MOONSHOT_API_KEY", "OPENROUTER_API_KEY", "LMSTUDIO_API_KEY")
+
+
+def is_secret_var(name: str) -> bool:
+    up = (name or "").upper()
+    return (up in SECRET_EXACT
+            or up.endswith(SECRET_SUFFIXES)
+            or up.startswith(SECRET_PREFIXES))
+
+
+def child_env(extra: dict | None = None, keep: tuple = ()) -> dict:
+    import os
+    keep_up = {k.upper() for k in keep}
+    env = {k: v for k, v in os.environ.items()
+           if k.upper() in keep_up or not is_secret_var(k)}
+    if extra:
+        env.update(extra)
+    return env
+
+
 def run_capped(cmd, timeout: float, **kwargs) -> CappedResult:
     kwargs.setdefault("stdout", subprocess.PIPE)
     kwargs.setdefault("stderr", subprocess.PIPE)
     kwargs.setdefault("text", True)
+    kwargs.setdefault("env", child_env())
     if os.name != "nt":
         kwargs.setdefault("start_new_session", True)
     proc = subprocess.Popen(cmd, **kwargs)

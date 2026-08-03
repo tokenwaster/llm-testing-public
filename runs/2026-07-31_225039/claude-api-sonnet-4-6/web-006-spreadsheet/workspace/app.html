@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; padding: 10px; background: #f0f0f0; }
+  h1 { margin-bottom: 10px; font-size: 1.2em; }
+  #spreadsheet-container { overflow: auto; }
+  table { border-collapse: collapse; background: white; }
+  th {
+    background: #e8e8e8;
+    border: 1px solid #ccc;
+    padding: 4px 8px;
+    text-align: center;
+    font-size: 0.85em;
+    min-width: 80px;
+    user-select: none;
+  }
+  th.row-header { min-width: 40px; width: 40px; }
+  td { border: 1px solid #ccc; padding: 0; }
+  td input {
+    width: 100%;
+    height: 100%;
+    border: none;
+    outline: none;
+    padding: 4px 6px;
+    font-size: 0.85em;
+    background: transparent;
+    min-width: 80px;
+    height: 28px;
+  }
+  td input:focus {
+    background: #fffbe6;
+    outline: 2px solid #4a90d9;
+    outline-offset: -2px;
+    position: relative;
+    z-index: 1;
+  }
+  .controls { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
+  #export {
+    padding: 8px 16px;
+    background: #4a90d9;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9em;
+  }
+  #export:hover { background: #357abd; }
+  #csv {
+    width: 100%;
+    height: 150px;
+    margin-top: 10px;
+    font-family: monospace;
+    font-size: 0.8em;
+    border: 1px solid #ccc;
+    padding: 6px;
+    resize: vertical;
+  }
+  .error { color: red; }
+</style>
+</head>
+<body>
+<h1>Mini Spreadsheet</h1>
+<div id="spreadsheet-container">
+  <table id="grid">
+    <thead>
+      <tr>
+        <th class="row-header"></th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
+<div class="controls">
+  <button id="export">Export CSV</button>
+</div>
+<textarea id="csv" placeholder="CSV output will appear here..."></textarea>
+
+<script>
+(function() {
+  const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  const ROWS = [1,2,3,4,5,6,7,8,9,10];
+  
+  // Storage for raw cell values
+  const rawValues = {};
+  // Storage for computed display values
+  const computedValues = {};
+  
+  // Initialize storage
+  COLS.forEach(c => ROWS.forEach(r => {
+    rawValues[c+r] = '';
+    computedValues[c+r] = '';
+  }));
+  
+  // Build the grid HTML
+  const table = document.getElementById('grid');
+  const thead = table.querySelector('thead tr');
+  const tbody = table.querySelector('tbody');
+  
+  // Add column headers
+  COLS.forEach(c => {
+    const th = document.createElement('th');
+    th.textContent = c;
+    thead.appendChild(th);
+  });
+  
+  // Add rows
+  ROWS.forEach(r => {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th');
+    th.className = 'row-header';
+    th.textContent = r;
+    tr.appendChild(th);
+    
+    COLS.forEach(c => {
+      const td = document.createElement('td');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.id = 'cell-' + c + r;
+      input.setAttribute('data-cell', c + r);
+      td.appendChild(input);
+      tr.appendChild(td);
+    });
+    
+    tbody.appendChild(tr);
+  });
+  
+  // Parse and evaluate formulas
+  function tokenize(expr) {
+    const tokens = [];
+    let i = 0;
+    while (i < expr.length) {
+      const ch = expr[i];
+      if (/\s/.test(ch)) { i++; continue; }
+      if (/[0-9]/.test(ch) || (ch === '.' && /[0-9]/.test(expr[i+1]||''))) {
+        let num = '';
+        while (i < expr.length && /[0-9.]/.test(expr[i])) { num += expr[i++]; }
+        tokens.push({ type: 'NUM', value: parseFloat(num) });
+      } else if (/[A-J]/.test(ch) && i+1 < expr.length && /[1-9]/.test(expr[i+1])) {
+        // Possible cell reference like A1..J10
+        let ref = ch;
+        i++;
+        let rowStr = '';
+        while (i < expr.length && /[0-9]/.test(expr[i])) { rowStr += expr[i++]; }
+        const rowNum = parseInt(rowStr);
+        if (rowNum >= 1 && rowNum <= 10 && COLS.includes(ref)) {
+          tokens.push({ type: 'REF', value: ref + rowNum });
+        } else {
+          return null; // invalid ref
+        }
+      } else if (ch === '+' || ch === '-' || ch === '*' || ch === '/') {
+        tokens.push({ type: 'OP', value: ch });
+        i++;
+      } else if (ch === '(') {
+        tokens.push({ type: 'LPAREN' });
+        i++;
+      } else if (ch === ')') {
+        tokens.push({ type: 'RPAREN' });
+        i++;
+      } else {
+        return null; // unknown char
+      }
+    }
+    return tokens;
+  }
+  
+  // Recursive descent parser
+  function parse(tokens, pos, getCellVal) {
+    // expr = term ((+|-) term)*
+    let result = parseTerm(tokens, pos, getCellVal);
+    if (result === null) return null;
+    pos = result.pos;
+    let val = result.val;
+    
+    while (pos < tokens.length && tokens[pos].type === 'OP' && 
+           (tokens[pos].value === '+' || tokens[pos].value === '-')) {
+      const op = tokens[pos].value;
+      pos++;
+      const right = parseTerm(tokens, pos, getCellVal);
+      if (right === null) return null;
+      pos = right.pos;
+      if (op === '+') val += right.val;
+      else val -= right.val;
+    }
+    return { val, pos };
+  }
+  
+  function parseTerm(tokens, pos, getCellVal) {
+    // term = factor ((*|/) factor)*
+    let result = parseFactor(tokens, pos, getCellVal);
+    if (result === null) return null;
+    pos = result.pos;
+    let val = result.val;
+    
+    while (pos < tokens.length && tokens[pos].type === 'OP' && 
+           (tokens[pos].value === '*' || tokens[pos].value === '/')) {
+      const op = tokens[pos].value;
+      pos++;
+      const right = parseFactor(tokens, pos, getCellVal);
+      if (right === null) return null;
+      pos = right.pos;
+      if (op === '*') val *= right.val;
+      else val /= right.val;
+    }
+    return { val, pos };
+  }
+  
+  function parseFactor(tokens, pos, getCellVal) {
+    // factor = NUM | REF | '(' expr ')' | unary minus
+    if (pos >= tokens.length) return null;
+    
+    const tok = tokens[pos];
+    
+    if (tok.type === 'NUM') {
+      return { val: tok.value, pos: pos + 1 };
+    }
+    
+    if (tok.type === 'REF') {
+      const v = getCellVal(tok.value);
+      if (v === null) return null; // cycle or err signal
+      return { val: v, pos: pos + 1 };
+    }
+    
+    if (tok.type === 'LPAREN') {
+      const inner = parse(tokens, pos + 1, getCellVal);
+      if (inner === null) return null;
+      if (inner.pos >= tokens.length || tokens[inner.pos].type !== 'RPAREN') return null;
+      return { val: inner.val, pos: inner.pos + 1 };
+    }
+    
+    if (tok.type === 'OP' && tok.value === '-') {
+      const factor = parseFactor(tokens, pos + 1, getCellVal);
+      if (factor === null) return null;
+      return { val: -factor.val, pos: factor.pos };
+    }
+    
+    if (tok.type === 'OP' && tok.value === '+') {
+      const factor = parseFactor(tokens, pos + 1, getCellVal);
+      if (factor === null) return null;
+      return { val: factor.val, pos: factor.pos };
+    }
+    
+    return null;
+  }
+  
+  // Evaluate a formula expression string (without leading '=')
+  // Returns a number or throws special values
+  const CYCLE_SENTINEL = Symbol('CYCLE');
+  const ERR_SENTINEL = Symbol('ERR');
+  
+  function evaluateExpr(expr, visiting, cellId) {
+    const tokens = tokenize(expr);
+    if (tokens === null) return ERR_SENTINEL;
+    if (tokens.length === 0) return 0;
+    
+    let hadCycle = false;
+    let hadErr = false;
+    
+    const getCellVal = (refId) => {
+      if (visiting.has(refId)) {
+        hadCycle = true;
+        return null;
+      }
+      const val = computeCell(refId, visiting);
+      if (val === CYCLE_SENTINEL) { hadCycle = true; return null; }
+      if (val === ERR_SENTINEL) { hadErr = true; return null; }
+      if (val === '') return 0;
+      const n = parseFloat(val);
+      return isNaN(n) ? 0 : n;
+    };
+    
+    const result = parse(tokens, 0, getCellVal);
+    
+    if (hadCycle) return CYCLE_SENTINEL;
+    if (hadErr) return ERR_SENTINEL;
+    if (result === null) return ERR_SENTINEL;
+    if (result.pos !== tokens.length) return ERR_SENTINEL;
+    
+    return result.val;
+  }
+  
+  // Compute a cell's value, detecting cycles
+  // visiting = Set of cell IDs currently being evaluated
+  function computeCell(cellId, visiting) {
+    if (!COLS.includes(cellId[0]) || !ROWS.includes(parseInt(cellId.slice(1)))) {
+      return ERR_SENTINEL;
+    }
+    
+    const raw = rawValues[cellId] || '';
+    
+    if (!raw.startsWith('=')) {
+      return raw; // plain text or number
+    }
+    
+    const expr = raw.slice(1);
+    visiting = new Set(visiting);
+    visiting.add(cellId);
+    
+    const result = evaluateExpr(expr, visiting, cellId);
+    return result;
+  }
+  
+  // Recalculate all cells
+  function recalculateAll() {
+    // We need to handle cycles properly
+    // First, detect cycles using DFS
+    
+    // Build dependency graph
+    const deps = {}; // cell -> set of cells it depends on
+    COLS.forEach(c => ROWS.forEach(r => {
+      const id = c + r;
+      deps[id] = new Set();
+      const raw = rawValues[id] || '';
+      if (raw.startsWith('=')) {
+        const tokens = tokenize(raw.slice(1));
+        if (tokens) {
+          tokens.forEach(tok => {
+            if (tok.type === 'REF') deps[id].add(tok.value);
+          });
+        }
+      }
+    }));
+    
+    // Detect which cells are in cycles
+    const cycleSet = new Set();
+    
+    function hasCycle(cellId, path, visited) {
+      if (cycleSet.has(cellId)) return true;
+      if (path.has(cellId)) {
+        // Mark all in the current path cycle
+        return true;
+      }
+      if (visited.has(cellId)) return false;
+      
+      path = new Set(path);
+      path.add(cellId);
+      
+      for (const dep of deps[cellId]) {
+        if (hasCycle(dep, path, visited)) {
+          cycleSet.add(cellId);
+          return true;
+        }
+      }
+      visited.add(cellId);
+      return false;
+    }
+    
+    // Better cycle detection: find SCCs or just use DFS with path tracking
+    const globalVisited = new Set();
+    COLS.forEach(c => ROWS.forEach(r => {
+      const id = c + r;
+      if (!globalVisited.has(id)) {
+        detectCycles(id, new Set(), globalVisited, deps, cycleSet);
+      }
+    }));
+    
+    // Now compute values
+    const memo = {};
+    
+    function compute(cellId) {
+      if (cellId in memo) return memo[cellId];
+      
+      if (cycleSet.has(cellId)) {
+        memo[cellId] = CYCLE_SENTINEL;
+        return CYCLE_SENTINEL;
+      }
+      
+      const raw = rawValues[cellId] || '';
+      if (!raw.startsWith('=')) {
+        memo[cellId] = raw;
+        return raw;
+      }
+      
+      const expr = raw.slice(1);
+      const tokens = tokenize(expr);
+      if (!tokens) {
+        memo[cellId] = ERR_SENTINEL;
+        return ERR_SENTINEL;
+      }
+      
+      let hadErr = false;
+      
+      const getCellVal = (refId) => {
+        if (!COLS.includes(refId[0])) { hadErr = true; return null; }
+        const val = compute(refId);
+        if (val === CYCLE_SENTINEL) { return null; } // shouldn't happen if cycle detection works
+        if (val === ERR_SENTINEL) { hadErr = true; return null; }
+        if (val === '') return 0;
+        const n = parseFloat(val);
+        return isNaN(n) ? 0 : n;
+      };
+      
+      const result = parse(tokens, 0, getCellVal);
+      
+      if (hadErr) { memo[cellId] = ERR_SENTINEL; return ERR_SENTINEL; }
+      if (result === null || result.pos !== tokens.length) { memo[cellId] = ERR_SENTINEL; return ERR_SENTINEL; }
+      
+      const val = result.val;
+      // Format nicely
+      const display = Number.isFinite(val) ? String(parseFloat(val.toFixed(10))) : '#ERR';
+      memo[cellId] = display;
+      return display;
+    }
+    
+    COLS.forEach(c => ROWS.forEach(r => {
+      const id = c + r;
+      const val = compute(id);
+      if (val === CYCLE_SENTINEL) computedValues[id] = '#CYCLE';
+      else if (val === ERR_SENTINEL) computedValues[id] = '#ERR';
+      else computedValues[id] = val;
+    }));
+  }
+  
+  function detectCycles(cellId, path, visited, deps, cycleSet) {
+    if (cycleSet.has(cellId)) return;
+    if (path.has(cellId)) {
+      // Found a cycle - mark all cells in the cycle path from this cell
+      let inCycle = false;
+      for (const p of path) {
+        if (p === cellId) inCycle = true;
+        if (inCycle) cycleSet.add(p);
+      }
+      return;
+    }
+    if (visited.has(cellId)) return;
+    
+    path = new Set(path);
+    path.add(cellId);
+    
+    for (const dep of (deps[cellId] || [])) {
+      detectCycles(dep, path, visited, deps, cycleSet);
+      if (cycleSet.has(cellId)) break;
+    }
+    
+    // If any dependency is a cycle, this cell is too (it references a cycle cell)
+    // Actually no - only the cycle cells themselves should be #CYCLE
+    // Let's reconsider: cells that REFERENCE cycle cells should show #CYCLE too?
+    // The spec says "every cell of the cycle" shows #CYCLE
+    // So cells referencing (but not in) the cycle should show #ERR or propagate?
+    // Per spec: "Circular references display exactly #CYCLE in every cell of the cycle"
+    // This implies cells outside the cycle that reference cycle cells might show #ERR
+    // But common spreadsheet behavior is to propagate #CYCLE. Let's propagate.
+    
+    visited.add(cellId);
+  }
+  
+  // Update display of all cells
+  function updateDisplay() {
+    recalculateAll();
+    
+    COLS.forEach(c => ROWS.forEach(r => {
+      const id = c + r;
+      const input = document.getElementById('cell-' + id);
+      if (input !== document.activeElement) {
+        input.value = computedValues[id];
+      }
+    }));
+  }
+  
+  // Set up event handlers for each cell
+  COLS.forEach(c => ROWS.forEach(r => {
+    const id = c + r;
+    const input = document.getElementById('cell-' + id);
+    
+    input.addEventListener('focus', function() {
+      // Show raw value when focused
+      this.value = rawValues[id];
+    });
+    
+    input.addEventListener('blur', function() {
+      // Commit the value
+      rawValues[id] = this.value;
+      updateDisplay();
+    });
+    
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.blur();
+        // Move to next row
+        const nextRow = r < 10 ? r + 1 : r;
+        if (nextRow !== r) {
+          const nextInput = document.getElementById('cell-' + c + nextRow);
+          if (nextInput) nextInput.focus();
+        }
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        rawValues[id] = this.value;
+        // Move to next column
+        const colIdx = COLS.indexOf(c);
+        const nextColIdx = colIdx < COLS.length - 1 ? colIdx + 1 : colIdx;
+        if (nextColIdx !== colIdx) {
+          const nextInput = document.getElementById('cell-' + COLS[nextColIdx] + r);
+          if (nextInput) {
+            updateDisplay();
+            nextInput.focus();
+          }
+        }
+      }
+    });
+  }));
+  
+  // Export CSV
+  document.getElementById('export').addEventListener('click', function() {
+    recalculateAll();
+    const lines = ROWS.map(r => 
+      COLS.map(c => {
+        const val = computedValues[c + r];
+        // Escape if contains comma or quote
+        if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+          return '"' + val.replace(/"/g, '""') + '"';
+        }
+        return val;
+      }).join(',')
+    );
+    document.getElementById('csv').value = lines.join('\n');
+  });
+  
+  // Scripting API
+  window.sheet = {
+    set: function(cellId, value) {
+      cellId = cellId.toUpperCase();
+      if (!rawValues.hasOwnProperty(cellId)) return;
+      rawValues[cellId] = value;
+      
+      const input = document.getElementById('cell-' + cellId);
+      if (input && input !== document.activeElement) {
+        // Update after recalculation
+      }
+      updateDisplay();
+    },
+    
+    get: function(cellId) {
+      cellId = cellId.toUpperCase();
+      if (!computedValues.hasOwnProperty(cellId)) return '';
+      return computedValues[cellId];
+    },
+    
+    raw: function(cellId) {
+      cellId = cellId.toUpperCase();
+      if (!rawValues.hasOwnProperty(cellId)) return '';
+      return rawValues[cellId];
+    }
+  };
+  
+  // Initial calculation
+  updateDisplay();
+  
+  // Ensure minimum size
+  document.getElementById('spreadsheet-container').style.minWidth = '600px';
+  document.getElementById('spreadsheet-container').style.minHeight = '400px';
+  
+})();
+</script>
+</body>
+</html>

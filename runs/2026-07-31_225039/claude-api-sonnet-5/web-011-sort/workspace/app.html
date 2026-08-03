@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sorting Visualizer</title>
+<style>
+  :root {
+    --bg: #121218;
+    --panel: #1e1e2a;
+    --accent: #4fc3f7;
+    --accent2: #ff5f6d;
+    --bar: #4fc3f7;
+    --bar-compare: #ffd166;
+    --bar-swap: #ff5f6d;
+    --bar-sorted: #66ffb3;
+    --text: #e8e8f0;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    height: 100%;
+  }
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  header {
+    padding: 16px 24px;
+    background: var(--panel);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    border-bottom: 1px solid #2a2a3a;
+  }
+  header h1 {
+    font-size: 18px;
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--accent);
+  }
+  .controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  button {
+    background: #2a2a3a;
+    color: var(--text);
+    border: 1px solid #3a3a4d;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background 0.15s, transform 0.1s;
+  }
+  button:hover { background: #363650; }
+  button:active { transform: scale(0.97); }
+  #sort { background: var(--accent); color: #0a0a12; font-weight: 600; }
+  #sort:hover { background: #6fd3ff; }
+  select, input[type=range] {
+    background: #2a2a3a;
+    color: var(--text);
+    border: 1px solid #3a3a4d;
+    border-radius: 6px;
+    padding: 6px 8px;
+  }
+  label {
+    font-size: 13px;
+    color: #aaa;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #barsWrap {
+    flex: 1;
+    padding: 24px;
+    display: flex;
+  }
+  #bars {
+    flex: 1;
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    background: #16161f;
+    border-radius: 10px;
+    padding: 12px;
+    border: 1px solid #26263a;
+    overflow: hidden;
+  }
+  .bar {
+    flex: 1;
+    background: var(--bar);
+    border-radius: 3px 3px 0 0;
+    transition: background 0.08s linear;
+    min-width: 1px;
+  }
+  .bar.compare { background: var(--bar-compare); }
+  .bar.swap { background: var(--bar-swap); }
+  .bar.sorted { background: var(--bar-sorted); }
+  footer {
+    padding: 8px 24px;
+    font-size: 12px;
+    color: #777;
+    background: var(--panel);
+    border-top: 1px solid #2a2a3a;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Sorting Visualizer</h1>
+    <div class="controls">
+      <label>Size
+        <input id="size" type="range" min="5" max="150" value="50">
+      </label>
+      <label>Speed
+        <input id="speed" type="range" min="1" max="100" value="60">
+      </label>
+      <button id="shuffle">Shuffle</button>
+      <button id="reset">Reset</button>
+      <button id="sort">Sort</button>
+    </div>
+  </header>
+  <div id="barsWrap">
+    <div id="bars"></div>
+  </div>
+  <footer>Bubble sort, driven one step at a time via <code>viz.sortStep()</code>. Click "Sort" to animate, or call the API manually.</footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  let arr = [];
+  let originalArr = [];
+  const barsEl = document.getElementById('bars');
+
+  // ---- Bubble sort state machine ----
+  // We implement a step-wise bubble sort with early termination optimization.
+  let sortState = null;
+
+  function initSortState() {
+    sortState = {
+      i: 0,
+      j: 0,
+      n: arr.length,
+      swappedInPass: false,
+      done: arr.length <= 1,
+      lastCompare: [-1, -1],
+      lastSwap: [-1, -1],
+      sortedBoundary: arr.length // index from which elements are known sorted (from the end)
+    };
+    if (arr.length <= 1) sortState.done = true;
+  }
+
+  function render() {
+    barsEl.innerHTML = '';
+    const n = arr.length;
+    const max = Math.max(...arr, 1);
+    const frag = document.createDocumentFragment();
+    for (let idx = 0; idx < n; idx++) {
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      const h = (arr[idx] / max) * 100;
+      bar.style.height = h + '%';
+
+      if (sortState) {
+        const [c1, c2] = sortState.lastCompare;
+        const [s1, s2] = sortState.lastSwap;
+        if (sortState.done || idx >= sortState.sortedBoundary) {
+          bar.classList.add('sorted');
+        } else if (idx === s1 || idx === s2) {
+          bar.classList.add('swap');
+        } else if (idx === c1 || idx === c2) {
+          bar.classList.add('compare');
+        }
+      }
+      frag.appendChild(bar);
+    }
+    barsEl.appendChild(frag);
+  }
+
+  // Performs exactly one comparison/step.
+  function sortStep() {
+    if (!sortState) initSortState();
+    const s = sortState;
+    if (s.done) return true;
+
+    const n = s.n;
+
+    if (s.n <= 1) {
+      s.done = true;
+      render();
+      return true;
+    }
+
+    // reset swap highlight from previous step
+    s.lastSwap = [-1, -1];
+
+    if (s.i >= n - 1) {
+      s.done = true;
+      s.lastCompare = [-1, -1];
+      render();
+      return true;
+    }
+
+    // boundary of unsorted region: [0, n - 1 - i]
+    const boundary = n - 1 - s.i;
+
+    if (s.j >= boundary) {
+      // end of this pass
+      s.sortedBoundary = boundary;
+      if (!s.swappedInPass) {
+        // already sorted, we can stop early
+        s.done = true;
+        s.lastCompare = [-1, -1];
+        render();
+        return true;
+      }
+      s.i++;
+      s.j = 0;
+      s.swappedInPass = false;
+      // check again if we've finished all passes
+      if (s.i >= n - 1) {
+        s.done = true;
+        s.sortedBoundary = 0;
+        s.lastCompare = [-1, -1];
+        render();
+        return true;
+      }
+    }
+
+    // do one comparison at position j, j+1
+    const a = arr[s.j];
+    const b = arr[s.j + 1];
+    s.lastCompare = [s.j, s.j + 1];
+
+    if (a > b) {
+      arr[s.j] = b;
+      arr[s.j + 1] = a;
+      s.lastSwap = [s.j, s.j + 1];
+      s.swappedInPass = true;
+    }
+
+    s.j++;
+
+    render();
+
+    // check if fully done after this operation
+    if (isSortedArr(arr)) {
+      // Might already be sorted; but we let the normal loop logic detect
+      // no-swap passes to terminate. However to guarantee eventual completion
+      // even without waiting an extra full pass, we can shortcut here:
+      // only shortcut if we've completed at least the natural full scan bound.
+    }
+
+    return false;
+  }
+
+  function isSortedArr(a) {
+    for (let k = 1; k < a.length; k++) {
+      if (a[k - 1] > a[k]) return false;
+    }
+    return true;
+  }
+
+  function sorted() {
+    return isSortedArr(arr);
+  }
+
+  function setArray(a) {
+    arr = a.slice();
+    originalArr = a.slice();
+    sortState = null;
+    render();
+  }
+
+  function getArray() {
+    return arr.slice();
+  }
+
+  function randomArray(n) {
+    const a = [];
+    for (let i = 0; i < n; i++) {
+      a.push(Math.floor(Math.random() * 100) + 5);
+    }
+    return a;
+  }
+
+  // ---- UI wiring ----
+  const sizeInput = document.getElementById('size');
+  const speedInput = document.getElementById('speed');
+  const sortBtn = document.getElementById('sort');
+  const shuffleBtn = document.getElementById('shuffle');
+  const resetBtn = document.getElementById('reset');
+
+  let animTimer = null;
+
+  function stopAnim() {
+    if (animTimer) {
+      clearInterval(animTimer);
+      animTimer = null;
+    }
+    sortBtn.disabled = false;
+    shuffleBtn.disabled = false;
+    sizeInput.disabled = false;
+  }
+
+  function startAnim() {
+    stopAnim();
+    sortBtn.disabled = true;
+    shuffleBtn.disabled = true;
+    sizeInput.disabled = true;
+    const speed = parseInt(speedInput.value, 10); // 1..100
+    // higher speed value -> faster -> smaller delay, more steps per tick
+    const delay = Math.max(1, 30 - Math.floor(speed * 0.28));
+    const stepsPerTick = Math.max(1, Math.floor(speed / 10));
+
+    animTimer = setInterval(() => {
+      let done = false;
+      for (let k = 0; k < stepsPerTick; k++) {
+        done = sortStep();
+        if (done) break;
+      }
+      if (done) {
+        stopAnim();
+      }
+    }, delay);
+  }
+
+  sortBtn.addEventListener('click', () => {
+    if (sorted()) return;
+    startAnim();
+  });
+
+  shuffleBtn.addEventListener('click', () => {
+    stopAnim();
+    const n = parseInt(sizeInput.value, 10);
+    setArray(randomArray(n));
+  });
+
+  resetBtn.addEventListener('click', () => {
+    stopAnim();
+    setArray(originalArr.length ? originalArr : randomArray(parseInt(sizeInput.value, 10)));
+  });
+
+  sizeInput.addEventListener('input', () => {
+    stopAnim();
+    const n = parseInt(sizeInput.value, 10);
+    setArray(randomArray(n));
+  });
+
+  // init
+  setArray(randomArray(parseInt(sizeInput.value, 10)));
+
+  // ---- Expose API ----
+  window.viz = {
+    array: getArray,
+    setArray: setArray,
+    sortStep: sortStep,
+    sorted: sorted
+  };
+})();
+</script>
+</body>
+</html>

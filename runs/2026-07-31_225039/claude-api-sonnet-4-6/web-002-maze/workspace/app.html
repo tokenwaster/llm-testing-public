@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Maze Explorer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #1a1a2e; color: #eee; font-family: monospace; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 10px; }
+h1 { margin: 10px 0; color: #e94560; }
+#controls { display: flex; gap: 15px; align-items: center; margin-bottom: 10px; font-size: 14px; }
+#controls span { color: #0f3460; background: #16213e; padding: 5px 10px; border-radius: 4px; color: #a8dadc; }
+#reset { background: #e94560; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; font-family: monospace; }
+#reset:hover { background: #c73652; }
+#maze { display: block; border: 2px solid #e94560; border-radius: 4px; }
+#info { margin-top: 8px; font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+<h1>Maze Explorer</h1>
+<div id="controls">
+  <span>Completed: <span id="completed">0</span>/24</span>
+  <span>Time: <span id="timer">0</span></span>
+  <button id="reset">Reset</button>
+</div>
+<canvas id="maze"></canvas>
+<div id="info">Bots exploring... 24 bots using Trémaux/DFS exploration</div>
+
+<script>
+(function() {
+  'use strict';
+
+  const ROWS = 20, COLS = 20;
+  const NUM_BOTS = 24;
+  const CELL_SIZE = 28;
+  const WALL_W = 2;
+
+  const canvas = document.getElementById('maze');
+  const ctx = canvas.getContext('2d');
+  canvas.width = COLS * CELL_SIZE + WALL_W;
+  canvas.height = ROWS * CELL_SIZE + WALL_W;
+
+  // Seeded RNG
+  function mulberry32(seed) {
+    return function() {
+      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  let rng;
+  let currentSeed;
+  let maze = {}; // walls[r][c] = {n,e,s,w}
+  let spawnCell, exitCell;
+  let bots = [];
+  let elapsed = 0;
+  let allDone = false;
+  let animFrame = null;
+  let lastTickTime = 0;
+  const ANIM_SPEED = 8; // ticks per second for animation
+  let animTick = 0; // fractional for interpolation
+
+  const DIR = {
+    n: {dr: -1, dc: 0, opp: 's'},
+    e: {dr: 0, dc: 1, opp: 'w'},
+    s: {dr: 1, dc: 0, opp: 'n'},
+    w: {dr: 0, dc: -1, opp: 'e'}
+  };
+  const DIRS = ['n','e','s','w'];
+
+  function cellKey(r, c) { return r * 1000 + c; }
+
+  // Generate perfect maze using recursive backtracker
+  function generateMaze(seed) {
+    rng = mulberry32(seed);
+    const walls = [];
+    for (let r = 0; r < ROWS; r++) {
+      walls[r] = [];
+      for (let c = 0; c < COLS; c++) {
+        walls[r][c] = {n: true, e: true, s: true, w: true};
+      }
+    }
+
+    const visited = Array.from({length: ROWS}, () => new Array(COLS).fill(false));
+    const stack = [];
+    const sr = 0, sc = 0;
+    visited[sr][sc] = true;
+    stack.push([sr, sc]);
+
+    while (stack.length > 0) {
+      const [r, c] = stack[stack.length - 1];
+      // Find unvisited neighbors
+      const neighbors = [];
+      for (const d of DIRS) {
+        const nr = r + DIR[d].dr;
+        const nc = c + DIR[d].dc;
+        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && !visited[nr][nc]) {
+          neighbors.push([d, nr, nc]);
+        }
+      }
+      if (neighbors.length === 0) {
+        stack.pop();
+      } else {
+        // Pick random neighbor
+        const idx = Math.floor(rng() * neighbors.length);
+        const [d, nr, nc] = neighbors[idx];
+        // Remove wall between current and neighbor
+        walls[r][c][d] = false;
+        walls[nr][nc][DIR[d].opp] = false;
+        visited[nr][nc] = true;
+        stack.push([nr, nc]);
+      }
+    }
+
+    return walls;
+  }
+
+  function initGame(seed) {
+    if (seed === undefined || seed === null) {
+      seed = Math.floor(Math.random() * 2147483647);
+    }
+    currentSeed = seed;
+    rng = mulberry32(seed);
+    
+    maze = generateMaze(seed);
+    
+    // Spawn at top-left, exit at bottom-right
+    spawnCell = {r: 0, c: 0};
+    exitCell = {r: ROWS - 1, c: COLS - 1};
+    
+    elapsed = 0;
+    allDone = false;
+    
+    // Initialize bots
+    bots = [];
+    const botColors = generateBotColors(NUM_BOTS);
+    
+    for (let i = 0; i < NUM_BOTS; i++) {
+      // Different direction preferences for each bot
+      const dirOrder = getShuffledDirs(i);
+      bots.push(createBot(i, spawnCell.r, spawnCell.c, dirOrder, botColors[i]));
+    }
+    
+    updateUI();
+    draw(0);
+  }
+
+  function generateBotColors(n) {
+    const colors = [];
+    for (let i = 0; i < n; i++) {
+      const hue = (i / n) * 360;
+      colors.push(`hsl(${hue}, 90%, 65%)`);
+    }
+    return colors;
+  }
+
+  function getShuffledDirs(botIndex) {
+    // Each bot gets a different priority ordering of directions
+    const base = ['n','e','s','w'];
+    // Use bot index to create different orderings
+    const orders = [
+      ['n','e','s','w'],
+      ['n','w','s','e'],
+      ['e','n','w','s'],
+      ['e','s','w','n'],
+      ['s','e','n','w'],
+      ['s','w','n','e'],
+      ['w','s','e','n'],
+      ['w','n','e','s'],
+      ['n','e','w','s'],
+      ['n','s','e','w'],
+      ['e','w','n','s'],
+      ['e','n','s','w'],
+      ['s','n','e','w'],
+      ['s','e','w','n'],
+      ['w','e','s','n'],
+      ['w','n','s','e'],
+      ['n','w','e','s'],
+      ['e','s','n','w'],
+      ['s','w','e','n'],
+      ['w','s','n','e'],
+      ['n','s','w','e'],
+      ['e','w','s','n'],
+      ['s','n','w','e'],
+      ['w','e','n','s'],
+    ];
+    return orders[botIndex % orders.length];
+  }
+
+  function createBot(id, r, c, dirOrder, color) {
+    const bot = {
+      id: id,
+      r: r,
+      c: c,
+      prevR: r,
+      prevC: c,
+      color: color,
+      dirOrder: dirOrder,
+      path: [{r, c}],
+      deadEnds: [],
+      finishTick: null,
+      done: false,
+      // Trémaux exploration state
+      // edgeMark[key] = number of times traversed (0,1,2)
+      edgeMark: {},
+      // stack for backtracking
+      stack: [{r, c}],
+      // cells visited (for dead end marking)
+      cellMark: {}, // cellKey -> number of times entered
+      // current movement state
+      moving: false,
+      targetR: r,
+      targetC: c,
+      // last direction we came from (to prioritize unvisited)
+      lastDir: null,
+    };
+    bot.cellMark[cellKey(r, c)] = 1;
+    return bot;
+  }
+
+  function edgeKey(r1, c1, r2, c2) {
+    // Canonical edge key
+    if (r1 * 1000 + c1 < r2 * 1000 + c2) {
+      return `${r1},${c1}-${r2},${c2}`;
+    }
+    return `${r2},${c2}-${r1},${c1}`;
+  }
+
+  function getEdgeMark(bot, r1, c1, r2, c2) {
+    const key = edgeKey(r1, c1, r2, c2);
+    return bot.edgeMark[key] || 0;
+  }
+
+  function markEdge(bot, r1, c1, r2, c2) {
+    const key = edgeKey(r1, c1, r2, c2);
+    bot.edgeMark[key] = (bot.edgeMark[key] || 0) + 1;
+  }
+
+  function isDeadEnd(bot, r, c) {
+    const key = cellKey(r, c);
+    return bot.deadEndSet && bot.deadEndSet.has(key);
+  }
+
+  // Bot step: Trémaux algorithm
+  // Returns true if bot moved
+  function botStep(bot) {
+    if (bot.done) return;
+    
+    const r = bot.r;
+    const c = bot.c;
+    
+    // Check if at exit
+    if (r === exitCell.r && c === exitCell.c) {
+      bot.done = true;
+      bot.finishTick = elapsed;
+      return;
+    }
+    
+    const walls = maze[r][c];
+    
+    // Get all open passages
+    const passages = [];
+    for (const d of bot.dirOrder) {
+      if (!walls[d]) {
+        const nr = r + DIR[d].dr;
+        const nc = c + DIR[d].dc;
+        const mark = getEdgeMark(bot, r, c, nr, nc);
+        passages.push({d, nr, nc, mark});
+      }
+    }
+    
+    if (passages.length === 0) return; // shouldn't happen in perfect maze
+    
+    // Trémaux rules:
+    // 1. If arriving via an unmarked edge, mark it
+    // 2. Prefer unvisited (mark=0) passages
+    // 3. If all passages are marked once (junction), pick any mark=1 that isn't backtrack
+    // 4. If dead end or all passages mark>=2, backtrack
+
+    // Count passages by mark
+    const unmarked = passages.filter(p => p.mark === 0);
+    const onceMark = passages.filter(p => p.mark === 1);
+    const twiceMark = passages.filter(p => p.mark >= 2);
+    
+    let chosen = null;
+    
+    if (unmarked.length > 0) {
+      // Go to first unvisited passage
+      chosen = unmarked[0];
+    } else if (onceMark.length > 0) {
+      // All passages visited at least once - we're at a junction or dead end
+      // Check if this is a dead end: only one passage
+      if (passages.length === 1) {
+        // Dead end - backtrack
+        chosen = passages[0]; // only option
+        // Mark this cell as dead end
+        if (!bot.deadEndSet) bot.deadEndSet = new Set();
+        bot.deadEndSet.add(cellKey(r, c));
+        if (!bot.deadEndMap) bot.deadEndMap = {};
+        if (!bot.deadEndMap[cellKey(r,c)]) {
+          bot.deadEnds.push({r, c});
+          bot.deadEndMap[cellKey(r,c)] = true;
+        }
+      } else {
+        // Junction with some once-marked passages - pick one
+        // Prefer not going back the way we came
+        const notBack = onceMark.filter(p => {
+          return !(p.nr === bot.prevR && p.nc === bot.prevC);
+        });
+        chosen = notBack.length > 0 ? notBack[0] : onceMark[0];
+      }
+    } else {
+      // All passages traversed twice - this cell is exhausted, backtrack
+      if (!bot.deadEndSet) bot.deadEndSet = new Set();
+      bot.deadEndSet.add(cellKey(r, c));
+      if (!bot.deadEndMap) bot.deadEndMap = {};
+      if (!bot.deadEndMap[cellKey(r,c)]) {
+        bot.deadEnds.push({r, c});
+        bot.deadEndMap[cellKey(r,c)] = true;
+      }
+      // Find a passage with minimum mark to backtrack
+      const minMark = Math.min(...passages.map(p => p.mark));
+      const backtrack = passages.filter(p => p.mark === minMark);
+      // Prefer going back where we came from
+      const back = backtrack.find(p => p.nr === bot.prevR && p.nc === bot.prevC);
+      chosen = back || backtrack[0];
+    }
+    
+    if (!chosen) {
+      // Fallback: pick first available
+      chosen = passages[0];
+    }
+    
+    // Move bot
+    markEdge(bot, r, c, chosen.nr, chosen.nc);
+    bot.prevR = r;
+    bot.prevC = c;
+    bot.r = chosen.nr;
+    bot.c = chosen.nc;
+    bot.path.push({r: chosen.nr, c: chosen.nc});
+    
+    // Check if at exit
+    if (chosen.nr === exitCell.r && chosen.nc === exitCell.c) {
+      bot.done = true;
+      bot.finishTick = elapsed;
+    }
+  }
+
+  function tickOnce() {
+    if (allDone) return;
+    
+    elapsed++;
+    
+    let anyActive = false;
+    for (const bot of bots) {
+      if (!bot.done) {
+        botStep(bot);
+        if (!bot.done) anyActive = true;
+      }
+    }
+    
+    if (!anyActive) {
+      allDone = true;
+    }
+    
+    updateUI();
+  }
+
+  function updateUI() {
+    const completed = bots.filter(b => b.done).length;
+    document.getElementById('completed').textContent = completed;
+    document.getElementById('timer').textContent = elapsed;
+  }
+
+  // Drawing
+  function draw(interp) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Background
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw cells
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const x = c * CELL_SIZE + WALL_W/2;
+        const y = r * CELL_SIZE + WALL_W/2;
+        
+        // Cell background
+        if (r === exitCell.r && c === exitCell.c) {
+          ctx.fillStyle = '#00ff88';
+          ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+        } else if (r === spawnCell.r && c === spawnCell.c) {
+          ctx.fillStyle = '#1a3a5c';
+          ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+        }
+      }
+    }
+    
+    // Draw walls
+    ctx.strokeStyle = '#4a6fa5';
+    ctx.lineWidth = WALL_W;
+    ctx.lineCap = 'square';
+    
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const x = c * CELL_SIZE + WALL_W/2;
+        const y = r * CELL_SIZE + WALL_W/2;
+        const w = maze[r][c];
+        
+        ctx.beginPath();
+        if (w.n) {
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + CELL_SIZE, y);
+        }
+        if (w.e) {
+          ctx.moveTo(x + CELL_SIZE, y);
+          ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE);
+        }
+        if (w.s) {
+          ctx.moveTo(x, y + CELL_SIZE);
+          ctx.lineTo(x + CELL_SIZE, y + CELL_SIZE);
+        }
+        if (w.w) {
+          ctx.moveTo(x, y);
+          ctx.lineTo(x, y + CELL_SIZE);
+        }
+        ctx.stroke();
+      }
+    }
+    
+    // Draw border
+    ctx.strokeStyle = '#e94560';
+    ctx.lineWidth = WALL_W;
+    ctx.strokeRect(WALL_W/2, WALL_W/2, COLS * CELL_SIZE, ROWS * CELL_SIZE);
+    
+    // Draw exit marker
+    {
+      const ex = exitCell.c * CELL_SIZE + CELL_SIZE/2 + WALL_W/2;
+      const ey = exitCell.r * CELL_SIZE + CELL_SIZE/2 + WALL_W/2;
+      ctx.fillStyle = '#00ff88';
+      ctx.font = 'bold 14px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('★', ex, ey);
+    }
+    
+    // Draw bots with interpolation
+    for (const bot of bots) {
+      let bx, by;
+      if (interp > 0 && !bot.done) {
+        // Interpolate between prevR,prevC and r,c
+        const pr = bot.prevR !== undefined ? bot.prevR : bot.r;
+        const pc = bot.prevC !== undefined ? bot.prevC : bot.c;
+        bx = (pc + (bot.c - pc) * interp) * CELL_SIZE + CELL_SIZE/2 + WALL_W/2;
+        by = (pr + (bot.r - pr) * interp) * CELL_SIZE + CELL_SIZE/2 + WALL_W/2;
+      } else {
+        bx = bot.r !== undefined ? bot.c * CELL_SIZE + CELL_SIZE/2 + WALL_W/2 : 0;
+        by = bot.r !== undefined ? bot.r * CELL_SIZE + CELL_SIZE/2 + WALL_W/2 : 0;
+      }
+      
+      const radius = CELL_SIZE * 0.3;
+      
+      // Bot shadow
+      ctx.beginPath();
+      ctx.arc(bx + 1, by + 1, radius, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.fill();
+      
+      // Bot body
+      ctx.beginPath();
+      ctx.arc(bx, by, radius, 0, Math.PI * 2);
+      ctx.fillStyle = bot.color;
+      ctx.fill();
+      
+      if (bot.done) {
+        // Draw checkmark or ring for done bots
+        ctx.beginPath();
+        ctx.arc(bx, by, radius + 2, 0, Math.PI * 2);
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+  }
+
+  // Animation loop
+  let animating = false;
+  let lastFrameTime = 0;
+  let tickAccumulator = 0;
+  const TICKS_PER_SEC = 15; // auto-advance speed
+
+  function animLoop(timestamp) {
+    if (!animating) return;
+    
+    const dt = Math.min((timestamp - lastFrameTime) / 1000, 0.1);
+    lastFrameTime = timestamp;
+    
+    if (!allDone) {
+      tickAccumulator += dt * TICKS_PER_SEC;
+      const ticksToRun = Math.floor(tickAccumulator);
+      tickAccumulator -= ticksToRun;
+      
+      for (let i = 0; i < ticksToRun; i++) {
+        tickOnce();
+        if (allDone) break;
+      }
+    }
+    
+    draw(tickAccumulator / 1);
+    
+    animFrame = requestAnimationFrame(animLoop);
+  }
+
+  function startAnimation() {
+    if (animating) return;
+    animating = true;
+    lastFrameTime = performance.now();
+    tickAccumulator = 0;
+    animFrame = requestAnimationFrame(animLoop);
+  }
+
+  function stopAnimation() {
+    animating = false;
+    if (animFrame) {
+      cancelAnimationFrame(animFrame);
+      animFrame = null;
+    }
+  }
+
+  // Public API
+  window.game = {
+    tick: function(n) {
+      for (let i = 0; i < n; i++) {
+        tickOnce();
+        if (allDone) break;
+      }
+      draw(0);
+      updateUI();
+    },
+    
+    reset: function(seed) {
+      stopAnimation();
+      initGame(seed);
+      startAnimation();
+    },
+    
+    get elapsed() {
+      return elapsed;
+    },
+    
+    get size() {
+      return {rows: ROWS, cols: COLS};
+    },
+    
+    get spawn() {
+      return {r: spawnCell.r, c: spawnCell.c};
+    },
+    
+    get exit() {
+      return {r: exitCell.r, c: exitCell.c};
+    },
+    
+    walls: function(r, c) {
+      if (!maze[r] || !maze[r][c]) return {n: true, e: true, s: true, w: true};
+      const w = maze[r][c];
+      return {n: w.n, e: w.e, s: w.s, w: w.w};
+    },
+    
+    get bots() {
+      return bots;
+    }
+  };
+
+  // Reset button
+  document.getElementById('reset').addEventListener('click', function() {
+    window.game.reset();
+  });
+
+  // Start
+  initGame(Math.floor(Math.random() * 2147483647));
+  startAnimation();
+
+})();
+</script>
+</body>
+</html>

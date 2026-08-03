@@ -98,7 +98,7 @@ def validate_models(models=None) -> list[str]:
             out.append(f"{w}: max_tokens must be a positive integer")
         if m.provider == "openai" and not m.base_url:
             out.append(f"{w}: provider openai needs a base_url")
-        if m.key_env and not m.local:
+        if m.key_env and not m.local and m.enabled:
             import os
             if not os.environ.get(m.key_env):
                 out.append(f"{w}: key_env {m.key_env} is not set in the environment "

@@ -172,12 +172,33 @@ def load_run(run_dir: Path) -> dict | None:
     return {"manifest": manifest, "results": results, "run_id": run_dir.name}
 
 
+_GEN_CACHE: dict | None = None
+
+
+def _gen_cached(key, build):
+    if _GEN_CACHE is None:
+        return build()
+    if key not in _GEN_CACHE:
+        _GEN_CACHE[key] = build()
+    return _GEN_CACHE[key]
+
+
 def load_all_runs(runs_dir: Path | None = None) -> list[dict]:
     runs_dir = runs_dir or config.RUNS_DIR
     if not runs_dir.exists():
         return []
-    runs = [load_run(d) for d in sorted(runs_dir.iterdir()) if d.is_dir()]
-    return [r for r in runs if r and r["results"]]
+
+    def build():
+        runs = [load_run(d) for d in sorted(runs_dir.iterdir()) if d.is_dir()]
+        return [r for r in runs if r and r["results"]]
+
+    return _gen_cached(("runs", str(runs_dir.resolve())), build)
+
+
+def _cached_tasks(tasks_dir: Path | None = None) -> list:
+    from .tasks import load_tasks
+    key = ("tasks", str((tasks_dir or config.TASKS_DIR).resolve()))
+    return _gen_cached(key, lambda: load_tasks(tasks_dir))
 
 
 
@@ -262,6 +283,7 @@ _FAIL_BADGES = {
     "runaway": ("⟳ runaway", "#c90"),
     "timeout": ("⧖ timeout", "#c60"),
     "max_turns": ("⇥ max-turns", "#96c"),
+    "endpoint": ("⛔ endpoint", "#c33"),
     "error": ("⚠ error", "#c33"),
 }
 
@@ -287,6 +309,8 @@ def _failure_mode_of(e: dict) -> str | None:
     if last.get("error_kind") in ("timeout", "rumination_spiral"):
         return "timeout"
     if last.get("error_kind"):
+        if any(attempt_blame(a) == "endpoint" for a in atts):
+            return "endpoint"
         return "error"
     return None
 
@@ -582,7 +606,8 @@ td { padding:8px 14px; border-bottom:1px solid var(--hair); vertical-align:middl
 tr:last-child td { border-bottom:none; }
 tbody tr:hover td { background:var(--surface-2); }
 td.num, th.num, th[data-type="num"] { text-align:center; font-variant-numeric:tabular-nums; }
-th[data-type="text"], td.model { text-align:left; }  /* names left; default td is already left */
+td.num.warn { color:var(--warn); font-weight:650; }
+th[data-type="text"], td.model { text-align:left; }
 td.nowrap, .nowrap { white-space:nowrap; }
 .model { font-weight:600; }
 .muted { color:var(--muted); }
@@ -659,12 +684,18 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
 .hsw { display:inline-block; width:11px; height:11px; border-radius:2px; flex:none;
   margin-right:7px; background:rgba(var(--cell-rgb),var(--a,.2)); }
 .hsw.pend { background:transparent; box-shadow:inset 0 0 0 1px var(--hair); }
-.cmp-pick { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:6px 0 22px; }
-.cmp-sel { flex:1 1 260px; min-width:200px; font-size:15px; font-weight:600;
+.cmp-pick { display:grid; grid-template-columns:minmax(150px,1fr) 1fr 84px 1fr;
+  align-items:center; gap:0; margin:6px 0 22px; }
+.cmp-sel { min-width:0; width:100%; font-size:15px; font-weight:600;
   padding:9px 12px; border-radius:8px; border:1px solid var(--border);
   background:var(--surface); color:var(--ink); font-family:inherit; }
-.cmp-swap { flex:none; font-size:18px; line-height:1; padding:8px 12px; cursor:pointer;
+.cmp-swap { justify-self:center; font-size:18px; line-height:1; padding:8px 12px; cursor:pointer;
   border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--ink); }
+@media (max-width:760px) {
+  .cmp-pick { grid-template-columns:1fr; gap:10px; }
+  .cmp-pick .cmp-lead { display:none; }
+  .cmp-swap { justify-self:start; }
+}
 .cmp-swap:hover { border-color:var(--accent); color:var(--accent); }
 .cmp-head { margin:0 0 28px; overflow-x:auto; }
 .cmp-hrow { border-bottom:1px solid var(--rule); align-items:end;
@@ -1044,6 +1075,7 @@ RUN_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 </div></details>
 {% endfor %}
 
+<div class="foot">{{ cost_note|safe }}</div>
 <div class="foot">Wall times include every retry. Token counts come from each
 provider's usage field — never estimated. Gen tok/s = completion tokens ÷
 generation time (excludes time-to-first-token).</div>
@@ -1107,6 +1139,7 @@ TASK_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 {% endfor %}</table></div>
 {% endif %}
 
+<div class="foot">{{ cost_note|safe }}</div>
 <div class="foot">Latest-per-model table ranks by score, then cost, then speed.
 Token counts come from provider usage fields. Outputs are verbatim transcripts,
 truncated for display — full text lives in runs/…/transcript.jsonl.</div>
@@ -1159,7 +1192,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
       location.href = sel.value === 'live' ? '/' :
         `/datasets/v${sel.value}/index.html`;
     });
-  } catch (e) { sel.style.display = 'none'; }  // static file:// viewing
+  } catch (e) { sel.style.display = 'none'; }
 })();
 </script>
 
@@ -1321,7 +1354,9 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
 <th class="num lenscol" data-type="num" id="lenshdr" title="the metric the active Rank-by lens sorts on — changes with the lens above"><span id="lenslabel">Score</span></th>
 <th data-type="text">Where</th><th data-type="num">Score</th>
 <th class="num" data-type="num" title="the model's WORST single-task score — a mean near 1.0 can still hide one bad task; hover a cell for which task">Low</th>
-<th data-type="num">Coverage</th><th data-type="num">tok/s</th>
+<th data-type="num">Coverage</th>
+<th class="num" data-type="num" title="share of requests the endpoint actually answered. Below 100% means the provider refused, throttled, or dropped the connection — the score still carries the loss, this column says whose fault it was">Uptime</th>
+<th data-type="num">tok/s</th>
 <th data-type="num" title="an estimate, not a bill"><a href="info.html#pricing">Cost/run</a></th>
 <th class="num" data-type="num" title="score per dollar; a local model's dollar is measured GPU electricity ⚡">Score / $</th>
 <th data-type="num" title="weights on disk + quant; picking a GPU size shows VRAM needed at your context">VRAM / fit</th></tr>
@@ -1337,6 +1372,8 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
 <td class="num" data-sort="{{ r.score_v }}">{{ r.score }}</td>
 <td class="num" data-sort="{{ r.low_v }}" title="worst task: {{ r.low_task }}">{{ r.low }}</td>
 <td class="num">{{ r.cov }}</td>
+<td class="num{% if r.avail_v != '1.0000' %} warn{% endif %}" data-sort="{{ r.avail_v }}"
+    title="{{ r.avail_why }}">{{ r.avail }}</td>
 <td class="num" data-sort="{{ r.tps_v }}">{{ r.tps }}</td>
 <td class="num">{{ r.cost }}</td>
 <td class="num">{{ r.value }}</td>
@@ -1344,6 +1381,9 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
 {% endfor %}</table></div>
 <div class="foot" style="margin-top:6px">Local and API/CLI models are different
 constraint classes — a combined mean isn't comparable, so filter to yours.
+<b>Uptime</b> is the share of requests the endpoint answered at all; a
+figure below 100% is the provider throttling, refusing or dropping, not the
+model reasoning badly — hover it for which tasks and why.
 <b>Score / $</b> is quality per dollar; for a local model that dollar is
 <b>measured GPU electricity</b> (⚡), not an API bill. <b>VRAM / fit</b> is the
 model's weights on disk; pick a GPU size under <b>Local</b> to see the VRAM it
@@ -1386,6 +1426,7 @@ agentic/timing tasks — read the earliest columns with that caveat.</div>
 {% for key in ['all','local','remote'] %}
 <div data-vcohort="{{ key }}"{% if key != 'all' %} style="display:none"{% endif %}>
   {% if cost_scatter[key] %}
+  <div class="foot" style="margin:0 0 8px">{{ cost_note|safe }}</div>
   <div class="foot" style="margin:0 0 4px">Score vs <b>cost to run the full
     suite</b> — API / CLI models (a local model's "cost" is just electricity)</div>
   <div class="card chartcard">{{ cost_scatter[key] }}</div>
@@ -1591,12 +1632,12 @@ document.querySelectorAll('.chartwrap').forEach(wrap => {
 <div class="foot">Token counts come from each provider's usage field and are only
 comparable within a model family (tokenizers differ) — tok/s and cost are the
 fair cross-model axes. Gen tok/s excludes time-to-first-token. Wall times include
-every retry. Cost for subscription models (claude-cli) shows the API-equivalent
-price. A ✓ after a cost means it is the gateway's actual billed amount
+every retry. A ✓ after a cost means it is the gateway's actual billed amount
 (OpenRouter usage accounting) rather than yaml list pricing; "via &lt;host&gt;"
 names the upstream provider that actually served the requests.{% if not public_nav %}
 Chart colors and overview visibility are per-model settings on the
 <a href="/run">Run</a> page.{% endif %}</div>
+<div class="foot">{{ cost_note|safe }}</div>
 <script>
 function applyStandings() {
   const seg = document.querySelector('.seg[data-seg="standings"]');
@@ -1676,7 +1717,7 @@ function applyRank(){
     return val(b) - val(a);
   });
   const parent = rows[0].parentNode;
-  rows.forEach(tr => parent.appendChild(tr));      // restack the DOM
+  rows.forEach(tr => parent.appendChild(tr));
   let shown = 0, rank = 0, prev = null;
   rows.forEach(tr => {
     if (tr.style.display === 'none') return;
@@ -1690,7 +1731,7 @@ function applyRank(){
     shown++;
     const v = parseFloat(tr.dataset[lens]);
     const key = isNaN(v) ? null : v.toFixed(4);
-    if (key === null || key !== prev) rank = shown;   // new value -> real position
+    if (key === null || key !== prev) rank = shown;
     prev = key;
     cell.textContent = rank;
     cell.title = (key !== null && rows.filter(r => r.style.display !== 'none'
@@ -1708,7 +1749,7 @@ function applyPodium(f) {
     c.classList.remove('m1', 'm2', 'm3', 'm0');
     const rk = c.querySelector('.rank');
     if (!show) return;
-    if (c.dataset.partial === '1') {          // never ranked, in any cohort
+    if (c.dataset.partial === '1') {
       c.classList.add('m0');
       if (rk) rk.innerHTML = '<span style="color:var(--warn)">unranked</span>';
       return;
@@ -1748,13 +1789,21 @@ document.querySelectorAll('.seg').forEach(seg => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('change', applyStandings);
 });
-applyStandings();   // establish the default lens caption + ordering on load
+applyStandings();
 </script>
 {{ scatter_js }}
 {{ sort_js }}
 </body></html>"""
 
 _env = Environment(loader=BaseLoader(), autoescape=False)
+_TPL_CACHE: dict = {}
+
+
+def _compiled(src: str):
+    t = _TPL_CACHE.get(src)
+    if t is None:
+        t = _TPL_CACHE[src] = _env.from_string(src)
+    return t
 
 _FOCUS_JS = r"""<script>
 (function(){
@@ -1946,6 +1995,158 @@ def _model_summary(run: dict, model: str) -> dict:
     return {"model": model, **_summarize(rs)}
 
 
+_REGISTRY_CACHE: dict | None = None
+
+
+def _registry():
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is None:
+        from .registry import load_models
+        _REGISTRY_CACHE = {m.name: m for m in load_models(include_disabled=True)}
+    return _REGISTRY_CACHE
+
+
+_COST_NOTE: str | None = None
+_COST_NOTE_SCOPE: str = ""
+
+
+def cost_note() -> str:
+    global _COST_NOTE, _COST_NOTE_SCOPE
+    scope = f"{config.SPECIAL_DIR}|{config.RUNS_DIR}"
+    if _COST_NOTE is not None and _COST_NOTE_SCOPE == scope:
+        return _COST_NOTE
+    _COST_NOTE_SCOPE = scope
+    from . import apicost
+    acc = apicost.accuracy()
+    s = apicost.overhead_summary()
+    t = s["total"]
+    if not acc.get("n") or not t.get("cells"):
+        _COST_NOTE = (
+            "<b>Claude has no cost figure here, on purpose.</b> Every Claude "
+            "model is measured through the Claude Code CLI, which runs on a "
+            "<b>subscription</b> — there is no per-token price to report, so "
+            "any number would be invented. Every other row is what the provider "
+            "billed, or list pricing on real token counts. Claude cost lands "
+            "here when the full suite has been run through the API, not before. "
+            "<a href=\"info.html#costbasis\">The method</a>.")
+        return _COST_NOTE
+    _COST_NOTE = (
+        "<b>Claude has no cost figure here, on purpose.</b> Every Claude model is "
+        "measured through the Claude Code CLI, which runs on a <b>subscription</b> "
+        "— there is no per-token price to report, so any number would be invented. "
+        "Every other row is what the provider billed, or list pricing on real "
+        "token counts. We tried publishing a derived API-equivalent and "
+        "<a href=\"info.html#costbasis\">measurement refuted it twice</a>: the CLI "
+        "sends its own instructions, reads its own files and carries its own "
+        "conversation, so it consumed <b>16× more input per turn</b> than the same "
+        "model doing the same task through an API — a different agent, not a "
+        "fixed overhead, and nothing you can subtract. Claude cost lands here when "
+        "the full suite has been run through the API, not before.")
+    return _COST_NOTE
+
+
+_EQUIV_MODELS: dict | None = None
+
+
+def _model_of(rs: list[dict]):
+    global _EQUIV_MODELS
+    if not rs or not rs[0].get("model"):
+        return None
+    if _EQUIV_MODELS is None:
+        from .registry import load_models
+        _EQUIV_MODELS = _registry()
+    return _EQUIV_MODELS.get(rs[0]["model"])
+
+
+def _is_subscription(rs: list[dict]) -> bool:
+    mo = _model_of(rs)
+    return bool(mo and mo.provider == "claude-cli")
+
+
+def _scaffold_total(rs: list[dict]) -> int:
+    from . import apicost
+    mo = _model_of(rs)
+    if mo is None or apicost.cli_overhead_for(mo) is None:
+        return 0
+    return int(sum((apicost.api_equivalent(r, mo) or {}).get(
+        "scaffold_tokens", 0) for r in rs))
+
+
+ENDPOINT_KINDS = ("connect", "transport", "rate_limit")
+MODEL_KINDS = ("runaway", "format", "timeout", "repetition_loop")
+
+ENDPOINT_PHRASES = (
+    "resourceexhausted",
+    "request limit reached",
+    "returned an empty response",
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "overloaded",
+    "no instances available",
+    "upstream connect error",
+)
+
+MODEL_PHRASES = (
+    "exceeds the available",
+    "maximum context length is",
+    "error_max_turns",
+)
+
+
+def attempt_blame(attempt: dict) -> str:
+    if not attempt.get("error"):
+        return "clean"
+    kind = attempt.get("error_kind")
+    if kind in ENDPOINT_KINDS:
+        return "endpoint"
+    if kind in MODEL_KINDS:
+        return "model"
+    text = str(attempt.get("error") or "").lower()
+    if any(p in text for p in MODEL_PHRASES):
+        return "model"
+    if any(p in text for p in ENDPOINT_PHRASES):
+        return "endpoint"
+    return "model"
+
+
+def availability(rs: list[dict]) -> dict:
+    from collections import Counter
+    attempts = [a for r in rs for a in (r.get("attempts") or [])]
+    blame = Counter(attempt_blame(a) for a in attempts)
+    n = len(attempts)
+    bad = blame.get("endpoint", 0)
+    kinds = Counter(a.get("error_kind") or "?" for a in attempts
+                    if attempt_blame(a) == "endpoint")
+    cells = sorted({(r.get("model"), r.get("task")) for r in rs
+                    if any(attempt_blame(a) == "endpoint"
+                           for a in (r.get("attempts") or []))})
+    return {"attempts": n, "endpoint_failures": bad,
+            "model_failures": blame.get("model", 0),
+            "availability": (None if not n else round((n - bad) / n, 4)),
+            "kinds": dict(kinds.most_common()),
+            "cells": [t for _, t in cells],
+            "n_cells": len(cells)}
+
+
+def _avail_cell(s: dict) -> tuple[str, str, str]:
+    a = s.get("avail") or {}
+    pct = s.get("avail_pct")
+    if pct is None or not a.get("attempts"):
+        return "—", "1.0000", "no attempts recorded"
+    if not a.get("endpoint_failures"):
+        return "100%", "1.0000", (f"{a['attempts']} attempts, every one "
+                                  f"answered by the endpoint")
+    kinds = ", ".join(f"{k}x{v}" for k, v in (a.get("kinds") or {}).items())
+    cells = ", ".join(sorted(set(a.get("cells") or []))[:6])
+    more = "" if a.get("n_cells", 0) <= 6 else f" +{a['n_cells'] - 6} more"
+    return (f"{pct:.1f}%", f"{a['availability']:.4f}",
+            f"{a['endpoint_failures']} of {a['attempts']} attempts failed at "
+            f"the endpoint, not in the model ({kinds}) — affected tasks: "
+            f"{cells}{more}. These still cost the model its score: a model you "
+            f"cannot get an answer out of is a worse model to buy.")
+
+
 def _summarize(rs: list[dict]) -> dict:
     scored = [r["score"]["score"] for r in rs if r["score"].get("status") == "scored"]
     avg = _avg(scored)
@@ -1963,11 +2164,18 @@ def _summarize(rs: list[dict]) -> dict:
     tin = sum(r["tokens_in"] or 0 for r in rs)
     tout = sum(r["tokens_out"] or 0 for r in rs)
     cost = sum(r["cost_usd"] or 0 for r in rs)
+    cost_asrun, cost_basis, scaffold = cost, "as-run", 0
+    if _is_subscription(rs):
+        cost_basis = "subscription"
+        cost = None
+        scaffold = _scaffold_total(rs)
     newest = max(rs, key=lambda r: r.get("started") or "") if rs else {}
     cold = newest.get("model_meta", {}).get("cold_start_ms")
     local = newest.get("model_meta", {}).get("local")
     gpu = newest.get("model_meta", {}).get("gpu") or {}
     gq = newest.get("model_meta", {}).get("gateway_quants") or {}
+
+    avail = availability(rs)
 
     scored_rs = [r for r in rs if r["score"].get("status") == "scored"]
     first_try = (sum(1 for r in scored_rs
@@ -1980,7 +2188,8 @@ def _summarize(rs: list[dict]) -> dict:
     energy_wh = gpu.get("energy_wh")
     energy_usd = _energy_usd(energy_wh)
     eff_cost = (energy_usd if local and energy_usd else cost)
-    score_per_dollar = score_sum / eff_cost if eff_cost > 0 else None
+    score_per_dollar = (score_sum / eff_cost
+                        if eff_cost and eff_cost > 0 else None)
     walls = [r["wall_ms"] for r in rs]
     return {
         "avg_score_val": avg,
@@ -1992,6 +2201,9 @@ def _summarize(rs: list[dict]) -> dict:
         "chip": _score_cell(avg),
         "pending": sum(1 for r in rs if r["score"].get("status") == "pending"),
         "errors": sum(1 for r in rs if r["status"] != "ok"),
+        "avail": avail,
+        "avail_pct": (None if avail["availability"] is None
+                      else round(avail["availability"] * 100, 1)),
         "wall": fmt_ms(sum(r["wall_ms"] for r in rs)),
         "ttft": fmt_ms(_avg(ttfts)),
         "tps": f"{tps:.1f}" if tps else "—",
@@ -2002,9 +2214,13 @@ def _summarize(rs: list[dict]) -> dict:
         "tokens": f"{tin:,} / {tout:,}",
         "tokens_total": tin + tout,
         "cost": (f"{fmt_cost(eff_cost)} ⚡" if local and energy_usd
-                 else fmt_cost(cost)),
+                 else ("—" if cost is None else fmt_cost(cost))),
         "cost_val": eff_cost,
         "api_cost_val": cost,
+        "cost_basis": cost_basis,
+        "cost_asrun_val": cost_asrun,
+        "cost_asrun": fmt_cost(cost_asrun),
+        "scaffold_tokens": scaffold,
         "retries": sum(r["n_retries"] for r in rs),
         "tries": sum(r.get("n_attempts") or 1 for r in rs),
         "wall_ms_sum": sum(r["wall_ms"] for r in rs),
@@ -2175,6 +2391,77 @@ def _aggregate(entries: list[dict]) -> dict:
     return agg
 
 
+def task_spend(task_data: dict | None = None, tids=None) -> list[dict]:
+    if task_data is None:
+        task_data = collect_task_data(load_all_runs())
+    live = set(tids) if tids is not None else set(task_data)
+    rows = []
+    for tid, info in task_data.items():
+        if tid not in live:
+            continue
+        costs, walls, toks = [], [], []
+        for e in info["agg"].values():
+            if e.get("cost_usd") is not None:
+                costs.append(e["cost_usd"])
+            if e.get("wall_ms") is not None:
+                walls.append(e["wall_ms"])
+            t = (e.get("tokens_in") or 0) + (e.get("tokens_out") or 0)
+            if t:
+                toks.append(t)
+        rows.append({
+            "task": tid, "n_priced": len(costs),
+            "cost": (sum(costs) / len(costs)) if costs else None,
+            "wall_ms": (sum(walls) / len(walls)) if walls else None,
+            "tokens": (sum(toks) / len(toks)) if toks else None,
+        })
+    rows.sort(key=lambda r: (r["cost"] is None,
+                             r["cost"] if r["cost"] is not None else 0,
+                             r["tokens"] or 0, r["task"]))
+    return rows
+
+
+def cheapest_tasks(n: int = 10, task_data: dict | None = None,
+                   tids=None) -> list[str]:
+    return [r["task"] for r in task_spend(task_data, tids)[:max(1, n)]]
+
+
+UNSTABLE_SIGMA = 0.125
+
+
+def repeat_coverage(task_data: dict | None = None,
+                    tids=None) -> dict:
+    if task_data is None:
+        task_data = collect_task_data(load_all_runs())
+    live = set(tids) if tids is not None else set(task_data)
+    per: dict[str, dict] = {}
+    unstable_tasks: set[str] = set()
+    wobbled_tasks: set[str] = set()
+    for tid, info in task_data.items():
+        if tid not in live:
+            continue
+        for model, e in info["agg"].items():
+            slot = per.setdefault(model, {"have": [], "todo": [],
+                                          "unstable": []})
+            if (e.get("n_scored") or 0) < 1:
+                continue
+            sig = e.get("score_sigma")
+            if (e.get("n_scored") or 0) > 1 and sig is not None:
+                slot["have"].append(tid)
+                if sig > 0:
+                    wobbled_tasks.add(tid)
+                if sig >= UNSTABLE_SIGMA:
+                    slot["unstable"].append(tid)
+                    unstable_tasks.add(tid)
+            else:
+                slot["todo"].append(tid)
+    for slot in per.values():
+        for k in ("have", "todo", "unstable"):
+            slot[k] = sorted(slot[k])
+    return {"models": per, "unstable_tasks": sorted(unstable_tasks),
+             "wobbled_tasks": sorted(wobbled_tasks),
+             "threshold": UNSTABLE_SIGMA, "n_tasks": len(live)}
+
+
 def _consistency(model: str, task_data: dict) -> dict:
     import statistics
     wobble = sorted(
@@ -2204,6 +2491,15 @@ def _consistency(model: str, task_data: dict) -> dict:
 
 
 def collect_task_data(runs: list[dict]) -> dict[str, dict]:
+    if _GEN_CACHE is not None:
+        for k, v in list(_GEN_CACHE.items()):
+            if k[0] == "runs" and v is runs:
+                return _gen_cached(("td", k[1]),
+                                   lambda: _collect_task_data(runs))
+    return _collect_task_data(runs)
+
+
+def _collect_task_data(runs: list[dict]) -> dict[str, dict]:
     data: dict[str, dict] = {}
     per: dict[tuple[str, str], list[dict]] = {}
     for r in runs:
@@ -2221,8 +2517,7 @@ def collect_task_data(runs: list[dict]) -> dict[str, dict]:
 
 def _task_defs(tasks_dir: Path | None = None) -> dict:
     try:
-        from .tasks import load_tasks
-        return {t.id: t for t in load_tasks(tasks_dir or config.TASKS_DIR)}
+        return {t.id: t for t in _cached_tasks(tasks_dir or config.TASKS_DIR)}
     except Exception:
         return {}
 
@@ -2554,7 +2849,7 @@ def family_version_payload(family: str, members: set, versions: list[tuple]) -> 
 
 def _family_of_map(versions: list[tuple]) -> dict:
     from .registry import infer_family, load_models
-    reg = {m.name: m for m in load_models(include_disabled=True)}
+    reg = _registry()
     names = {mm for _k, td, _t in versions for info in td.values()
              for mm in info["agg"]}
     out = {}
@@ -2733,7 +3028,8 @@ def build_task_report(task_id: str, info: dict, tdef,
         "cost": fmt_cost(e.get("cost_usd")),
     } for e in reversed(info["history"])]
 
-    return _env.from_string(TASK_TEMPLATE).render(
+    return _compiled(TASK_TEMPLATE).render(
+        cost_note=cost_note(),
         nav=_nav("../"), brand=_brand("../"),
         sort_js=_SORT_JS, focus_js=_FOCUS_JS,
         files_col=(_RUNS_BASE == config.RUNS_DIR),
@@ -2822,7 +3118,8 @@ def build_run_report(run: dict, tdefs: dict | None = None) -> str:
                                      key=lambda kv: -kv[1])],
         "recovered": ar["retries"]["recovered"], "fatal": ar["retries"]["fatal"],
     }
-    return _env.from_string(RUN_TEMPLATE).render(
+    return _compiled(RUN_TEMPLATE).render(
+        cost_note=cost_note(),
         nav=_nav("../"), brand=_brand("../"),
         sort_js=_SORT_JS,
         css=BASE_CSS, run_id=run["run_id"], manifest=run["manifest"],
@@ -2960,6 +3257,7 @@ excluded set live in <code>directives.yaml</code> · <code>assess:</code>.</div>
 <td class="small"><a href="/data/{{ r.run_id }}/{{ slug_q }}/">browse →</a></td></tr>
 {% endfor %}</table></div>
 
+<div class="foot">{{ cost_note|safe }}</div>
 <div class="foot">Aggregates mean every run of a task (partial re-runs
 update only what they re-ran). Total time sums wall-clock including every
 retry. <b>Tries / turns</b>: a single-shot task shows its one try plus any
@@ -3037,7 +3335,8 @@ def _cli_effort_default() -> str | None:
         return None
 
 
-def _model_detail_rows(mo, mi: dict, fp, hosts: list) -> list[dict]:
+def _model_detail_rows(mo, mi: dict, fp, hosts: list,
+                       summary: dict | None = None) -> list[dict]:
     rows = []
     add = lambda k, v: rows.append({"k": k, "v": v})
     if mo:
@@ -3143,6 +3442,25 @@ def _model_detail_rows(mo, mi: dict, fp, hosts: list) -> list[dict]:
                 + '<div class="note" style="font-size:11.5px;margin-top:2px">'
                 + note + " <a href=\"../info.html#effort\">How this is "
                 "decided</a>.</div>")
+        if (summary or {}).get("cost_basis") == "subscription":
+            from . import apicost as _ac
+            _oh = _ac.cli_overhead_for(mo)
+            _sc = int((summary or {}).get("scaffold_tokens") or 0)
+            add("Cost",
+                "<b>not reported</b> &mdash; subscription"
+                '<div class="note" style="font-size:11.5px;margin-top:2px">'
+                "Measured through the Claude Code CLI, which runs on a "
+                "subscription: there is no per-token price, so any figure here "
+                "would be invented. This model is also left out of the value and "
+                "cost-per-point views."
+                + (f" For scale, the CLI sent <b>{int(_oh):,}</b> input tokens of "
+                   f"its own instructions and tools per request "
+                   f"({_sc:,} across this model's cells) &mdash; but that is not a "
+                   f"deduction you can make, because the CLI is a different agent "
+                   f"doing more work, not a wrapper." if _oh else "")
+                + " Cost arrives when the full suite has been run through the API. "
+                "<a href=\"../info.html#costbasis\">Why, and what we measured</a>."
+                "</div>")
         if mo.sampling_source:
             src = html.escape(str(mo.sampling_source))
             add("Sampling reference",
@@ -3239,6 +3557,38 @@ def _confirmed_row(entry: dict | None) -> dict | None:
             "can be checked this way — a gateway keeps no log we can read.</div>"}
 
 
+def _availability_row(s: dict) -> dict | None:
+    a = s.get("avail") or {}
+    if not a.get("attempts"):
+        return None
+    pct = s.get("avail_pct")
+    if not a.get("endpoint_failures"):
+        return {"k": "Endpoint availability",
+                "v": (f'<b>100%</b> — all {a["attempts"]} requests answered'
+                      '<div class="note" style="font-size:11.5px;margin-top:2px">'
+                      'Every request reached the provider and came back. No score '
+                      'here is a plumbing artefact.</div>')}
+    col = "#d03b3b" if pct < 95 else "#fab219"
+    kinds = " · ".join(f'{html.escape(k)} ×{v}'
+                       for k, v in (a.get("kinds") or {}).items())
+    cells = ", ".join(html.escape(t)
+                      for t in sorted(set(a.get("cells") or []))[:8])
+    more = "" if a.get("n_cells", 0) <= 8 else f" +{a['n_cells'] - 8} more"
+    return {"k": "Endpoint availability",
+            "v": (f'<b style="color:{col}">{pct:.1f}%</b> — '
+                  f'{a["endpoint_failures"]} of {a["attempts"]} requests failed '
+                  f'at the endpoint ({kinds})'
+                  '<div class="note" style="font-size:11.5px;margin-top:2px">'
+                  'These failed <em>before</em> the model could answer: the '
+                  'provider throttled, refused for capacity, returned an empty '
+                  'body, or dropped the connection. They still cost this model '
+                  'its score, because a model you cannot get an answer out of is '
+                  'a worse model to buy — this row says whose fault it was. '
+                  f'Affected: {cells}{more}. '
+                  '<a href="info.html#availability">How this is counted</a>.'
+                  '</div>')}
+
+
 def build_model_report(model: str, runs: list[dict], tdefs: dict,
                        dataset_label: str = "",
                        versions: list[tuple] | None = None,
@@ -3319,7 +3669,10 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
         tiles.append({"v": f"{total:.0f} GB",
                       "k": f"VRAM @{VRAM_REF_CTX // 1024}k · "
                            f"{fp['weights_gb']:.0f}GB wt + KV · {fp['quant']}"})
-    detail_rows = _model_detail_rows(mo, meta_info, fp, hosts)
+    detail_rows = _model_detail_rows(mo, meta_info, fp, hosts, s)
+    _av = _availability_row(s)
+    if _av:
+        detail_rows.append(_av)
     if confirmed_row:
         detail_rows.append(confirmed_row)
     if mirror_row:
@@ -3421,7 +3774,8 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
         if len(payload["versions"]) >= 2 and payload["pairs"]:
             import json as _json
             verscmp = _json.dumps(payload).replace("</", "<\\/")
-    return _env.from_string(MODEL_TEMPLATE).render(
+    return _compiled(MODEL_TEMPLATE).render(
+        cost_note=cost_note(),
         nav=_nav("../"), brand=_brand("../"),
         sort_js=_SORT_JS, verscmp=verscmp, verscmp_js=_VERSCMP_JS,
         css=BASE_CSS, model=html.escape(model), slug_q=quote(model),
@@ -3496,7 +3850,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             if m not in color_order and m not in hidden:
                 color_order.append(m)
     from .registry import infer_family, load_families, load_models
-    _reg = {mo.name: mo for mo in load_models(include_disabled=True)}
+    _reg = _registry()
     fam_of = {m: (_reg[m].family_name if m in _reg else infer_family(m))
               for m in color_order}
     slot = _model_colors(color_order, color_overrides, fam_of, load_families())
@@ -3716,6 +4070,8 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             "low_v": f"{s['lowest_val'] if s.get('lowest_val') is not None else 1:.4f}",
             "low_task": s.get("lowest_task", ""),
             "cov": cov, "tps": s["tps"], "tps_v": f"{s['tps_val'] or 0:.2f}",
+            "avail": _avail_cell(s)[0], "avail_v": _avail_cell(s)[1],
+            "avail_why": _avail_cell(s)[2],
             "cost": s["cost"], "value": s["score_per_dollar"],
             "size_disp": (f"{fp['weights_gb']:.1f} GB · {fp['quant']}"
                           if fp else "—"),
@@ -3738,7 +4094,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         }
 
     _dstats = discrimination_stats(runs, tdefs)
-    _hardened_set = set(_dstats["hard_subset"]) | set(_dstats["frontier_subset"])
+    _hardened_set = hardened_from_stats(_dstats)
     nobias_mean = machine_only_means(task_data, tdefs)
     hard_mean = {h["model"]: h["mean"] for h in _dstats["hard_rank"]}
     easy_mean = {h["model"]: h["mean"] for h in _dstats["easy_rank"]}
@@ -3977,7 +4333,8 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         mast_stats.append({"n": "—", "k": "No runs yet",
                            "d": "run the suite to populate"})
 
-    return _env.from_string(INDEX_TEMPLATE).render(
+    return _compiled(INDEX_TEMPLATE).render(
+        cost_note=cost_note(),
         nav=_nav(""), brand=_brand(""), public_nav=_PUBLIC_NAV,
         sort_js=_SORT_JS,
         css=BASE_CSS, tiles=tiles, runs=runs_view, run_ids=run_ids,
@@ -4684,6 +5041,41 @@ published task scores the same on both — and should. That is learning, not
 cheating, and the delta is designed to read it as such.</p>
 {% endif %}
 
+<h2 id="availability">Uptime: whose fault was the zero?</h2>
+<p>A score of 0 can mean two very different things, and until now the site
+showed them the same way. Either the model answered and got it wrong, or the
+<em>endpoint</em> never gave it the chance — throttled, refused for capacity,
+returned an empty body, dropped the connection mid-stream.</p>
+<p><strong>Both still cost the model its score.</strong> A model you cannot get
+an answer out of is a worse model to buy, and the leaderboard is about buying
+one. We do not forgive a provider for being oversubscribed. But we do now say
+which it was, because "this model is bad" and "this model is fine and its API
+is not" are different findings and only one of them is about the model.</p>
+<p>Every request the harness makes is recorded as an attempt with an error kind.
+<b>Uptime</b> is the share of attempts the endpoint answered at all:</p>
+<ul>
+<li><b>Charged to the endpoint</b> — <code>rate_limit</code> (HTTP 429),
+<code>connect</code> (DNS, reset, connection dropped),
+<code>transport</code> (an empty body with no content, tokens or stop reason),
+and provider-side refusals identified by their own wording: capacity
+exhaustion, 5xx, "no instances available".</li>
+<li><b>Charged to the model</b> — <code>runaway</code> (spent the output
+budget), <code>format</code> (answered outside the required shape),
+<code>timeout</code> (did not finish inside its budget),
+<code>repetition_loop</code>, and a rejection for exceeding the model's own
+context window. The provider did its job; the model did not.</li>
+</ul>
+<p>The wording list is best-effort, like every string-matching rule here: a
+provider inventing a new phrasing degrades to "charged to the model", which is
+the conservative direction — it never invents an excuse for a model.</p>
+<p>The one exception, and the only case a cell is dropped rather than scored:
+if <em>every</em> attempt failed with <code>connect</code> and no tokens moved
+in either direction, no request was ever delivered, so nothing about the model
+was measured. That cell gets no score and re-runs. It is a narrow rule on
+purpose — a full endpoint still answered, so it still counts.</p>
+<p>Each model page carries its own <b>Endpoint availability</b> row naming the
+affected tasks. Hover a leaderboard Uptime figure for the same detail.</p>
+
 <h2 id="samplesize">Sample size &amp; how much to trust a number</h2>
 <p>Be a skeptic — here is exactly how much data is behind each figure, stated
 plainly rather than buried.</p>
@@ -4769,6 +5161,48 @@ nearly doubled since it was registered. Prices carry a
 <code>pricing_asof</code> date for exactly this reason, and re-reading the live
 catalog is a one-command operation — but until it is re-read, every list price
 here is a snapshot of the day the model was registered.</p>
+
+<h3 id="costbasis">Why Claude has no cost figure</h3>
+<p>Every Claude model here is measured through the <strong>Claude Code CLI</strong>,
+which authenticates against a <strong>subscription</strong>. A subscription has no
+per-token price. So there is nothing to report, and the cost column shows
+<code>&mdash;</code> rather than a number we invented. Claude is left out of the
+value and cost-per-point views for the same reason: you cannot rank a flat fee
+against a metered one.</p>
+<p>We did try to derive one, and the measurement refuted it &mdash; twice, in
+opposite directions. Worth stating plainly, because it is the more interesting
+result:</p>
+<ul>
+<li><strong>First attempt.</strong> The CLI adds its own system prompt and tools to
+every request. We measured that at 16,399&ndash;23,740 input tokens per request,
+tight to a few tokens across ten tasks, so it looked like a fixed wrapper.
+Subtracting it and repricing at API rates suggested the fleet cost barely
+moved.</li>
+<li><strong>Then we ran the big tasks.</strong> The API came in <strong>1.46&times;
+cheaper</strong>, not dearer. The estimate was wrong by a third overall, and wrong
+in both directions per task (&minus;70% to +194%).</li>
+<li><strong>Why.</strong> It is not a wrapper. On one agentic task the CLI sent
+<strong>565,830</strong> input tokens across 14 turns where the same model through
+an API sent <strong>30,239</strong> across 12 &mdash; <strong>16&times; more per
+turn</strong>. Claude Code brings its own instructions, reads its own files and
+carries its own conversation. It is a <em>different agent doing more work</em>, and
+both reached 1.00. There is no quantity you can subtract to turn one into the
+other.</li>
+<li><strong>It moves scores, not just price.</strong> On one render task the same
+model and prompt scored <strong>0.18</strong> through the CLI, <strong>0.25</strong>
+through the API and <strong>0.00</strong> through a gateway. So a Claude score here
+is &ldquo;Claude plus Claude Code&rsquo;s agent&rdquo;, while every other
+model&rsquo;s score is &ldquo;the model plus this harness&rsquo;s tool
+loop&rdquo;.</li>
+</ul>
+<p><strong>What happens next.</strong> Claude gets a real cost the only way it can:
+by running the full suite through the API, as its own entry, in the same harness
+loop as every other model. Until a model has completed the whole suite that way it
+is treated like any other partial run and stays out of every ranking. The
+CLI-measured entries are kept, because comparing the two agents on identical tasks
+is a measurement in its own right.</p>
+<p>The avenue comparison behind all of this lives in <code>special/</code> and
+counts toward no score.</p>
 
 <h3>Local models are not free — they just bill you differently</h3>
 <p>No money goes to a provider, so a local model's <code>$</code> column is ~0.
@@ -4972,7 +5406,8 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         except Exception:
             mirror_ctx = None
 
-    return _env.from_string(INFO_TEMPLATE).render(
+    return _compiled(INFO_TEMPLATE).render(
+        cost_note=cost_note(),
         nav=_nav(""), brand=_brand(""),
         css=BASE_CSS,
         suite_version=version,
@@ -5174,9 +5609,20 @@ def task_tiers(runs: list[dict] | None = None,
     return out
 
 
+HARDENED_TIERS = ("hard", "frontier")
+
+
 def hardened_ids(tiers: dict[str, str] | None = None) -> list[str]:
     tiers = task_tiers() if tiers is None else tiers
-    return sorted(t for t, v in tiers.items() if v in ("hard", "frontier"))
+    return sorted(t for t, v in tiers.items() if v in HARDENED_TIERS)
+
+
+def is_hardened(tid: str, tiers: dict[str, str]) -> bool:
+    return tiers.get(tid) in HARDENED_TIERS
+
+
+def hardened_from_stats(ds: dict) -> set[str]:
+    return set(ds.get("hard_subset", ())) | set(ds.get("frontier_subset", ()))
 
 
 _DISCRIM_FLAG = {
@@ -5421,7 +5867,7 @@ def build_discriminate_page(runs: list[dict], tdefs: dict,
     easy = _standings(d["easy_subset"], d["easy_rank"])
     frontier = _standings(d["frontier_subset"], d["frontier_rank"])
 
-    return _env.from_string(DISCRIMINATE_TEMPLATE).render(
+    return _compiled(DISCRIMINATE_TEMPLATE).render(
         hard=hard, easy=easy, frontier=frontier,
         nav=_nav(""), brand=_brand(""),
         sort_js=_SORT_JS, css=BASE_CSS, tiles=tiles, rows=trows,
@@ -5438,7 +5884,7 @@ def family_stats(runs: list[dict], tdefs: dict) -> dict:
     from . import gguf
     from .registry import infer_family, load_models
 
-    reg = {mo.name: mo for mo in load_models(include_disabled=True)}
+    reg = _registry()
     _, hidden = _model_prefs()
     td = {tid: info for tid, info in collect_task_data(runs).items()
           if tid in tdefs}
@@ -5725,7 +6171,7 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
             import json as _json
             verscmp = _json.dumps({k: blob[k] for k in sorted(blob)}
                                   ).replace("</", "<\\/")
-    return _env.from_string(FAMILY_TEMPLATE).render(
+    return _compiled(FAMILY_TEMPLATE).render(
         nav=_nav(""), brand=_brand(""),
         sort_js=_SORT_JS, scatter_js=_SCATTER_HOVER_JS,
         verscmp=verscmp, verscmp_js=_VERSCMP_JS,
@@ -5743,6 +6189,7 @@ COMPARE_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8"
 <div class="pagebar"><div class="sub">two models, every task, side by side · {{ dataset_label or "live dataset" }}</div></div>
 
 <div class="cmp-pick">
+  <span class="cmp-lead"></span>
   <select id="selA" class="cmp-sel"></select>
   <button id="swap" class="cmp-swap" title="swap sides">&#8646;</button>
   <select id="selB" class="cmp-sel"></select>
@@ -5751,14 +6198,15 @@ COMPARE_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8"
 <div id="cmp-head" class="cmp-head"></div>
 <h2>Per-task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· swatch ink ramps with the score · Δ colors the winner · grouped by category</span></h2>
 <div id="cmp-grid"></div>
+<div class="foot" style="margin-top:14px">{{ cost_note|safe }}</div>
 
 <script>const D = {{ data_json|safe }};</script>
 <script>
 const $ = s => document.querySelector(s);
-function q(v){ // score -> swatch opacity
+function q(v){
   return (0.10 + 0.90*Math.max(0,Math.min(1,v))).toFixed(3);
 }
-function sc(v){ // score -> {cls, txt, sw}
+function sc(v){
   if (v === null || v === undefined)
     return {cls:'muted', txt:'\\u2014', sw:'<span class="hsw pend"></span>'};
   const st = v >= 0.8 ? 'good' : (v >= 0.4 ? 'warn' : 'crit');
@@ -5850,7 +6298,7 @@ function render(){
   history.replaceState(null,'',u);
 }
 (function init(){
-  const opts = D.models.map(m => '<option value="'+m+'">'+m+'</option>').join('');
+  const opts = D.names.map(m => '<option value="'+m+'">'+m+'</option>').join('');
   $('#selA').innerHTML = opts; $('#selB').innerHTML = opts;
   const p = new URLSearchParams(location.search);
   $('#selA').value = p.get('a') && D.data[p.get('a')] ? p.get('a') : D.models[0];
@@ -5918,10 +6366,9 @@ def build_feed(runs: list[dict], tdefs: dict) -> str:
 def special_summary() -> dict:
     import re
     import statistics
-    from .tasks import load_tasks
     base = config.SPECIAL_DIR
     guard = config.CLAUDE_SPIRAL_S
-    official = {t.id: t.timeout_s for t in load_tasks()}
+    official = {t.id: t.timeout_s for t in _cached_tasks()}
     run_window: dict = {}
     if base.is_dir():
         for rj in base.glob("*/run.json"):
@@ -6406,7 +6853,7 @@ of it.</p>
 </body></html>"""
 
 
-PROBE_KINDS = ("spiral", "turns", "budget", "thinking")
+PROBE_KINDS = ("spiral", "turns", "budget", "thinking", "apicost")
 
 
 def probe_counts() -> dict:
@@ -6425,6 +6872,9 @@ def probe_counts() -> dict:
     for r in thinking.results():
         put("thinking", r["model"], r["task"],
             min(r.get("n_on") or 0, r.get("n_off") or 0))
+    from . import apicost
+    for r in apicost.results():
+        put("apicost", r["compare_key"], r["task"], r.get("trials") or 0)
     return out
 
 
@@ -6499,7 +6949,7 @@ def build_links_page(runs: list[dict], tdefs: dict) -> str:
     td = {tid: info for tid, info in collect_task_data(runs).items()
           if tid in tdefs}
     models = {m for info in td.values() for m in info["agg"]}
-    return _env.from_string(LINKS_TEMPLATE).render(
+    return _compiled(LINKS_TEMPLATE).render(
         css=BASE_CSS, nav=_nav(""), brand=_brand(""), brand_svg=BRAND_SVG,
         socials=socials, n_models=len(models), n_tasks=len(tdefs),
         n_runs=len(runs), suite_version=config.suite_version())
@@ -6517,7 +6967,7 @@ def build_special_page(dataset_label: str = "") -> str:
     th_rows = [dict(r, verdict=thinking.verdict(r)) for r in thinking.results()]
     th_cost = thinking.cost_rollup()
     th_support = thinking.load_support()
-    return _env.from_string(SPECIAL_STATIC_TEMPLATE).render(
+    return _compiled(SPECIAL_STATIC_TEMPLATE).render(
         nav=_nav(""), brand=_brand(""), css=BASE_CSS, dataset_label=dataset_label,
         turns=turns, budget=budget, th_rows=th_rows, th_cost=th_cost,
         th_support=sorted(
@@ -6587,9 +7037,11 @@ def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         cats.setdefault(tdefs[tid].category, []).append(tid)
     cat_list = [{"key": c, "tids": sorted(cats[c])} for c in sorted(cats)]
 
-    payload = {"models": ranked, "data": data, "cats": cat_list}
+    payload = {"models": ranked, "names": sorted(ranked, key=str.lower),
+               "data": data, "cats": cat_list}
     data_json = _json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
-    return _env.from_string(COMPARE_TEMPLATE).render(
+    return _compiled(COMPARE_TEMPLATE).render(
+        cost_note=cost_note(),
         nav=_nav(""), brand=_brand(""), css=BASE_CSS, data_json=data_json,
         dataset_label=dataset_label, dataset_key=dataset_key)
 
@@ -6605,6 +7057,14 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
     _RUNS_BASE = runs_dir
     _PUBLIC_NAV = public_nav
     _DATASET_KEY = dataset_key
+    global _COST_NOTE, _EQUIV_MODELS, _REGISTRY_CACHE, _GEN_CACHE
+    _COST_NOTE = None
+    _EQUIV_MODELS = None
+    _REGISTRY_CACHE = None
+    prev_gen = _GEN_CACHE
+    _GEN_CACHE = {} if prev_gen is None else prev_gen
+    from . import apicost as _ac0
+    _ac0.reset_caches()
     try:
         runs = load_all_runs(runs_dir)
         tdefs = _task_defs(tasks_dir)
@@ -6681,3 +7141,4 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
         _RUNS_BASE = prev_base
         _PUBLIC_NAV = prev_public
         _DATASET_KEY = prev_key
+        _GEN_CACHE = prev_gen

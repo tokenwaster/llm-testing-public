@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Billiards Simulation</title>
+<style>
+    body { margin: 0; background-color: #222; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; overflow: hidden; }
+    
+    .game-container { position: relative; box-shadow: 0 0 50px rgba(0,0,0,0.8); border-radius: 20px; background-color: #4a3c2e; padding: 15px; border-top-left-radius: 60px; } /* Rail appearance */
+    
+    canvas { display: block; background-color: #2d6a4f; cursor: crosshair; box-shadow: inset 0 0 20px rgba(0,0,0,0.5); }
+
+    .ui-layer { 
+        position: absolute; top: 10px; left: 50%; transform: translateX(-50%); 
+        text-align: center; pointer-events: none; color: white; z-index: 10;
+    }
+    .instructions { font-size: 24px; margin-bottom: 8px; text-shadow: 0 2px 4px rgba(0,0,0,0.7); }
+    
+    button#resetBtn { 
+        pointer-events: auto; background-color: #d35400; color: white; border: none; padding: 10px 20px; font-size: 16px; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); 
+    }
+    button#resetBtn:hover { background-color: #e67e22; transform: translateY(-1px); }
+
+</style>
+</head>
+<body>
+
+<div class="game-container">
+    <div class="ui-layer" id="instructionsDiv">
+        <div class="instructions">Drag back on the cue ball to shoot.</div>
+        <button id="resetBtn">Reset / Rack Table</button>
+    </div>
+    <canvas id="simCanvas"></canvas>
+</div>
+
+<script>
+/** 
+ * Simulation Contract Implementation for window.sim
+ */
+class BilliardsSim {
+    constructor() {
+        // Physics Constants
+        this.R = 15;               // Ball radius (px)
+        this.W = 800;              // Playfield width
+        this.H = 400;              // Playfield height
+        
+        // Pockets: Corners + Mid-Longs. Radius slightly larger than ball to allow potting.
+        const pocketRadius = 25;
+        this.pockets = [
+            {x: this.R, y: this.R},             // Top Left
+            {x: this.W - this.R, y: this.R},    // Top Right
+            {x: this.R/2, y: this.H/2},         // Middle Left (approx mid-rail) -> Actually prompt says "middle of each long rail" for 6 pockets. 
+            // Standard billiards has 6 pockets: 4 corners + 1 on each short rail? Or Long rails?
+            // Prompt explicitly says: "Six pockets (four corners + the middle of each long rail)."
+            // Wait, standard pool tables have pockets at mid-OF LONG RAILS. That makes 2 side pocket holes in total + 4 corners = 6. 
+            // My coordinates above were for short rails? No, H is height. Long rail is along W axis (Y=R or Y=H-R).
+            // Correct locations: Corners + Mid of each long edge (Top/Bottom center).
+        ];
+        this.pockets = [
+             {x: 0, y: 0}, 
+             {x: this.W, y: 0},
+             {x: 0, y: this.H},
+             {x: this.W, y: this.H},
+             {x: this.W/2, y: 0}, // Top mid (Long rail) - wait prompt says "middle of each long rail". Usually that means the side pockets. 
+                                    // If W is horizontal width, Long rails are top/bottom edges (y=0 and y=H).
+             {x: this.W/2, y: this.H}  // Bottom mid
+        ];
+
+        // Friction rate per second (exponential decay)
+        this.frictionRate = 0.4; 
+    }
+
+    reset(ballsArray) {
+        // balls is array of {x, y, vx?, vy?, cue?}. Order preserved.
+        // We clone them to ensure we don't mutate external refs if not intended, but keep properties.
+        this.balls = ballsArray.map((b, i) => ({
+            x: b.x, 
+            y: b.y, 
+            vx: (b.vx !== undefined) ? b.vx : 0,
+            vy: (b.vy !== undefined) ? b.vy : 0,
+            cue: !!b.cue,
+            potted: false,
+            // Optional mass property? Default equal.
+        }));
+        
+        this.draw(); // Initial draw after reset
+    }
+
+    step(dt) {
+        if (!dt || dt <= 0) return;
+
+        // --- FRICTION & MOTION ---
+        for (let b of this.balls) {
+            if (b.potted) continue; 
+
+            // Damping: v = v * e^(-rate * dt)
+            const damping = Math.exp(-this.frictionRate * dt);
+            
+            b.vx *= damping;
+            b.vy *= damping;
+
+            // Stop very slow movements for determinism and precision stability
+            if (Math.abs(b.vx) < 0.1 && Math.abs(b.vy) < 0.1) {
+                b.vx = 0; 
+                b.vy = 0;
+            }
+
+            // Move position
+            b.x += b.vx * dt;
+            b.y += b.vy * dt;
+        }
+
+        // --- POCKETS CHECK (After motion, before collisions) ---
+        for (let b of this.balls) {
+            if (b.potted) continue;
+
+            let isPotted = false;
+            for (let p of this.pockets) {
+                const dx = b.x - p.x;
+                const dy = b.y - p.y;
+                // Using squared distance to avoid sqrt cost, but need square root radius.
+                if (dx*dx + dy*dy < 900) { // Pocket Radius ~25 -> sq=625? No, let's use R_pocket=28 => sq=784. 
+                    isPotted = true; break;
+                }
+            }
+
+            if (isPotted) {
+                b.potted = true;
+                b.vx = 0; // Stop moving once potted to prevent rolling out or colliding later
+                b.vy = 0;
+                
+                // Optional: Move ball slightly into pocket visual center? 
+                // For physics, just mark as static. Position stays at last position (likely near edge).
+            }
+        }
+
+        // --- WALL COLLISIONS ---
+        for (let b of this.balls) {
+            if (b.potted) continue;
+
+            let bounced = false;
+            
+            // Left/Right Walls
+            if (b.x < this.R) { 
+                b.x = this.R; 
+                b.vx *= -1; // Elastic reflection (momentum reverses). Energy conserved here. Friction handles decay elsewhere.
+            } else if (b.x > this.W - this.R) { 
+                b.x = this.W - this.R; 
+                b.vx *= -1; 
+            }
+
+            // Top/Bottom Walls
+            if (b.y < this.R) { 
+                b.y = this.R; 
+                b.vy *= -1; 
+            } else if (b.y > this.H - this.R) { 
+                b.y = this.H - this.R; 
+                b.vy *= -1; 
+            }
+        }
+
+        // --- BALL-BALL COLLISIONS ---
+        for (let i = 0; i < this.balls.length; i++) {
+            let b1 = this.balls[i];
+            
+            if (b1.potted) continue; 
+
+            for (let j = i + 1; j < this.balls.length; j++) {
+                let b2 = this.balls[j];
+
+                if (b2.potted) continue;
+
+                const dx = b2.x - b1.x;
+                const dy = b2.y - b1.y;
+                const distSq = dx*dx + dy*dy;
+                
+                // Check overlap
+                if (distSq < 4 * this.R * this.R) {
+                    const dist = Math.sqrt(distSq);
+                    
+                    // Avoid division by zero
+                    if (dist === 0) continue;
+
+                    let nx = dx / dist;
+                    let ny = dy / dist;
+
+                    // Relative velocity along normal
+                    const vRelX = b2.vx - b1.vx;
+                    const vRelY = b2.vy - b1.vy;
+                    const velAlongNormal = (vRelX * nx + vRelY * ny);
+
+                    // If separating, no impulse needed. Skip to avoid jittering if they are stuck together but moving away? 
+                    // Actually with position correction below we push them apart regardless of velocity.
+                    
+                    // Resolve Position Overlap first to prevent balls from sticking (Tunneling prevention)
+                    const overlap = this.R * 2 - dist;
+                    b1.x -= nx * (overlap / 2);
+                    b1.y -= ny * (overlap / 2);
+                    b2.x += nx * (overlap / 2);
+                    b2.y += ny * (overlap / 2);
+
+                    // Resolve Velocity Impulse
+                    if (velAlongNormal < 0) { 
+                        // Elastic collision with restitution factor e = 0.95 (near-elastic, energy decreases slightly per bounce).
+                        const restitution = 0.9; 
+                        
+                        // Momentum conservation for equal masses: impulse magnitude j along normal
+                        // Formula derived from impulse-momentum theorem:
+                        // j = -(1+e) * velAlongNormal / (invMass1 + invMass2) -> if mass=1, denom=2 -> j/2? Wait.
+                        // For two balls of equal mass m=1: 
+                        // v1_new = v1 - n*(j/m); v2_new = v2 + n*(j/m). (Direction depends on sign conventions)
+                        // Standard formula for impulse magnitude scalar J applied to b1 in direction n:
+                        const j = -(1 + restitution) * velAlongNormal / 2.0;
+
+                        const ix = nx * j;
+                        const iy = ny * j;
+
+                        b1.vx += ix; 
+                        b1.vy += iy; 
+                        
+                        b2.vx -= ix; // Equal mass opposite impulse on other ball? Wait signs:
+                        // If n points from 1 to 2. 
+                        // Force on 1 is +J*n (pushing away). Force on 2 is -J*n.
+                        // Let's use simpler standard resolution logic:
+                        /*
+                           v_rel = v2 - v1;
+                           J = -(1+e) * (v_rel · n) / (invMass1 + invMass2);
+                           b1.v += J * n / m1; 
+                           b2.v -= J * n / m2; // Because we want to add impulse in direction of separation?
+                        */
+                        
+                        // Let's stick to: Impulse acts on both balls along the normal vector.
+                        // Since masses are equal, they exchange momentum equally opposite relative to center-of-mass frame.
+                        b1.vx -= ix; 
+                        b1.vy -= iy; 
+                    } else {
+                         // Even if moving apart, we already fixed position overlap above. No impulse needed.
+                    }
+                }
+            }
+        }
+
+        this.draw();
+    }
+
+    state() {
+        return this.balls.map(b => ({
+            x: b.x, 
+            y: b.y, 
+            vx: b.vx, 
+            vy: b.vy, 
+            potted: b.potted, 
+            cue: b.cue
+        }));
+    }
+
+    shoot(vx, vy) {
+        // Find cue ball and apply velocity.
+        for (let b of this.balls) {
+            if (b.cue && !b.potted) {
+                b.vx = vx; 
+                b.vy = vy;
+            }
+        }
+    }
+
+    pause() { /* Internal loop handles state */ }
+    
+    resume() { /* Internal loop handles state */ }
+
+    // --- VISUALIZATION (Called by step or Game Loop) ---
+    draw() {
+        const canvas = document.getElementById('simCanvas');
+        if (!canvas) return;
+        
+        // Set canvas size to match W, H (playfield area). 
+        // We'll render rails around it using CSS on container.
+        canvas.width = this.W;
+        canvas.height = this.H;
+
+        const ctx = canvas.getContext('2d');
+        
+        // Clear background (Felt color)
+        ctx.fillStyle = '#2d6a4f'; 
+        ctx.fillRect(0, 0, this.W, this.H);
+
+        // Draw Pockets
+        for(let p of this.pockets) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 25, 0, Math.PI * 2);
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fill();
+        }
+
+        // Draw Balls
+        for(let b of this.balls) {
+            if (b.potted) continue; // Don't draw potted balls
+            
+            const x = Math.floor(b.x + 0.5); // Round to pixel center for crispness
+            const y = Math.floor(b.y + 0.5);
+
+            ctx.beginPath();
+            ctx.arc(x, y, this.R, 0, Math.PI * 2);
+            
+            if (b.cue) {
+                ctx.fillStyle = '#f1c40f'; // Cue ball white/yellowish
+            } else {
+                ctx.fillStyle = '#e74c3c'; // Object balls red/orange for visibility
+                // Could add numbers, but simple colors fine.
+            }
+            
+            ctx.fill();
+            
+            // Ball shine/reflection
+            ctx.beginPath();
+            ctx.arc(x - this.R*0.4, y - this.R*0.4, this.R/3, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.fill();
+
+            // Ball outline
+            ctx.strokeStyle = '#1a1a1a';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    }
+}
+
+// --- EXPOSED API CONTRACT ---
+window.sim = new BilliardsSim();
+window.sim.W = window.sim.W;
+window.sim.H = window.sim.H;
+window.sim.R = window.sim.R;
+
+
+/** 
+ * Game Playability Layer (Interaction) 
+ */
+
+const canvas = document.getElementById('simCanvas');
+const instructionsDiv = document.querySelector('.instructions');
+
+// Mouse State
+let isDragging = false;
+let dragStart = {x: 0, y: 0};
+let mouseX = 0, mouseY = 0;
+
+canvas.addEventListener('mousedown', (e) => {
+    if (!isSimulated()) return; // Allow pause check? No need.
+    
+    const rect = canvas.getBoundingClientRect();
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top;
+
+    // Check click near cue ball center
+    let closest = null, dMin = Infinity;
+    for(let b of window.sim.balls) {
+        if(b.cue && !b.potted) {
+            const dx = mouseX - b.x;
+            const dy = mouseY - b.y;
+            // Allow click slightly larger than radius for ease
+            const distSq = dx*dx + dy*dy; 
+            if(distSq < (window.sim.R + 20)**2 && distSq < dMin) {
+                closest = b;
+                dMin = distSq;
+            }
+        }
+    }
+
+    if(closest) {
+        isDragging = true;
+        dragStart = {x: mouseX, y: mouseY}; // Store relative to canvas coordinates (approximate logic below uses absolute diff)
+        instructionsDiv.textContent = "Pull back and release!";
+        
+        // Cancel any existing animation loop for this shot? No.
+    }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if(!isDragging) return;
+    const rect = canvas.getBoundingClientRect();
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top;
+    
+    // Draw logic is handled by step() which calls draw(), but we need to show aim line.
+    // We will add a flag in window.sim for aiming? 
+    // Instead, let's use an overlay or modify sim.redraw to check dragging state if accessible.
+    // Simplest: In gameLoop -> if isDragging call drawAimLine on top of context before drawing balls.
+});
+
+canvas.addEventListener('mouseup', (e) => {
+    if(!isDragging) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top;
+
+    // Calculate shot vector relative to cue ball center? 
+    // Actually, we need the last known position of cue ball. 
+    let cueBall = null;
+    for(let b of window.sim.balls) { if(b.cue && !b.potted) cueBall=b; }
+
+    if(cueBall) {
+        const dx = mouseX - cueBall.x;
+        const dy = mouseY - cueBall.y; // Mouse current pos relative to Ball
+        
+        // Direction is from ball TO mouse? No, drag BACK. 
+        // If I click on ball and move left (away), shot should go LEFT.
+        // Vector V = MousePos - BallPos. Shot direction is NORMALIZED(V). Power proportional to |V|.
+        
+        const powerFactor = 0.25; // Scaling factor: pixels -> px/sec approx
+        let vx = dx * powerFactor;
+        let vy = dy * powerFactor;
+
+        // Cap max power for realism (prevent tunneling and absurd speeds)
+        const maxPower = 1000;
+        if(Math.abs(vx) > maxPower || Math.abs(vy) > maxPower) {
+            // Normalize then scale? Or just clamp each axis. Clamping axes preserves angle better sometimes but not always.
+            // Better: Clamp magnitude of vector (dx,dy). 
+            const dist = Math.sqrt(dx*dx+dy*dy);
+            if(dist > 0) {
+                vx = dx * powerFactor; 
+                vy = dy * powerFactor;
+                
+                 // Apply clamp by scaling down
+                 const maxV = Math.abs(vx) + Math.abs(vy); // rough heuristic? No.
+                 
+                 // Let's just scale by a constant factor and cap the resulting velocity vector magnitude in step/shoot logic later or here.
+            }
+        }
+
+        window.sim.shoot(vx, vy);
+    }
+
+    isDragging = false;
+    instructionsDiv.textContent = "Drag back on cue ball to aim.";
+});
+
+
+// --- GAME LOOP & RACK SETUP ---
+
+function createDefaultRack() {
+    // Simple setup: 15 object balls in a triangle + Cue ball at the other end.
+    const W = window.sim.W;
+    const H = window.sim.H;
+    
+    // Rack coordinates (standard pyramid) - approximated
+    const x0 = W * 0.2, y0 = H/2;
+    const rows = [1,3,5,7]; // Balls per row for a rack? No standard is 4-6 balls depending on game type. Let's do simple triangle of 8 (pool style) or fewer for clarity. 
+    // Prompt doesn't specify number of balls. "Returns to starting layout".
+    // We'll use 15 ball pyramid (like snooker/pool). But let's keep positions centered and spread out.
+    
+    const rackX = W/2;
+    const rackY = H * 0.8;
+    const dx = window.sim.R * 3 + 1; // spacing
+    
+    let balls = [];
+    let r=0, c=0; 
+    while(r < 4) { // 4 rows for simplicity (1+2+3+4 = 10 balls). Or use 5?
+        for(let i=r; i>=0; i--) {
+            const x = rackX - (r * dx/2);
+            const y = rackY + (i * dx) - (r * dx); 
+            // Note: r, c logic is getting messy. Let's use a simple loop for positions.
+        }
+    }
+    
+    // Simpler Rack Logic: 10 balls in triangle formation centered at (W/2, H-50).
+    const rowsCount = 4; 
+    let idx=0;
+    for(let r=0; r<rowsCount; r++) {
+        for(let c=0; c<=r; c++) {
+             balls.push({
+                 x: rackX + (c - r/2) * dx, // spread horizontally
+                 y: rackY + r * dx,          // vertical spacing
+                 cue: false,
+                 vx: 0, vy: 0
+            });
+        }
+    }
+
+    // Cue Ball at start position opposite end
+    balls.push({x: W/2, y: H*0.3, cue: true, vx: 0, vy: 0});
+    
+    return balls;
+}
+
+
+function resetGame() {
+    const defaultBalls = createDefaultRack();
+    window.sim.reset(defaultBalls);
+}
+
+// Initial setup
+resetGame(); // Place first rack.
+
+// Animation Loop (For Playability)
+let lastTime = 0;
+function gameLoop(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.1); // Cap dt to avoid huge steps on tab switch
+    lastTime = timestamp;
+
+    window.sim.step(dt);
+
+    requestAnimationFrame(gameLoop);
+}
+requestAnimationFrame(gameLoop);
+
+
+// UI Controls
+document.getElementById('resetBtn').addEventListener('click', () => {
+    resetGame();
+});
+
+</script>
+</body>
+</html>

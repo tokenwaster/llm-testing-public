@@ -65,7 +65,6 @@ def test_clear_empties(page):
 def test_block_is_still_life(page):
     got = page.evaluate("""() => {
         const L = window.life; L.clear();
-        // 2x2 block at (10,10) is stable under B3/S23
         for (const [x,y] of [[10,10],[11,10],[10,11],[11,11]]) L.set(x,y,1);
         L.step();
         return [[10,10],[11,10],[10,11],[11,11]].map(([x,y]) => L.get(x,y));
@@ -84,10 +83,8 @@ def test_lone_cell_dies(page):
 def test_blinker_oscillates(page):
     got = page.evaluate("""() => {
         const L = window.life; L.clear();
-        // horizontal blinker at row 15, cols 14-16
         L.set(14,15,1); L.set(15,15,1); L.set(16,15,1);
         L.step();
-        // after 1 step it must be a VERTICAL blinker at col 15, rows 14-16
         const vert = [L.get(15,14), L.get(15,15), L.get(15,16)];
         const oldEnds = [L.get(14,15), L.get(16,15)];  // must have died
         L.step();
@@ -104,11 +101,9 @@ def test_blinker_oscillates(page):
 def test_glider_travels(page):
     moved = page.evaluate("""() => {
         const L = window.life; L.clear();
-        // standard glider, top-left at (5,5)
         const g = [[6,5],[7,6],[5,7],[6,7],[7,7]];
         for (const [x,y] of g) L.set(x,y,1);
         for (let s = 0; s < 4; s++) L.step();
-        // expected: same 5 cells, each shifted by (+1,+1)
         const exp = g.map(([x,y]) => [x+1,y+1]);
         const hit = exp.every(([x,y]) => L.get(x,y) === 1);
         let total = 0;
@@ -122,8 +117,6 @@ def test_glider_travels(page):
 def test_canvas_visibly_drawn(page):
     ok = page.evaluate("""() => {
         const L = window.life; L.clear();
-        // several 2x2 blocks (still-lifes) then step() — the spec guarantees
-        // step() redraws, and blocks persist, so live cells must be on screen
         for (const [bx,by] of [[8,8],[8,20],[20,8],[20,20],[14,14]])
           for (const [dx,dy] of [[0,0],[1,0],[0,1],[1,1]]) L.set(bx+dx,by+dy,1);
         L.step();

@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 from datetime import datetime, timezone
+from itertools import chain, islice
 from pathlib import Path
 
 import httpx
@@ -116,18 +117,17 @@ def received_requests(days: set[str] | None = None) -> list[dict]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        pos = 0
-        while True:
-            at = text.find(_REQ_MARK, pos)
+        lines = text.splitlines()
+        for i, head in enumerate(lines):
+            at = head.find(_REQ_MARK)
             if at < 0:
-                break
-            pos = at + len(_REQ_MARK)
-            line_start = text.rfind("\n", 0, at) + 1
-            m = _TS_LINE.match(text[line_start:at])
+                continue
+            m = _TS_LINE.match(head[:at])
             if not m:
                 continue
             depth, buf = 1, ["{"]
-            for line in text[pos:].splitlines():
+            for line in chain([head[at + len(_REQ_MARK):]],
+                              islice(lines, i + 1, None)):
                 if _TS_LINE.match(line):
                     depth = -1
                     break
@@ -174,10 +174,55 @@ def _match(expected: dict, body: dict) -> list[str]:
     return diffs
 
 
+def _sampling_fingerprint(runs_dir) -> str:
+    parts = []
+    if SERVER_LOG_DIR.is_dir():
+        for p in sorted(SERVER_LOG_DIR.glob("*/*.log")):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            parts.append(f"{p.name}:{st.st_size}:{int(st.st_mtime)}")
+    newest = 0.0
+    n = 0
+    if runs_dir.is_dir():
+        for p in runs_dir.glob("*/*/*/metrics.json"):
+            try:
+                newest = max(newest, p.stat().st_mtime)
+            except OSError:
+                continue
+            n += 1
+    parts.append(f"runs:{n}:{int(newest)}")
+    import hashlib
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
+def _sampling_cache_path():
+    from . import config
+    return config.ROOT / ".lmstudio-sampling.json"
+
+
 def confirm_sampling(runs_dir=None, models=None) -> dict:
     from . import config
-    from .registry import load_models
+    canonical = runs_dir is None and models is None
     runs_dir = runs_dir or config.RUNS_DIR
+    if not canonical:
+        return _confirm_sampling_uncached(runs_dir, models)
+    fp = _sampling_fingerprint(runs_dir)
+    cache = read_json(_sampling_cache_path(), {}) or {}
+    if cache.get("fingerprint") == fp:
+        return cache.get("result") or {}
+    out = _confirm_sampling_uncached(runs_dir, models)
+    try:
+        from .util import write_json
+        write_json(_sampling_cache_path(), {"fingerprint": fp, "result": out})
+    except OSError:
+        pass
+    return out
+
+
+def _confirm_sampling_uncached(runs_dir, models=None) -> dict:
+    from .registry import load_models
     models = models or load_models(include_disabled=True)
     local = {m.name for m in models if m.local}
     ids = {m.name: m.model for m in models if m.local}

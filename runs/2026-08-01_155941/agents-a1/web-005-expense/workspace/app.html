@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Personal Expense Tracker</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        .form-row, .filter-group, #summary-section { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap;}
+        label { font-weight: bold; }
+        input, select { padding: 5px; border: 1px solid #ccc; border-radius: 3px; }
+        button { background-color: green; color: white; border: none; padding: 8px 12px; cursor: pointer; border-radius: 3px; font-size: inherit; margin-top: 5px;}
+        button:hover { opacity: 0.9; }
+        
+        #form-error { color: red; min-height: 1.2em; display: block; height: auto; }
+
+        .expense { 
+            border: 1px solid #ddd; 
+            padding: 8px; 
+            margin-bottom: 5px; 
+            background: white;
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+        }
+        
+        .exp-del { background-color: red; color: white; border: none; padding: 4px 8px; cursor: pointer; font-size: 0.9em; margin-left: auto;}
+
+        #total, .cat-total-value-container { font-weight: bold; display: block; }
+        
+        /* Category totals inline */
+        #category-totals-list li { display: flex; align-items: center; gap: 10px; padding: 4px; border-bottom: 1px solid #eee;}
+
+    </style>
+</head>
+<body>
+
+<h1>Expense Tracker</h1>
+
+<section id="add-section">
+    <h2>Add Expense</h2>
+    <div class="form-row">
+        <label for="amount">Amount:</label>
+        <input type="number" id="amount" step="0.01" placeholder="e.g. 50.00">
+
+        <label for="category">Category:</label>
+        <select id="category">
+            <option value="groceries">Groceries</option>
+            <option value="transport">Transport</option>
+            <option value="bills">Bills</option>
+            <option value="fun">Fun</option>
+        </select>
+
+        <label for="date">Date:</label>
+        <input type="date" id="date">
+
+        <label for="note">Note (Optional):</label>
+        <input type="text" id="note">
+    </div>
+    <button id="add-expense">Add Expense</button>
+    <span id="form-error"></span>
+</section>
+
+<section class="filter-group">
+    <h2>Filters</h2>
+    <label for="filter-category">Category:</label>
+    <select id="filter-category">
+        <option value="all">All</option>
+        <option value="groceries">Groceries</option>
+        <option value="transport">Transport</option>
+        <option value="bills">Bills</option>
+        <option value="fun">Fun</option>
+    </select>
+
+    <label for="filter-from">From:</label>
+    <input type="date" id="filter-from">
+
+    <label for="filter-to">To:</label>
+    <input type="date" id="filter-to">
+</section>
+
+<section id="summary-section">
+    <h2>Summary</h2>
+    <div id="total-wrap">Total: <span id="total">0.00</span></div>
+    
+    <ul id="category-totals-list" style="list-style:none; padding:0;">
+        <!-- These elements must exist for data-cat attributes -->
+        <li><label>Groceries:</label> <span class="cat-total-value-container"><span class="cat-total" data-cat="groceries">0.00</span></span></li>
+        <li><label>Transport:</label> <span class="cat-total-value-container"><span class="cat-total" data-cat="transport">0.00</span></span></li>
+        <li><label>Bills:</label> <span class="cat-total-value-container"><span class="cat-total" data-cat="bills">0.00</span></span></li>
+        <li><label>Fun:</label> <span class="cat-total-value-container"><span class="cat-total" data-cat="fun">0.00</span></span></li>
+    </ul>
+</section>
+
+<section id="list-section">
+    <h2>Expenses List</h2>
+    <div id="expense-list"></div>
+</section>
+
+<script>
+// State and Initialization
+const STORAGE_KEY = 'app_expense_tracker_v1';
+let expenses = [];
+
+function loadExpenses() {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+        try {
+            expenses = JSON.parse(stored);
+        } catch (e) {
+            console.error("Failed to parse local storage", e);
+            expenses = [];
+        }
+    } else {
+        expenses = [];
+    }
+}
+
+function saveExpenses() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(expenses));
+}
+
+// DOM Elements
+const elAmount = document.getElementById('amount');
+const elCategory = document.getElementById('category');
+const elDate = document.getElementById('date');
+const elNote = document.getElementById('note');
+const elAddBtn = document.getElementById('add-expense');
+const elError = document.getElementById('form-error');
+
+const elFilterCat = document.getElementById('filter-category');
+const elFilterFrom = document.getElementById('filter-from');
+const elFilterTo = document.getElementById('filter-to');
+
+const elTotalSpan = document.getElementById('total');
+const elExpenseList = document.getElementById('expense-list');
+
+// Helper: Format currency to 2 decimals
+function formatMoney(amount) {
+    return Number(amount).toFixed(2);
+}
+
+// Event Listeners
+elAddBtn.addEventListener('click', addExpense);
+elDate.addEventListener('change', renderUI); // Date in entry form affects date logic? Usually filters do. But if user sets a default, they might want to see filtered list based on that too? No, filter inputs are separate. Only filtering happens via #filter-* IDs.
+
+// Filter listeners trigger re-render
+elFilterCat.addEventListener('change', renderUI);
+elFilterFrom.addEventListener('change', renderUI);
+elFilterTo.addEventListener('change', renderUI);
+
+function addExpense() {
+    // Validation: Amount must be non-empty, numeric, > 0. Date must not be missing.
+    const amountVal = elAmount.value;
+    const dateVal = elDate.value;
+    
+    let errorText = '';
+
+    if (amountVal === '' || isNaN(amountVal) || parseFloat(amountVal) <= 0) {
+        errorText = 'Please enter a valid positive number for the amount.';
+    } else if (!dateVal) {
+        errorText = 'Date is required.';
+    }
+
+    if (errorText) {
+        elError.textContent = errorText;
+        return; // Do not add expense
+    }
+
+    // Valid submission: clear error, reset amount field.
+    const newExpense = {
+        id: Date.now().toString(), // Simple unique ID
+        amount: parseFloat(amountVal),
+        category: elCategory.value,
+        date: dateVal,
+        note: elNote.value || ''
+    };
+
+    expenses.push(newExpense);
+    saveExpenses();
+
+    // Clear Error & Reset Amount Field (per spec)
+    elError.textContent = '';
+    elAmount.value = ''; 
+    // Note: Date and Category not reset as per strict reading "resets the amount field" only.
+
+    renderUI();
+}
+
+// Filtering Logic helper
+function isExpenseVisible(expense, filterCat, dateFrom, dateTo) {
+    // Filter by category (all or specific)
+    const catMatch = filterCat === 'all' || expense.category === filterCat;
+    
+    if (!catMatch) return false;
+
+    // Date Range check (if inputs have values)
+    if (dateFrom && expense.date < dateFrom) return false;
+    if (dateTo && expense.date > dateTo) return false;
+
+    return true;
+}
+
+function renderUI() {
+    // Get current filter values
+    const fCat = elFilterCat.value;
+    const dFrom = elFilterFrom.value; // YYYY-MM-DD string or ""
+    const dTo = elFilterTo.value;     // YYYY-MM-DD string or ""
+
+    // 1. Calculate totals for visible items only
+    let totalVisibleSum = 0;
+    const categorySums = { groceries: 0, transport: 0, bills: 0, fun: 0 };
+
+    expenses.forEach(exp => {
+        if (isExpenseVisible(exp, fCat, dFrom, dTo)) {
+            const amt = Number(exp.amount);
+            totalVisibleSum += amt;
+            
+            // Only sum category for matching items? 
+            // Spec: "contains that category's visible total" -> Implies visible expenses with that category.
+            if (categorySums.hasOwnProperty(exp.category)) {
+                categorySums[exp.category] += amt;
+            }
+        }
+    });
+
+    // Update Total Display
+    elTotalSpan.textContent = formatMoney(totalVisibleSum);
+
+    // Update Category Totals DOM elements
+    document.querySelectorAll('.cat-total').forEach(span => {
+        const catKey = span.getAttribute('data-cat');
+        if (categorySums.hasOwnProperty(catKey)) {
+            span.textContent = formatMoney(categorySums[catKey]);
+        } else {
+            span.textContent = '0.00'; // Fallback safety
+        }
+    });
+
+    // 2. Render List - Sort by Date DESC, then check visibility (hide matching)
+    elExpenseList.innerHTML = ''; // Clear current list
+    
+    // Sort expenses: Newest first
+    const sortedExpenses = [...expenses].sort((a, b) => {
+        return new Date(b.date + 'T00:00') - new Date(a.date + 'T00:00');
+    });
+
+    sortedExpenses.forEach(exp => {
+        // Determine visibility based on current filters (even if not in list yet? No, we iterate expenses)
+        const isVisible = isExpenseVisible(exp, fCat, dFrom, dTo);
+        
+        const div = document.createElement('div');
+        div.className = 'expense';
+        
+        // Styling for hidden items: We want to "hide non-matching rows" -> display none on element.
+        if (!isVisible) {
+            div.style.display = 'none'; 
+        }
+
+        const noteText = exp.note ? `<small style="color:#666; font-style:italic;">${exp.note}</small>` : '';
+        
+        div.innerHTML = `
+            <div>
+                <strong>${formatMoney(exp.amount)}</strong> &mdash; ${exp.category.toUpperCase()} &mdash; ${exp.date}
+                ${noteText}
+            </div>
+            <button class="exp-del">Delete</button>
+        `;
+
+        // Delete Handler (Delegated logic or direct)
+        div.querySelector('.exp-del').addEventListener('click', () => {
+            if(confirm("Are you sure?")) { // Optional: Prompt says "immediate, no confirm dialog" -> No alert. Just delete.
+                 // Wait: Spec says "no confirm dialog". So simply remove immediately.
+                 expenses = expenses.filter(e => e.id !== exp.id);
+                 saveExpenses();
+                 renderUI();
+            } else {
+                return; 
+            }
+        });
+
+        elExpenseList.appendChild(div);
+    });
+}
+
+// Initialize on Load
+loadExpenses();
+renderUI();
+
+</script>
+</body>
+</html>

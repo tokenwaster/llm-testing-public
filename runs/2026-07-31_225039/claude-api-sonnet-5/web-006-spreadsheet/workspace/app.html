@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    background: #fafafa;
+    padding: 10px;
+  }
+  #app {
+    width: 700px;
+    min-height: 450px;
+    background: #fff;
+    border: 1px solid #999;
+    padding: 10px;
+    box-sizing: border-box;
+  }
+  .toolbar {
+    margin-bottom: 8px;
+  }
+  #export {
+    padding: 6px 14px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  #grid-wrap {
+    overflow: auto;
+  }
+  #sheet {
+    display: grid;
+    grid-template-columns: 50px repeat(10, 60px);
+    grid-auto-rows: 32px;
+    gap: 1px;
+    background: #ccc;
+    width: fit-content;
+  }
+  .header {
+    background: #e0e0e0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 13px;
+    box-sizing: border-box;
+  }
+  input.cell {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    border: none;
+    text-align: center;
+    font-size: 13px;
+    padding: 0;
+    background: #fff;
+  }
+  input.cell:focus {
+    outline: 2px solid #4a90e2;
+    background: #fffef0;
+  }
+  #csv-wrap {
+    margin-top: 12px;
+  }
+  #csv {
+    width: 100%;
+    height: 130px;
+    box-sizing: border-box;
+    font-family: monospace;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div class="toolbar">
+    <button id="export">Export CSV</button>
+  </div>
+  <div id="grid-wrap">
+    <div id="sheet"></div>
+  </div>
+  <div id="csv-wrap">
+    <label for="csv">CSV Output:</label><br>
+    <textarea id="csv"></textarea>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  const COLS = 10;
+  const ROWS = 10;
+
+  function colLetter(idx){ return String.fromCharCode(65 + idx); }
+
+  // raw data storage
+  const data = {};
+  // computed display values (strings)
+  let computed = {};
+
+  for (let r = 1; r <= ROWS; r++){
+    for (let c = 0; c < COLS; c++){
+      data[colLetter(c) + r] = '';
+    }
+  }
+
+  // ---------- Tokenizer ----------
+  function tokenize(s){
+    const tokens = [];
+    let i = 0;
+    while (i < s.length){
+      const ch = s[i];
+      if (/\s/.test(ch)){ i++; continue; }
+      if (/[0-9.]/.test(ch)){
+        let j = i;
+        while (j < s.length && /[0-9.]/.test(s[j])) j++;
+        const numStr = s.slice(i, j);
+        if (!/^[0-9]*\.?[0-9]+$/.test(numStr) && !/^[0-9]+\.?[0-9]*$/.test(numStr)){
+          throw new Error('ERR');
+        }
+        const val = parseFloat(numStr);
+        if (isNaN(val)) throw new Error('ERR');
+        tokens.push({type:'num', value: val});
+        i = j;
+        continue;
+      }
+      if (/[A-Za-z]/.test(ch)){
+        let j = i;
+        while (j < s.length && /[A-Za-z0-9]/.test(s[j])) j++;
+        tokens.push({type:'ref', value: s.slice(i, j).toUpperCase()});
+        i = j;
+        continue;
+      }
+      if ('+-*/()'.includes(ch)){
+        tokens.push({type: ch});
+        i++;
+        continue;
+      }
+      throw new Error('ERR');
+    }
+    return tokens;
+  }
+
+  // ---------- Formula evaluator ----------
+  // resolve(id, stack) -> numeric or string value of a cell (memoized), may throw Error('CYCLE')
+  function evalFormula(str, stack, resolve){
+    const tokens = tokenize(str);
+    let pos = 0;
+    function peek(){ return tokens[pos]; }
+    function advance(){ return tokens[pos++]; }
+
+    function parseExpression(){
+      let val = parseTerm();
+      while (peek() && (peek().type === '+' || peek().type === '-')){
+        const op = advance().type;
+        const rhs = parseTerm();
+        val = (op === '+') ? val + rhs : val - rhs;
+      }
+      return val;
+    }
+    function parseTerm(){
+      let val = parseFactor();
+      while (peek() && (peek().type === '*' || peek().type === '/')){
+        const op = advance().type;
+        const rhs = parseFactor();
+        val = (op === '*') ? val * rhs : val / rhs;
+      }
+      return val;
+    }
+    function parseFactor(){
+      const t = peek();
+      if (!t) throw new Error('ERR');
+      if (t.type === '-'){ advance(); return -parseFactor(); }
+      if (t.type === '+'){ advance(); return parseFactor(); }
+      if (t.type === '('){
+        advance();
+        const v = parseExpression();
+        if (!peek() || peek().type !== ')') throw new Error('ERR');
+        advance();
+        return v;
+      }
+      if (t.type === 'num'){ advance(); return t.value; }
+      if (t.type === 'ref'){ advance(); return resolveRef(t.value); }
+      throw new Error('ERR');
+    }
+    function resolveRef(name){
+      if (!/^[A-J](10|[1-9])$/.test(name)) throw new Error('ERR');
+      const v = resolve(name, stack); // may throw Error('CYCLE'), let bubble
+      if (typeof v === 'number') return v;
+      if (typeof v === 'string'){
+        const trimmed = v.trim();
+        if (trimmed === '') return 0;
+        const n = Number(trimmed);
+        if (!isNaN(n)) return n;
+      }
+      throw new Error('ERR');
+    }
+
+    if (tokens.length === 0) throw new Error('ERR');
+    const result = parseExpression();
+    if (pos !== tokens.length) throw new Error('ERR');
+    if (typeof result !== 'number' || isNaN(result)) throw new Error('ERR');
+    return result;
+  }
+
+  function formatNumber(n){
+    let rounded = Math.round(n * 1e9) / 1e9;
+    if (Object.is(rounded, -0)) rounded = 0;
+    return String(rounded);
+  }
+
+  let cycleCells = new Set();
+
+  function recomputeAll(){
+    const memo = {};
+    cycleCells = new Set();
+
+    function resolve(id, stack){
+      if (Object.prototype.hasOwnProperty.call(memo, id)) return memo[id];
+      if (stack.includes(id)){
+        const idx = stack.indexOf(id);
+        for (let i = idx; i < stack.length; i++) cycleCells.add(stack[i]);
+        cycleCells.add(id);
+        throw new Error('CYCLE');
+      }
+      const raw = data[id] || '';
+      let val;
+      if (raw.trim() === ''){
+        val = 0;
+      } else if (raw[0] === '='){
+        const newStack = stack.concat([id]);
+        try {
+          val = evalFormula(raw.slice(1), newStack, resolve);
+        } catch(e){
+          if (e.message === 'CYCLE') throw e;
+          val = '#ERR';
+        }
+      } else {
+        const trimmed = raw.trim();
+        const num = Number(trimmed);
+        val = (!isNaN(num)) ? num : raw;
+      }
+      memo[id] = val;
+      return val;
+    }
+
+    for (let r = 1; r <= ROWS; r++){
+      for (let c = 0; c < COLS; c++){
+        const id = colLetter(c) + r;
+        if (!Object.prototype.hasOwnProperty.call(memo, id)){
+          try {
+            resolve(id, []);
+          } catch(e){
+            memo[id] = (e.message === 'CYCLE') ? '#CYCLEMARK' : '#ERR';
+          }
+        }
+      }
+    }
+
+    const newComputed = {};
+    for (let r = 1; r <= ROWS; r++){
+      for (let c = 0; c < COLS; c++){
+        const id = colLetter(c) + r;
+        const raw = data[id] || '';
+        if (cycleCells.has(id)){
+          newComputed[id] = '#CYCLE';
+        } else if (raw.trim() === ''){
+          newComputed[id] = '';
+        } else {
+          const v = memo[id];
+          if (typeof v === 'number'){
+            newComputed[id] = isFinite(v) ? formatNumber(v) : '#ERR';
+          } else if (v === '#ERR' || v === '#CYCLEMARK'){
+            newComputed[id] = '#ERR';
+          } else {
+            newComputed[id] = String(v);
+          }
+        }
+      }
+    }
+    computed = newComputed;
+  }
+
+  // ---------- DOM building ----------
+  const sheetEl = document.getElementById('sheet');
+
+  function makeHeaderCell(text){
+    const d = document.createElement('div');
+    d.className = 'header';
+    d.textContent = text;
+    return d;
+  }
+
+  // corner
+  sheetEl.appendChild(makeHeaderCell(''));
+  for (let c = 0; c < COLS; c++){
+    sheetEl.appendChild(makeHeaderCell(colLetter(c)));
+  }
+  for (let r = 1; r <= ROWS; r++){
+    sheetEl.appendChild(makeHeaderCell(String(r)));
+    for (let c = 0; c < COLS; c++){
+      const id = colLetter(c) + r;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.id = 'cell-' + id;
+      input.className = 'cell';
+      input.autocomplete = 'off';
+
+      input.addEventListener('focus', function(){
+        input.value = data[id] || '';
+      });
+      input.addEventListener('keydown', function(e){
+        if (e.key === 'Enter'){
+          e.preventDefault();
+          input.blur();
+        }
+      });
+      input.addEventListener('blur', function(){
+        commit(id, input.value);
+      });
+
+      sheetEl.appendChild(input);
+    }
+  }
+
+  function commit(id, text){
+    data[id] = text;
+    recomputeAll();
+    refreshDisplay();
+  }
+
+  function refreshDisplay(){
+    for (let r = 1; r <= ROWS; r++){
+      for (let c = 0; c < COLS; c++){
+        const id = colLetter(c) + r;
+        const input = document.getElementById('cell-' + id);
+        if (document.activeElement !== input){
+          input.value = (computed[id] !== undefined) ? computed[id] : '';
+        }
+      }
+    }
+  }
+
+  // ---------- Export ----------
+  document.getElementById('export').addEventListener('click', function(){
+    const lines = [];
+    for (let r = 1; r <= ROWS; r++){
+      const rowVals = [];
+      for (let c = 0; c < COLS; c++){
+        const id = colLetter(c) + r;
+        rowVals.push(computed[id] !== undefined ? computed[id] : '');
+      }
+      lines.push(rowVals.join(','));
+    }
+    document.getElementById('csv').value = lines.join('\n');
+  });
+
+  // ---------- Scripting API ----------
+  window.sheet = {
+    set: function(id, text){
+      id = String(id).toUpperCase();
+      data[id] = text;
+      recomputeAll();
+      refreshDisplay();
+    },
+    get: function(id){
+      id = String(id).toUpperCase();
+      return (computed[id] !== undefined) ? computed[id] : '';
+    },
+    raw: function(id){
+      id = String(id).toUpperCase();
+      return data[id] || '';
+    }
+  };
+
+  // initial compute + render
+  recomputeAll();
+  refreshDisplay();
+
+})();
+</script>
+
+</body>
+</html>

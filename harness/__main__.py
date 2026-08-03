@@ -50,7 +50,6 @@ def cmd_run(args) -> int:
             return 2
         models = [m for m in models if m.name in wanted]
     if args.tasks == "hardened":
-        from . import report
         hs = set(report.hardened_ids())
         tasks = [t for t in tasks if t.id in hs]
     elif args.tasks == "new":
@@ -71,13 +70,21 @@ def cmd_run(args) -> int:
     repeat = max(1, min(args.repeat, 10))
     print(f"Run: {len(models)} model(s) x {len(tasks)} task(s)"
           + (f" x {repeat} trials" if repeat > 1 else ""))
+    from .runner import cycle_plan_summary, cycling_models, new_run_ids
     from .util import keep_awake
+    cycling = cycling_models(models, repeat)
     with keep_awake():
-        for i in range(repeat):
-            tag = args.tag if repeat == 1 else f"{args.tag} (trial {i + 1}/{repeat})".strip()
-            if repeat > 1:
-                print(f"\n===== trial {i + 1}/{repeat} =====")
-            run_dir = run_suite(models, tasks, tag=tag)
+        if cycling:
+            for line in cycle_plan_summary(models, tasks, repeat):
+                print(line)
+            run_dirs = [config.RUNS_DIR / r for r in new_run_ids(repeat)]
+            run_dir = run_suite(models, tasks, run_dirs=run_dirs, tag=args.tag)
+        else:
+            for i in range(repeat):
+                tag = args.tag if repeat == 1 else f"{args.tag} (trial {i + 1}/{repeat})".strip()
+                if repeat > 1:
+                    print(f"\n===== trial {i + 1}/{repeat} =====")
+                run_dir = run_suite(models, tasks, tag=tag)
     index = report.generate_all()
     print(f"\nRun complete: {run_dir}")
     print(f"View results: python -m harness serve   ->  "

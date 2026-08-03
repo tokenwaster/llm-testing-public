@@ -88,14 +88,42 @@ def save_interfaces(interfaces: list[dict]) -> None:
     INTERFACES_FILE.write_text(doc, encoding="utf-8")
 
 
+MASKED = ("…", "...", "*", "•")
+
+
 def set_env_key(key_env: str, value: str) -> None:
+    key_env = (key_env or "").strip()
+    value = (value or "").strip().strip('"').strip("'")
+    if not key_env:
+        raise ValueError("no env var name given")
+    if not value:
+        raise ValueError(f"refusing to write an empty {key_env} — a blank save "
+                         f"would silently revoke a working key")
+    if any(tok in value for tok in MASKED):
+        raise ValueError(f"that looks like a masked display value, not a key — "
+                         f"{key_env} left unchanged")
     env_file = config.ROOT / ".env"
-    lines = []
-    if env_file.exists():
-        lines = [ln for ln in env_file.read_text(encoding="utf-8").splitlines()
-                 if not ln.strip().startswith(f"{key_env}=")]
-    lines.append(f"{key_env}={value}")
-    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    raw = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
+    crlf = "\r\n" in raw
+    lines = raw.replace("\r\n", "\n").split("\n")
+    trailing = lines and lines[-1] == ""
+    if trailing:
+        lines.pop()
+    new = f"{key_env}={value}"
+    replaced = False
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith(f"{key_env}="):
+            if replaced:
+                lines[i] = None
+                continue
+            lines[i] = new
+            replaced = True
+    lines = [ln for ln in lines if ln is not None]
+    if not replaced:
+        lines.append(new)
+    body = "\n".join(lines) + "\n"
+    env_file.write_text(body.replace("\n", "\r\n") if crlf else body,
+                        encoding="utf-8")
     os.environ[key_env] = value
 
 

@@ -78,3 +78,45 @@ def test_overview_marks_exactly_the_hardened_tasks(tmp_path):
         r'<tr><td class="nowrap"><a href="tasks/([^"]+)\.html">.*?</tr>',
         body, re.S) if "hardmark" in m.group(0)]
     assert sorted(marked) == sorted(report.hardened_ids())
+
+
+def test_one_definition_of_the_hardened_predicate():
+    from pathlib import Path
+
+    from harness import config
+    needle = '"hard", "frontier"'
+    hits = []
+    for p in sorted((config.ROOT / "harness").glob("*.py")):
+        src = p.read_text(encoding="utf-8")
+        for i, line in enumerate(src.splitlines(), 1):
+            if needle in line or '"hard","frontier"' in line:
+                hits.append(f"{p.name}:{i}: {line.strip()}")
+    assert len(hits) == 1, (
+        "the hardened predicate must live in exactly one place "
+        "(report.HARDENED_TIERS); found:\n  " + "\n  ".join(hits))
+    assert "HARDENED_TIERS" in hits[0]
+
+
+def test_every_derivation_of_the_hardened_set_agrees():
+    from harness import report
+    runs = report.load_all_runs()
+    tdefs = report._task_defs()
+    ds = report.discrimination_stats(runs, tdefs)
+    tiers = report.task_tiers(runs, tdefs)
+    from_stats = report.hardened_from_stats(ds)
+    from_tiers = set(report.hardened_ids(tiers))
+    assert from_stats == from_tiers, (
+        f"hardened_from_stats and hardened_ids disagree: "
+        f"{from_stats ^ from_tiers}")
+    assert {t for t in tiers if report.is_hardened(t, tiers)} == from_tiers
+
+
+def test_the_run_page_uses_the_shared_helper_and_a_stable_order():
+    from harness import config
+    src = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
+    assert "report.hardened_ids(tiers)" in src, (
+        "the run page must derive hard_ids from the shared helper")
+    assert "report.is_hardened(t.id, tiers)" in src
+    from harness import report
+    ids = report.hardened_ids()
+    assert ids == sorted(ids), "hard_todo order must be deterministic"

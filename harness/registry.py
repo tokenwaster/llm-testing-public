@@ -35,6 +35,7 @@ class Model:
     color: str = ""
     show_in_reports: bool = True
     family: str = ""
+    compare_key: str = ""
     source_file: str = ""
 
     @property
@@ -211,19 +212,41 @@ def infer_family(name: str, model_id: str = "") -> str:
     return name
 
 
+_YAML_CACHE: dict = {}
+
+
+def reset_cache() -> None:
+    _YAML_CACHE.clear()
+
+
+def _model_fields(f: Path) -> dict:
+    import copy
+    try:
+        st = f.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    hit = _YAML_CACHE.get(f)
+    if stamp is not None and hit is not None and hit[0] == stamp:
+        return copy.deepcopy(hit[1])
+    raw = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+    if "sampling_settable" in raw:
+        raw["sampling_settable_yaml"] = raw.pop("sampling_settable")
+    if raw.pop("thinking_off", None) is not None:
+        raw["thinking_off_in_yaml"] = True
+    known = {k: v for k, v in raw.items() if k in Model.__dataclass_fields__}
+    if stamp is not None:
+        _YAML_CACHE[f] = (stamp, copy.deepcopy(known))
+    return known
+
+
 def load_models(models_dir: Path = config.MODELS_DIR,
                 include_disabled: bool = False) -> list[Model]:
     models: list[Model] = []
     for f in sorted(models_dir.glob("*.yaml")):
         if f.name.startswith("_"):
             continue
-        raw = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-        if "sampling_settable" in raw:
-            raw["sampling_settable_yaml"] = raw.pop("sampling_settable")
-        if raw.pop("thinking_off", None) is not None:
-            raw["thinking_off_in_yaml"] = True
-        known = {k: v for k, v in raw.items() if k in Model.__dataclass_fields__}
-        m = Model(**known)
+        m = Model(**_model_fields(f))
         m.source_file = f.name
         if m.enabled or include_disabled:
             models.append(m)

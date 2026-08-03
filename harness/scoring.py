@@ -53,7 +53,8 @@ def run_pytest_checker(task: Task, workspace: Path) -> dict:
     cmd = [sys.executable, "-m", "pytest", str(target.name), "-q", "--tb=line",
            "-p", "no:cacheprovider", "--color=no"]
     timeout = task.checker_timeout_s
-    env = os.environ.copy()
+    from .util import child_env
+    env = child_env()
     local_browsers = config.ROOT / ".pw-browsers"
     if local_browsers.is_dir():
         env["PLAYWRIGHT_BROWSERS_PATH"] = str(local_browsers)

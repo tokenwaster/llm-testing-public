@@ -17,6 +17,10 @@ class RunInProgress(Exception):
     pass
 
 
+class SpendRefused(Exception):
+    pass
+
+
 def active_run() -> str | None:
     from .util import read_json
     for base in (config.RUNS_DIR, getattr(config, "SCOUTS_DIR", None),
@@ -265,6 +269,19 @@ def new_run_id() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
 
+def new_run_ids(n: int, base: Path | None = None) -> list[str]:
+    from datetime import timedelta
+    base = base or config.RUNS_DIR
+    out: list[str] = []
+    t = datetime.now()
+    while len(out) < max(1, n):
+        rid = t.strftime("%Y-%m-%d_%H%M%S")
+        if rid not in out and not (base / rid).exists():
+            out.append(rid)
+        t += timedelta(seconds=1)
+    return out
+
+
 def env_snapshot() -> dict:
     import platform
     import subprocess
@@ -385,6 +402,10 @@ class TaskRunner:
                     raise UsageLimitReached(rec.get("reset_at"),
                                             rec.get("reset_hint", ""))
                 if not rec.get("retryable"):
+                    if rec.get("error_kind") in ("request_rejected", "auth",
+                                                "infra"):
+                        raise RequestRejected(str(rec.get("error") or "")[:300],
+                                              rec.get("error_kind"))
                     return None
                 if rec.get("error_kind") == "rate_limit":
                     wait = rec.get("retry_after") or min(10 * (2 ** (n - 1)), 60)
@@ -412,7 +433,7 @@ class TaskRunner:
         if last.get("error_kind") == "rate_limit":
             raise RateLimited(str(last.get("error") or "")[:200],
                               last.get("retry_after"))
-        if last.get("error_kind") in ("request_rejected", "auth"):
+        if last.get("error_kind") in ("request_rejected", "auth", "infra"):
             raise RequestRejected(str(last.get("error") or "")[:300],
                                   last.get("error_kind"))
         return None
@@ -445,8 +466,16 @@ class TaskRunner:
             turns = 1
 
         wall_ms = now_ms() - t0
-        score = self._score(task, workspace, response_text, status)
-        write_json(task_dir / "score.json", score)
+        unreachable = never_reached_provider(attempts)
+        if unreachable:
+            score = {"status": "unscored", "score": None,
+                     "summary": "never reached the provider — every attempt "
+                                "failed before a request was sent, so nothing "
+                                "was measured"}
+            (task_dir / "score.json").unlink(missing_ok=True)
+        else:
+            score = self._score(task, workspace, response_text, status)
+            write_json(task_dir / "score.json", score)
 
         tokens_in = _sum_tokens(attempts, "tokens_in")
         tokens_out = _sum_tokens(attempts, "tokens_out")
@@ -615,6 +644,20 @@ def _prefill_tps(attempts: list[dict]) -> float | None:
                  / (sum(a["ttft_ms"] for a in pre) / 1000), 1)
 
 
+NEVER_REACHED_KINDS = ("connect",)
+
+
+def never_reached_provider(attempts: list[dict]) -> bool:
+    if not attempts:
+        return False
+    errs = [a for a in attempts if a.get("error")]
+    if len(errs) != len(attempts):
+        return False
+    if any(a.get("tokens_in") or a.get("tokens_out") for a in attempts):
+        return False
+    return all(a.get("error_kind") in NEVER_REACHED_KINDS for a in errs)
+
+
 def _sum_tokens(attempts: list[dict], key: str) -> int | None:
     vals = [a[key] for a in attempts if a.get(key) is not None]
     return sum(vals) if vals else None
@@ -715,12 +758,38 @@ def _stamp_load_plan(meta_path, plan: list[tuple]) -> None:
 
 
 def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
-              manage_memory: bool = True, cancel=None) -> None:
+              manage_memory: bool = True, cancel=None, spend=None) -> None:
+    run_model_cycles([run_dir], model, tasks, progress, manage_memory, cancel,
+                     spend=spend)
+
+
+def _stop_all(run_dirs, model_name: str, reason: str,
+              extra: dict | None = None) -> None:
+    from .util import read_json
+    for rd in run_dirs:
+        mani_path = rd / "run.json"
+        mani = read_json(mani_path, {})
+        if not mani:
+            continue
+        mani["stopped_reason"] = reason
+        for k, v in (extra or {}).items():
+            mani[k] = v
+        mani.setdefault("stopped_models", [])
+        if model_name not in mani["stopped_models"]:
+            mani["stopped_models"].append(model_name)
+        write_json(mani_path, mani)
+
+
+def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
+                     progress=print, manage_memory: bool = True,
+                     cancel=None, spend=None) -> None:
     from .util import read_json
     adapter = make_adapter(model)
-    runner = TaskRunner(run_dir, model, adapter, cancel=cancel)
+    runners = [TaskRunner(rd, model, adapter, cancel=cancel) for rd in run_dirs]
+    n_cycles = len(runners)
     progress(f"[{model.name}] start ({model.provider}"
-             f"{', local' if model.local else ''})")
+             f"{', local' if model.local else ''}"
+             f"{f', {n_cycles} cycles per load' if n_cycles > 1 else ''})")
     sampler = None
     if model.local:
         from .telemetry import GpuSampler
@@ -732,9 +801,10 @@ def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
             from .interfaces import endpoint_quants
             quants = endpoint_quants(model.model)
             if quants:
-                write_json(run_dir / model.name / "model_meta.json", {
-                    "local": False, "gateway_quants": quants,
-                    "timestamp": now_iso()})
+                for rd in run_dirs:
+                    write_json(rd / model.name / "model_meta.json", {
+                        "local": False, "gateway_quants": quants,
+                        "timestamp": now_iso()})
         lms = None
         lms_ctl = False
         if model.local:
@@ -744,13 +814,19 @@ def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
         _vram = _gpu_vram_mb() if lms_ctl else None
         plan = (load_plan(model, tasks, _fp, _vram) if lms_ctl
                 else [(0, "auto", list(tasks))])
-        ordered = [t for _c, _o, g in plan for t in g]
-        task_ctx = {t.id: c for c, _o, g in plan for t in g}
-        task_gpu = {t.id: o for c, o, g in plan for t in g}
+
+        def _skipped(t: Task) -> bool:
+            return (t.tier >= 2 and not model.supports_tools
+                    and model.provider != "claude-cli")
+
+        def _spread(meta: dict) -> None:
+            for rd in run_dirs[1:]:
+                write_json(rd / model.name / "model_meta.json", meta)
 
         if model.local and not lms_ctl:
             progress(f"[{model.name}] warm-up ping (JIT — no lms context control)...")
-            meta = runner.warm_up(model_info=None)
+            meta = runners[0].warm_up(model_info=None)
+            _spread(meta)
             if meta["warmup_error"]:
                 progress(f"[{model.name}] !! warm-up failed: {meta['warmup_error']}"
                          " — skipping model")
@@ -758,157 +834,150 @@ def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
 
         loaded_ctx = None
         rl_streak = 0
-        for task in ordered:
-            if cancel is not None and cancel.is_set():
-                progress(f"[{model.name}] stopped by user — remaining tasks skipped")
-                return
-            skip = (task.tier >= 2 and not model.supports_tools
-                    and model.provider != "claude-cli")
-            if lms_ctl and not skip and task_ctx[task.id] != loaded_ctx:
-                bctx = task_ctx[task.id]
+        for bctx, gpu, group in plan:
+            for t in group:
+                if _skipped(t):
+                    progress(f"[{model.name}] {t.id}: skipped "
+                             f"(supports_tools: false)")
+            live = [t for t in group if not _skipped(t)]
+            if not live:
+                continue
+            if lms_ctl and bctx != loaded_ctx:
                 unloaded = False
                 if manage_memory:
                     progress(f"[{model.name}] lms: unloading to free VRAM...")
                     unloaded = lms.unload_all(
                         progress=lambda m: progress(f"[{model.name}] {m}"))
-                n_here = sum(1 for t in ordered if task_ctx[t.id] == bctx and not
-                             (t.tier >= 2 and not model.supports_tools
-                              and model.provider != "claude-cli"))
-                gpu = task_gpu[task.id]
                 progress(f"[{model.name}] lms: loading {model.model} @ context "
-                         f"{bctx:,} ({gpu} GPU offload) for {n_here} task(s)...")
+                         f"{bctx:,} ({gpu} GPU offload) for {len(live)} task(s)"
+                         f"{f' x {n_cycles} cycles' if n_cycles > 1 else ''}...")
                 preload_ms = lms.load_model(
                     model.model, progress=lambda m: progress(f"[{model.name}] {m}"),
                     context_length=bctx, gpu_offload=gpu)
                 info = lms.model_info(model.base_url or "http://localhost:1234/v1",
                                       model.key_env, model.model)
-                meta = runner.warm_up(preload_ms=preload_ms, unloaded_others=unloaded,
-                                      model_info=info)
+                meta = runners[0].warm_up(preload_ms=preload_ms,
+                                          unloaded_others=unloaded, model_info=info)
+                _spread(meta)
                 if meta["warmup_error"]:
                     progress(f"[{model.name}] !! warm-up failed: "
                              f"{meta['warmup_error']} — skipping model")
                     return
-                _stamp_load_plan(runner.run_dir / model.name / "model_meta.json",
-                                 plan)
+                for rd in run_dirs:
+                    _stamp_load_plan(rd / model.name / "model_meta.json", plan)
                 progress(f"[{model.name}] loaded @ {bctx:,} "
                          f"(cold {meta['cold_start_ms'] / 1000:.1f}s)")
                 loaded_ctx = bctx
-            if skip:
-                progress(f"[{model.name}] {task.id}: skipped (supports_tools: false)")
-                continue
-            try:
-                m = runner.run_task(task)
-                rl_streak = 0
-            except RequestRejected as rr:
-                task_dir = run_dir / model.name / task.id
-                if task_dir.exists():
-                    shutil.rmtree(task_dir, ignore_errors=True)
-                _record_dropped(run_dir, model.name, task.id, rr.kind)
-                done = sum(1 for t in tasks
-                           if (run_dir / model.name / t.id / "score.json").exists())
-                progress(
-                    f"[{model.name}] {task.id}: provider REFUSED the request "
-                    f"({rr.kind}) - dropped UNSCORED, not zeroed. Every "
-                    f"remaining task would be refused the same way, so this "
-                    f"model is skipped. {done} completed task(s) saved. Fix the "
-                    f"model's config and re-run {model.name}. -- {rr}")
-                mani_path = run_dir / "run.json"
-                mani = read_json(mani_path, {})
-                mani["stopped_reason"] = rr.kind
-                mani.setdefault("stopped_models", [])
-                if model.name not in mani["stopped_models"]:
-                    mani["stopped_models"].append(model.name)
-                write_json(mani_path, mani)
-                return
-            except RateLimited as rl:
-                task_dir = run_dir / model.name / task.id
-                if task_dir.exists():
-                    shutil.rmtree(task_dir, ignore_errors=True)
-                _record_dropped(run_dir, model.name, task.id, "rate_limit")
-                rl_streak += 1
-                progress(f"[{model.name}] {task.id}: provider rate-limited "
-                         f"(429) - dropped UNSCORED, not zeroed. Re-run to fill "
-                         f"it in.")
-                if rl_streak < RATE_LIMIT_STREAK:
-                    continue
-                done = sum(1 for t in tasks
-                           if (run_dir / model.name / t.id / "score.json").exists())
-                progress(
-                    f"[{model.name}] rate-limited on {rl_streak} tasks in a row "
-                    f"- skipping this model's remaining tasks. {done} completed "
-                    f"task(s) saved, nothing scored as failure. Add your own "
-                    f"provider key or retry later, then re-run "
-                    f"{model.name} to fill the gaps.")
-                mani_path = run_dir / "run.json"
-                mani = read_json(mani_path, {})
-                mani["stopped_reason"] = "rate_limit"
-                mani.setdefault("stopped_models", [])
-                if model.name not in mani["stopped_models"]:
-                    mani["stopped_models"].append(model.name)
-                write_json(mani_path, mani)
-                return
-            except UsageLimitReached as ul:
-                task_dir = run_dir / model.name / task.id
-                if task_dir.exists():
-                    shutil.rmtree(task_dir, ignore_errors=True)
-                _record_dropped(run_dir, model.name, task.id, "usage_limit")
-                when = ul.reset_hint or (f"resets {_fmt_epoch(ul.reset_at)}"
-                                         if ul.reset_at else "")
-                done = sum(1 for t in tasks
-                           if (run_dir / model.name / t.id / "score.json").exists())
-                progress(
-                    f"[{model.name}] {task.id}: Claude usage limit reached"
-                    f"{f' — {when}' if when else ''}. Dropped this task; "
-                    f"{done} completed task(s) saved. Skipping {model.name}'s "
-                    f"remaining tasks — re-run after the reset to continue "
-                    f"(finished tasks won't repeat).")
-                mani_path = run_dir / "run.json"
-                mani = read_json(mani_path, {})
-                mani["stopped_reason"] = "usage_limit"
-                mani["reset_at"] = ul.reset_at
-                mani["reset_hint"] = ul.reset_hint
-                mani.setdefault("stopped_models", [])
-                if model.name not in mani["stopped_models"]:
-                    mani["stopped_models"].append(model.name)
-                write_json(mani_path, mani)
-                return
-            except Exception as e:
-                progress(f"[{model.name}] !! {task.id} crashed the runner: "
-                         f"{type(e).__name__}: {e} — recorded as error, "
-                         "continuing with the next task")
-                task_dir = run_dir / model.name / task.id
-                task_dir.mkdir(parents=True, exist_ok=True)
-                m = {"run_id": run_dir.name, "model": model.name,
-                     "task": task.id, "task_hash": task.content_hash,
-                     "category": task.category, "tier": task.tier,
-                     "started": now_iso(), "finished": now_iso(),
-                     "status": "error", "wall_ms": 0, "turns": 0,
-                     "attempts": [], "n_attempts": 0, "n_retries": 0,
-                     "tokens_in": None, "tokens_out": None, "cost_usd": None,
-                     "gen_tokens_per_sec": None,
-                     "prefill_tokens_per_sec": None,
-                     "crash": f"{type(e).__name__}: {e}"}
-                write_json(task_dir / "metrics.json", m)
-                write_json(task_dir / "score.json", {
-                    "status": "scored", "score": 0.0, "scored_by": "harness",
-                    "summary": f"harness exception: {type(e).__name__}: {e}",
-                    "timestamp": now_iso()})
-            s = read_json(run_dir / model.name / task.id / "score.json", {})
-            score_str = ("pending review" if s.get("status") == "pending"
-                         else f"score {s.get('score', 0):.2f}")
-            progress(f"[{model.name}] {task.id}: {m['status']}, {score_str}, "
-                     f"{m['wall_ms'] / 1000:.1f}s, "
-                     f"tok {m['tokens_in'] or '?'}/{m['tokens_out'] or '?'}, "
-                     f"retries {m['n_retries']}")
+            for cycle in range(n_cycles):
+                runner = runners[cycle]
+                run_dir = runner.run_dir
+                if n_cycles > 1:
+                    progress(f"[{model.name}] cycle {cycle + 1}/{n_cycles} @ "
+                             f"context {bctx:,} ({len(live)} task(s)) "
+                             f"-> {run_dir.name}")
+                for task in live:
+                    if cancel is not None and cancel.is_set():
+                        progress(f"[{model.name}] stopped by user — remaining "
+                                 f"tasks skipped")
+                        return
+                    try:
+                        m = runner.run_task(task)
+                        rl_streak = 0
+                        if spend is not None:
+                            spend.add(m.get("cost_usd"))
+                    except RequestRejected as rr:
+                        task_dir = run_dir / model.name / task.id
+                        if task_dir.exists():
+                            shutil.rmtree(task_dir, ignore_errors=True)
+                        _record_dropped(run_dir, model.name, task.id, rr.kind)
+                        done = sum(1 for t in tasks
+                                   if (run_dir / model.name / t.id / "score.json").exists())
+                        progress(
+                            f"[{model.name}] {task.id}: provider REFUSED the request "
+                            f"({rr.kind}) - dropped UNSCORED, not zeroed. Every "
+                            f"remaining task would be refused the same way, so this "
+                            f"model is skipped. {done} completed task(s) saved. Fix the "
+                            f"model's config and re-run {model.name}. -- {rr}")
+                        _stop_all(run_dirs, model.name, rr.kind)
+                        return
+                    except RateLimited as rl:
+                        task_dir = run_dir / model.name / task.id
+                        if task_dir.exists():
+                            shutil.rmtree(task_dir, ignore_errors=True)
+                        _record_dropped(run_dir, model.name, task.id, "rate_limit")
+                        rl_streak += 1
+                        progress(f"[{model.name}] {task.id}: provider rate-limited "
+                                 f"(429) - dropped UNSCORED, not zeroed. Re-run to fill "
+                                 f"it in.")
+                        if rl_streak < RATE_LIMIT_STREAK:
+                            continue
+                        done = sum(1 for t in tasks
+                                   if (run_dir / model.name / t.id / "score.json").exists())
+                        progress(
+                            f"[{model.name}] rate-limited on {rl_streak} tasks in a row "
+                            f"- skipping this model's remaining tasks. {done} completed "
+                            f"task(s) saved, nothing scored as failure. Add your own "
+                            f"provider key or retry later, then re-run "
+                            f"{model.name} to fill the gaps.")
+                        _stop_all(run_dirs, model.name, "rate_limit")
+                        return
+                    except UsageLimitReached as ul:
+                        task_dir = run_dir / model.name / task.id
+                        if task_dir.exists():
+                            shutil.rmtree(task_dir, ignore_errors=True)
+                        _record_dropped(run_dir, model.name, task.id, "usage_limit")
+                        when = ul.reset_hint or (f"resets {_fmt_epoch(ul.reset_at)}"
+                                                 if ul.reset_at else "")
+                        done = sum(1 for t in tasks
+                                   if (run_dir / model.name / t.id / "score.json").exists())
+                        progress(
+                            f"[{model.name}] {task.id}: Claude usage limit reached"
+                            f"{f' — {when}' if when else ''}. Dropped this task; "
+                            f"{done} completed task(s) saved. Skipping {model.name}'s "
+                            f"remaining tasks — re-run after the reset to continue "
+                            f"(finished tasks won't repeat).")
+                        _stop_all(run_dirs, model.name, "usage_limit",
+                                  {"reset_at": ul.reset_at,
+                                   "reset_hint": ul.reset_hint})
+                        return
+                    except Exception as e:
+                        progress(f"[{model.name}] !! {task.id} crashed the runner: "
+                                 f"{type(e).__name__}: {e} — recorded as error, "
+                                 "continuing with the next task")
+                        task_dir = run_dir / model.name / task.id
+                        task_dir.mkdir(parents=True, exist_ok=True)
+                        m = {"run_id": run_dir.name, "model": model.name,
+                             "task": task.id, "task_hash": task.content_hash,
+                             "category": task.category, "tier": task.tier,
+                             "started": now_iso(), "finished": now_iso(),
+                             "status": "error", "wall_ms": 0, "turns": 0,
+                             "attempts": [], "n_attempts": 0, "n_retries": 0,
+                             "tokens_in": None, "tokens_out": None, "cost_usd": None,
+                             "gen_tokens_per_sec": None,
+                             "prefill_tokens_per_sec": None,
+                             "crash": f"{type(e).__name__}: {e}"}
+                        write_json(task_dir / "metrics.json", m)
+                        write_json(task_dir / "score.json", {
+                            "status": "scored", "score": 0.0, "scored_by": "harness",
+                            "summary": f"harness exception: {type(e).__name__}: {e}",
+                            "timestamp": now_iso()})
+                    s = read_json(run_dir / model.name / task.id / "score.json", {})
+                    score_str = ("pending review" if s.get("status") == "pending"
+                                 else f"score {s.get('score', 0):.2f}")
+                    progress(f"[{model.name}] {task.id}: {m['status']}, {score_str}, "
+                             f"{m['wall_ms'] / 1000:.1f}s, "
+                             f"tok {m['tokens_in'] or '?'}/{m['tokens_out'] or '?'}, "
+                             f"retries {m['n_retries']}")
         progress(f"[{model.name}] done")
     finally:
         if sampler:
             gpu = sampler.stop()
             if gpu:
-                meta_path = run_dir / model.name / "model_meta.json"
-                meta = read_json(meta_path, {})
-                meta["gpu"] = gpu
-                write_json(meta_path, meta)
+                for rd in run_dirs:
+                    meta_path = rd / model.name / "model_meta.json"
+                    meta = read_json(meta_path, {})
+                    meta["gpu"] = gpu
+                    write_json(meta_path, meta)
                 progress(f"[{model.name}] gpu: peak {gpu['vram_peak_mb']:,} MB "
                          f"VRAM · avg {gpu['power_avg_w']:.0f} W · "
                          f"{gpu['energy_wh']:.2f} Wh")
@@ -936,17 +1005,21 @@ def _record_dropped(run_dir: Path, model: str, task: str, reason: str) -> None:
         pass
 
 
-def _persisting_progress(run_dir: Path, progress, lock=None):
+def _persisting_progress(run_dirs, progress, lock=None):
     import threading
     lock = lock or threading.Lock()
-    log_path = run_dir / "run.log"
+    if isinstance(run_dirs, Path):
+        run_dirs = [run_dirs]
+    log_paths = [rd / "run.log" for rd in run_dirs]
 
     def wrapped(line):
-        try:
-            with lock, open(log_path, "a", encoding="utf-8") as fh:
-                fh.write(f"{now_iso()} {line}\n")
-        except OSError:
-            pass
+        stamped = f"{now_iso()} {line}\n"
+        for log_path in log_paths:
+            try:
+                with lock, open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(stamped)
+            except OSError:
+                pass
         progress(line)
 
     return wrapped
@@ -954,7 +1027,8 @@ def _persisting_progress(run_dir: Path, progress, lock=None):
 
 def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = None,
               tag: str = "", progress=print, parallel: bool = False,
-              cancel=None, force: bool = False) -> Path:
+              cancel=None, force: bool = False,
+              run_dirs: list[Path] | None = None) -> Path:
     import threading
 
     from .validate import validate_models
@@ -962,6 +1036,18 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
     if problems:
         raise ValueError("model configuration problems — fix these before "
                          "running:\n  " + "\n  ".join(problems))
+
+    from . import budget
+    pre = budget.preflight(models, tasks, len(run_dirs) if run_dirs else 1)
+    if pre["problems"] and not force:
+        raise SpendRefused(
+            "refusing to start on cost grounds:\n  "
+            + "\n  ".join(pre["problems"])
+            + f"\nestimated billable spend ${pre['estimate']['billable']:,.2f}."
+            + (" Raise max_spend_usd in settings.local.json, top up the"
+               " provider, or pass --force." if pre["cap"] is not None else
+               " Top up the provider, or pass --force."))
+    _spend = budget.SpendTracker(pre["cap"])
 
     busy = None if force else active_run()
     if busy:
@@ -971,9 +1057,49 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
             "depend on, and would corrupt both. Wait for it, stop it, or delete "
             "it if it crashed. (--force overrides.)")
 
-    run_id = new_run_id()
-    run_dir = run_dir or (config.RUNS_DIR / run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if not run_dirs:
+        run_dirs = [run_dir or (config.RUNS_DIR / new_run_id())]
+    run_dir = run_dirs[0]
+    n_cycles = len(run_dirs)
+    manifests = []
+    for i, rd in enumerate(run_dirs):
+        rd.mkdir(parents=True, exist_ok=True)
+        manifests.append(_manifest(models, tasks, rd, tag, parallel, i, n_cycles,
+                                   run_dirs[0].name))
+        write_json(rd / "run.json", manifests[i])
+
+    from .util import keep_awake, read_json
+    log = _persisting_progress(run_dirs, progress)
+    if pre["estimate"]["billable"]:
+        log(f"estimated billable spend: "
+            f"${pre['estimate']['billable']:,.2f}"
+            + (f" (ceiling ${pre['cap']:,.2f})" if pre["cap"] else
+               " (no ceiling set; put max_spend_usd in settings.local.json)"))
+    for _n, _b in (pre["balances"] or {}).items():
+        if _b and _b.get("remaining") is not None:
+            log(f"{_b['provider']}: ${_b['remaining']:,.2f} available")
+    try:
+        with keep_awake():
+            _run_all(models, tasks, run_dirs, log, parallel, cancel,
+                     spend=_spend)
+    except budget.SpendExceeded as e:
+        log(f"!! {e}")
+        for rd in run_dirs:
+            _stop_all([rd], "*", "spend_ceiling")
+
+    for rd, manifest in zip(run_dirs, manifests):
+        disk = read_json(rd / "run.json", {})
+        for k in ("stopped_reason", "reset_at", "reset_hint", "stopped_models",
+                  "dropped_unscored"):
+            if k in disk:
+                manifest[k] = disk[k]
+        manifest["finished"] = now_iso()
+        write_json(rd / "run.json", manifest)
+    return run_dir
+
+
+def _manifest(models, tasks, run_dir: Path, tag: str, parallel: bool,
+              index: int, n_cycles: int, group: str) -> dict:
     manifest = {
         "run_id": run_dir.name, "tag": tag, "started": now_iso(),
         "suite_version": config.suite_version(),
@@ -993,24 +1119,48 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
                    "category": t.category} for t in tasks],
         "finished": None,
     }
-    write_json(run_dir / "run.json", manifest)
-
-    from .util import keep_awake, read_json
-    with keep_awake():
-        _run_all(models, tasks, run_dir,
-                 _persisting_progress(run_dir, progress), parallel, cancel)
-
-    disk = read_json(run_dir / "run.json", {})
-    for k in ("stopped_reason", "reset_at", "reset_hint", "stopped_models",
-              "dropped_unscored"):
-        if k in disk:
-            manifest[k] = disk[k]
-    manifest["finished"] = now_iso()
-    write_json(run_dir / "run.json", manifest)
-    return run_dir
+    if n_cycles > 1:
+        manifest["cycle"] = index + 1
+        manifest["cycles"] = n_cycles
+        manifest["cycle_group"] = group
+    return manifest
 
 
-def _run_all(models, tasks, run_dir, progress, parallel, cancel) -> None:
+def cycling_models(models: list[Model], repeat: int) -> list[Model]:
+    if repeat < 2:
+        return []
+    from . import lmstudio as lms
+    if not lms.lms_exe():
+        return []
+    return [m for m in models if m.local]
+
+
+def cycles_for(model: Model, run_dirs: list[Path]) -> list[Path]:
+    return (run_dirs if cycling_models([model], len(run_dirs))
+            else run_dirs[:1])
+
+
+def cycle_plan_summary(models: list[Model], tasks: list[Task],
+                       repeat: int) -> list[str]:
+    cycling = cycling_models(models, repeat)
+    if not cycling:
+        return []
+    vram = _gpu_vram_mb()
+    lines = []
+    for m in cycling:
+        plan = load_plan(m, tasks, gguf.footprint(m.model), vram)
+        detail = " + ".join(f"{c:,} {o} ({len(g)} task"
+                            f"{'' if len(g) == 1 else 's'})"
+                            for c, o, g in plan)
+        lines.append(
+            f"{m.name}: {len(plan)} model load(s), each running all {repeat} "
+            f"cycles — was {len(plan) * repeat} loads. {detail}")
+    return lines
+
+
+def _run_all(models, tasks, run_dirs, progress, parallel, cancel,
+             spend=None) -> None:
+    run_dir = run_dirs[0]
     if parallel and len(models) > 1:
         threads = [threading.Thread(target=run_model,
                                     args=(run_dir, m, tasks, progress, False, cancel),
@@ -1023,4 +1173,13 @@ def _run_all(models, tasks, run_dir, progress, parallel, cancel) -> None:
         for model in models:
             if cancel is not None and cancel.is_set():
                 break
-            run_model(run_dir, model, tasks, progress, cancel=cancel)
+            mine = cycles_for(model, run_dirs)
+            if len(mine) > 1:
+                run_model_cycles(mine, model, tasks, progress, cancel=cancel,
+                                 spend=spend)
+            else:
+                for rd in run_dirs:
+                    if cancel is not None and cancel.is_set():
+                        break
+                    run_model(rd, model, tasks, progress, cancel=cancel,
+                              spend=spend)

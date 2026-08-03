@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Canvas Billiards</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --wood: #5b2c12;
+    --gold: #c39143;
+    --felt: #11633d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background:
+      radial-gradient(circle at 50% 15%, #343434, #111 65%),
+      #111;
+    color: #f6ead1;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  .game {
+    width: min(960px, 96vw);
+    padding: 18px;
+    border-radius: 16px;
+    background: linear-gradient(145deg, #2a201b, #120e0c);
+    box-shadow: 0 16px 50px #000b, inset 0 1px #ffffff16;
+  }
+  header {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 2px 12px;
+  }
+  h1 {
+    font-size: clamp(1.15rem, 3vw, 1.6rem);
+    margin: 0;
+    letter-spacing: .04em;
+    color: #ffe3a0;
+  }
+  button {
+    border: 1px solid #e1b55e;
+    border-radius: 7px;
+    padding: 9px 15px;
+    font: inherit;
+    font-weight: bold;
+    color: #201305;
+    cursor: pointer;
+    background: linear-gradient(#f6d57e, #b77a25);
+    box-shadow: 0 2px 0 #5d3510;
+  }
+  button:hover { filter: brightness(1.12); }
+  button:active { transform: translateY(1px); }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 9px;
+    background: #0c422a;
+    cursor: crosshair;
+    touch-action: none;
+    box-shadow: 0 4px 14px #000a, inset 0 0 0 3px #9a652e;
+  }
+  .instructions {
+    margin: 12px 4px 1px;
+    line-height: 1.45;
+    color: #e6d7bd;
+    font-size: .94rem;
+  }
+  .instructions strong { color: #ffe29a; }
+  #status {
+    color: #bfe8c8;
+    font-size: .86rem;
+    min-height: 1.3em;
+  }
+</style>
+</head>
+<body>
+<div class="game">
+  <header>
+    <h1>Canvas Billiards</h1>
+    <button id="rack" type="button">Reset / Rack</button>
+  </header>
+  <canvas id="table" width="900" height="500" aria-label="Playable billiards table"></canvas>
+  <div class="instructions">
+    <strong>How to shoot:</strong> press the white cue ball, drag backward to aim and set power, then release.
+    Longer pulls make harder shots. <span id="status"></span>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("table");
+  const ctx = canvas.getContext("2d");
+  const status = document.getElementById("status");
+
+  const W = 900, H = 500, R = 12;
+  const pocketRadius = R * 1.72;
+  const friction = 82;       // pixels / sec²
+  const restitution = 0.995;
+  const stopSpeed = 0.65;
+  const maxSubstep = 1 / 300;
+
+  const pockets = [
+    { x: 0,     y: 0 },
+    { x: W / 2, y: 0 },
+    { x: W,     y: 0 },
+    { x: 0,     y: H },
+    { x: W / 2, y: H },
+    { x: W,     y: H }
+  ];
+
+  let balls = [];
+  let paused = false;
+  let lastFrame = performance.now();
+  let dragging = false;
+  let dragPoint = null;
+
+  const ballColors = [
+    "#ffffff", "#f1c40f", "#2466c7", "#d63330", "#7d328a",
+    "#df7225", "#278451", "#8b2520", "#151515", "#f1c40f",
+    "#2466c7", "#d63330", "#7d328a", "#df7225", "#278451",
+    "#8b2520"
+  ];
+
+  function cueBall() {
+    return balls.find(b => b.cue && !b.potted) || null;
+  }
+
+  function speed(b) {
+    return Math.hypot(b.vx, b.vy);
+  }
+
+  function allStopped() {
+    return balls.every(b => b.potted || speed(b) < stopSpeed);
+  }
+
+  function isInPocket(b) {
+    for (const p of pockets) {
+      const dx = b.x - p.x, dy = b.y - p.y;
+      if (dx * dx + dy * dy <= pocketRadius * pocketRadius) return true;
+    }
+    return false;
+  }
+
+  function potCheck(b) {
+    if (!b.potted && isInPocket(b)) {
+      b.potted = true;
+      b.vx = 0;
+      b.vy = 0;
+      return true;
+    }
+    return false;
+  }
+
+  function cushion(b) {
+    if (b.x < R) {
+      b.x = R;
+      if (b.vx < 0) b.vx = -b.vx * restitution;
+    } else if (b.x > W - R) {
+      b.x = W - R;
+      if (b.vx > 0) b.vx = -b.vx * restitution;
+    }
+    if (b.y < R) {
+      b.y = R;
+      if (b.vy < 0) b.vy = -b.vy * restitution;
+    } else if (b.y > H - R) {
+      b.y = H - R;
+      if (b.vy > 0) b.vy = -b.vy * restitution;
+    }
+  }
+
+  function collide(a, b) {
+    if (a.potted || b.potted) return;
+
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let d2 = dx * dx + dy * dy;
+    const minDist = R * 2;
+
+    if (d2 >= minDist * minDist) return;
+
+    let d = Math.sqrt(d2);
+    let nx, ny;
+    if (d < 0.00001) {
+      nx = 1;
+      ny = 0;
+      d = 0.00001;
+    } else {
+      nx = dx / d;
+      ny = dy / d;
+    }
+
+    /* Separate overlap equally. This is positional only, so it adds no energy. */
+    const overlap = minDist - d;
+    a.x -= nx * overlap * 0.5;
+    a.y -= ny * overlap * 0.5;
+    b.x += nx * overlap * 0.5;
+    b.y += ny * overlap * 0.5;
+
+    const relativeNormalSpeed = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+    if (relativeNormalSpeed < 0) {
+      /* Equal masses: impulse along only the line of centres. */
+      const impulse = -(1 + restitution) * relativeNormalSpeed * 0.5;
+      a.vx -= impulse * nx;
+      a.vy -= impulse * ny;
+      b.vx += impulse * nx;
+      b.vy += impulse * ny;
+    }
+  }
+
+  function oneSubstep(dt) {
+    for (const b of balls) {
+      if (b.potted) continue;
+
+      const s = speed(b);
+      if (s > 0) {
+        const newSpeed = Math.max(0, s - friction * dt);
+        const scale = newSpeed / s;
+        b.vx *= scale;
+        b.vy *= scale;
+      }
+
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      if (!potCheck(b)) cushion(b);
+    }
+
+    /* Several passes make simultaneous contacts stable without changing order. */
+    for (let pass = 0; pass < 3; pass++) {
+      for (let i = 0; i < balls.length; i++) {
+        for (let j = i + 1; j < balls.length; j++) collide(balls[i], balls[j]);
+      }
+      for (const b of balls) {
+        if (b.potted) continue;
+        if (!potCheck(b)) cushion(b);
+      }
+    }
+
+    for (const b of balls) {
+      if (!b.potted && speed(b) < stopSpeed) {
+        b.vx = 0;
+        b.vy = 0;
+      }
+    }
+  }
+
+  function advance(dt) {
+    dt = Math.max(0, Number(dt) || 0);
+    while (dt > 0) {
+      const part = Math.min(dt, maxSubstep);
+      oneSubstep(part);
+      dt -= part;
+    }
+  }
+
+  function drawBall(b, index) {
+    if (b.potted) return;
+    const color = b.cue ? "#faf9ef" : ballColors[(index % (ballColors.length - 1)) + 1];
+    const grad = ctx.createRadialGradient(b.x - R * .35, b.y - R * .42, R * .12, b.x, b.y, R);
+    grad.addColorStop(0, "#ffffff");
+    grad.addColorStop(.18, color);
+    grad.addColorStop(1, b.cue ? "#c9c8bf" : "#36150d");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (!b.cue) {
+      ctx.fillStyle = "#f6ead4";
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, R * .43, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#222";
+      ctx.font = "bold 8px Arial";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(index), b.x, b.y + .5);
+    }
+    ctx.strokeStyle = "rgba(0,0,0,.42)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    ctx.fillStyle = "#663314";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#bb7b35";
+    ctx.fillRect(8, 8, W - 16, H - 16);
+    ctx.fillStyle = "#183e26";
+    ctx.fillRect(17, 17, W - 34, H - 34);
+
+    const felt = ctx.createLinearGradient(0, 0, W, H);
+    felt.addColorStop(0, "#19754a");
+    felt.addColorStop(1, "#0b4c31");
+    ctx.fillStyle = felt;
+    ctx.fillRect(20, 20, W - 40, H - 40);
+
+    ctx.strokeStyle = "rgba(226,255,204,.14)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(20.5, 20.5, W - 41, H - 41);
+
+    for (const p of pockets) {
+      ctx.fillStyle = "#120e0c";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, pocketRadius + 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#8d5425";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.fillStyle = "#020202";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, pocketRadius - 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const cue = cueBall();
+    if (dragging && dragPoint && cue) {
+      const vx = cue.x - dragPoint.x;
+      const vy = cue.y - dragPoint.y;
+      const len = Math.hypot(vx, vy);
+      if (len > 1) {
+        const nx = vx / len, ny = vy / len;
+        ctx.setLineDash([8, 5]);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(255,244,190,.9)";
+        ctx.beginPath();
+        ctx.moveTo(cue.x, cue.y);
+        ctx.lineTo(cue.x + nx * Math.min(260, len * 2.5), cue.y + ny * Math.min(260, len * 2.5));
+        ctx.stroke();
+
+        ctx.setLineDash([]);
+        ctx.strokeStyle = "rgba(230,190,120,.9)";
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(cue.x - nx * 8, cue.y - ny * 8);
+        ctx.lineTo(cue.x - nx * Math.min(150, len), cue.y - ny * Math.min(150, len));
+        ctx.stroke();
+      }
+    }
+
+    balls.forEach(drawBall);
+
+    if (allStopped()) {
+      status.textContent = dragging ? "Release to shoot." : "Table is ready.";
+    } else {
+      status.textContent = "Balls are rolling...";
+    }
+  }
+
+  function resetRack() {
+    const setup = [{ x: 210, y: H / 2, vx: 0, vy: 0, cue: true }];
+    const apexX = 650;
+    let n = 1;
+    for (let col = 0; col < 5; col++) {
+      for (let row = 0; row <= col; row++) {
+        setup.push({
+          x: apexX + col * Math.sqrt(3) * R,
+          y: H / 2 + (row - col / 2) * (2 * R),
+          vx: 0, vy: 0, cue: false
+        });
+        n++;
+      }
+    }
+    sim.reset(setup);
+  }
+
+  const sim = {
+    W, H, R,
+
+    reset(inputBalls) {
+      balls = (Array.isArray(inputBalls) ? inputBalls : []).map(b => ({
+        x: Number(b.x) || 0,
+        y: Number(b.y) || 0,
+        vx: Number(b.vx) || 0,
+        vy: Number(b.vy) || 0,
+        cue: b.cue === true,
+        potted: false
+      }));
+      dragging = false;
+      dragPoint = null;
+      draw();
+    },
+
+    step(dt) {
+      advance(dt);
+      draw();
+    },
+
+    state() {
+      return balls.map(b => ({
+        x: b.x,
+        y: b.y,
+        vx: b.vx,
+        vy: b.vy,
+        potted: b.potted,
+        cue: b.cue
+      }));
+    },
+
+    shoot(vx, vy) {
+      const cue = cueBall();
+      if (!cue) return;
+      cue.vx = Number(vx) || 0;
+      cue.vy = Number(vy) || 0;
+      draw();
+    },
+
+    pause() {
+      paused = true;
+    },
+
+    resume() {
+      paused = false;
+      lastFrame = performance.now();
+    }
+  };
+
+  window.sim = sim;
+
+  function pointerPosition(event) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * W / rect.width,
+      y: (event.clientY - rect.top) * H / rect.height
+    };
+  }
+
+  canvas.addEventListener("pointerdown", event => {
+    const cue = cueBall();
+    if (!cue || !allStopped()) return;
+    const p = pointerPosition(event);
+    if (Math.hypot(p.x - cue.x, p.y - cue.y) <= R * 1.8) {
+      dragging = true;
+      dragPoint = p;
+      canvas.setPointerCapture(event.pointerId);
+      draw();
+      event.preventDefault();
+    }
+  });
+
+  canvas.addEventListener("pointermove", event => {
+    if (!dragging) return;
+    dragPoint = pointerPosition(event);
+    draw();
+  });
+
+  function releaseShot(event) {
+    if (!dragging) return;
+    const cue = cueBall();
+    const p = pointerPosition(event);
+    dragging = false;
+    dragPoint = null;
+    if (cue) {
+      const dx = cue.x - p.x;
+      const dy = cue.y - p.y;
+      const length = Math.hypot(dx, dy);
+      if (length > 3) {
+        const capped = Math.min(length, 180);
+        const power = capped * 5.2;
+        sim.shoot(dx / length * power, dy / length * power);
+      }
+    }
+    draw();
+  }
+
+  canvas.addEventListener("pointerup", releaseShot);
+  canvas.addEventListener("pointercancel", releaseShot);
+  document.getElementById("rack").addEventListener("click", resetRack);
+
+  function animationFrame(now) {
+    if (!paused) {
+      const dt = Math.min(.05, Math.max(0, (now - lastFrame) / 1000));
+      advance(dt);
+      draw();
+    }
+    lastFrame = now;
+    requestAnimationFrame(animationFrame);
+  }
+
+  resetRack();
+  requestAnimationFrame(animationFrame);
+})();
+</script>
+</body>
+</html>

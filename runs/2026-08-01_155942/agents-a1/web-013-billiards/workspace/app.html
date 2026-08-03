@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Billiards</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            background: #1a1a2e; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            font-family: 'Segoe UI', Arial, sans-serif;
+        }
+        .game-container { position: relative; border-radius: 8px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.7); }
+        canvas { display: block; cursor: crosshair; touch-action: none; }
+        .ui-overlay { 
+            position: absolute; 
+            top: 15px; 
+            left: 15px; 
+            right: 15px; 
+            pointer-events: none; 
+        }
+        #instructions { 
+            background: rgba(0, 0, 0, 0.7); 
+            color: white; 
+            padding: 8px 12px; 
+            border-radius: 4px; 
+            font-size: 16px; 
+            margin-bottom: 10px;
+        }
+        #resetBtn { 
+            background: linear-gradient(135deg, #ff6b6b, #ee5a24); 
+            color: white; 
+            border: none; 
+            padding: 8px 16px; 
+            border-radius: 4px; 
+            font-size: 14px; 
+            cursor: pointer; 
+            font-weight: bold;
+        }
+        #resetBtn:hover { filter: brightness(1.1); }
+    </style>
+</head>
+<body>
+<div class="game-container">
+    <canvas id="billiards" width="800" height="400"></canvas>
+    <div class="ui-overlay">
+        <div id="instructions">Drag on the white cue ball to aim and shoot! Longer drag = more power.</div>
+        <button id="resetBtn">Rack Balls</button>
+    </div>
+</div>
+
+<script>
+(() => {
+    const canvas = document.getElementById('billiards');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    
+    // Configuration - these must be accessible via window.sim
+    const SIM_WIDTH = 800;
+    const SIM_HEIGHT = 400;
+    const RADIUS = 12.5;
+    
+    // Physics constants (tuned for feel)
+    const FRICTION = 3.0;           // pixels per second squared deceleration
+    const MIN_SPEED = 8.0;          // threshold below which ball stops
+    const BOUNCE_DAMPING = 0.95;    // energy retained after wall hit (elasticity)
+    
+    // Game state
+    let balls = [];
+    let isDragging = false;
+    let dragStartPos = { x: 0, y: 0 };
+    let lastTime = Date.now();
+    let pausedForGrading = false;
+    
+    // Pocket definitions (6 pockets)
+    const POCKETS = [
+        { x: RADIUS * 1.5, y: RADIUS * 1.5 },           // top-left
+        { x: SIM_WIDTH - RADIUS * 1.5, y: RADIUS * 1.5 },   // top-right
+        { x: RADIUS * 1.5, y: SIM_HEIGHT - RADIUS * 1.5 },  // bottom-left
+        { x: SIM_WIDTH - RADIUS * 1.5, y: SIM_HEIGHT - RADIUS * 1.5 }, // bottom-right
+        { x: SIM_WIDTH / 2, y: RADIUS * 1.5 },           // middle top
+        { x: SIM_WIDTH / 2, y: SIM_HEIGHT - RADIUS * 1.5 }    // middle bottom
+    ];
+
+    /** Initialize balls in a triangle rack */
+    function createRack() {
+        const rows = 5;
+        const spacing = RADIUS * 2 + 0.5;
+        const startX = SIM_WIDTH / 2 - (rows - 1) * spacing / 2;
+        const startY = SIM_HEIGHT / 2 + 30;
+        
+        let ballIdx = 0;
+        balls = [];
+        
+        // First row: 5 balls in a line
+        for(let i=0; i<rows; i++) {
+            balls.push({ x: startX + i * spacing, y: startY });
+        }
+        
+        // Subsequent rows offset and shortened (like pyramid)
+        let currentX = startX;
+        let currentY = startY - spacing;
+        for(let row=2; row<=rows; row++) {
+            for(let col=0; col<row; col++) {
+                balls.push({ x: currentX + col * spacing, y: currentY });
+            }
+            currentX -= spacing / 2;
+            currentY -= spacing;
+        }
+
+        // Add the cue ball at bottom center (opposite end)
+        const rackCount = rows*(rows+1)/2;
+        balls.unshift({ x: SIM_WIDTH/2, y: SIM_HEIGHT - RADIUS*3 });
+
+        return reset(balls);
+    }
+
+    /** Reset function with exact contract */
+    function reset(inputBalls) {
+        if(!inputBalls || inputBalls.length === 0) return createRack();
+        
+        balls = [];
+        for(let b of inputBalls) {
+            // Ensure every ball has all required properties
+            let newBall = Object.assign({}, b, { potted: false });
+            
+            // Clamp initial position to valid area (with padding from walls/pockets)
+            if(newBall.x < RADIUS + 5) newBall.x = RADIUS + 5;
+            if(newBall.x > SIM_WIDTH - RADIUS - 5) newBall.x = SIM_WIDTH - RADIUS - 5;
+            if(newBall.y < RADIUS + 5) newBall.y = RADIUS + 5;
+            if(newBall.y > SIM_HEIGHT - RADIUS - 5) newBall.y = SIM_HEIGHT - RADIUS - 5;
+
+            // Ensure velocity is defined (default to zero)
+            newBall.vx = b.vx || 0;
+            newBall.vy = b.vy || 0;
+            
+            balls.push(newBall);
+        }
+        
+        return balls.slice();
+    }
+
+    /** Apply friction and stop ball if too slow */
+    function applyFriction(ball) {
+        const speedSq = ball.vx*ball.vx + ball.vy*ball.vy;
+        if(speedSq > 0.01) {
+            // Decelerate by constant amount (simulates kinetic friction)
+            const decel = FRICTION * dt;
+            
+            // Reduce magnitude without changing direction
+            let speed = Math.sqrt(speedSq);
+            if(speed < MIN_SPEED && ball.vx*ball.vx + ball.vy*ball.vy > 0.01) {
+                // Ball is slow enough to stop completely (for determinism)
+                ball.vx = 0;
+                ball.vy = 0;
+                return;
+            } else if(speed < decel) {
+                // Reduce speed but don't reverse direction
+                const ratio = (speed - decel) / speed;
+                ball.vx *= ratio;
+                ball.vy *= ratio;
+            } else {
+                // Linear deceleration along velocity vector
+                const factor = 1.0 - decel/speed;
+                ball.vx *= factor;
+                ball.vy *= factor;
+            }
+        }
+    }
+
+    /** Check if a ball has fallen into any pocket */
+    function checkPockets(ball) {
+        for(let p of POCKETS) {
+            const dx = ball.x - p.x;
+            const dy = ball.y - p.y;
+            // Pocket radius is slightly larger than ball to ensure potting
+            if(dx*dx + dy*dy < (RADIUS * 2.5)*(RADIUS * 2.5)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Resolve collision between two balls */
+    function resolveCollision(ballA, ballB) {
+        const dx = ballB.x - ballA.x;
+        const dy = ballB.y - ballA.y;
+        const distSq = dx*dx + dy*dy;
+        
+        if(distSq === 0 || distSq > (RADIUS*2)*(RADIUS*2)) return; // No collision or overlapping
+        
+        const dist = Math.sqrt(distSq);
+        
+        // Overlap resolution - push balls apart to avoid sticking
+        const overlap = RADIUS * 2 - dist;
+        if(overlap > 0) {
+            const nx = dx / dist;
+            const ny = dy / dist;
+            
+            ballA.x -= nx * overlap * 0.5;
+            ballA.y -= ny * overlap * 0.5;
+            ballB.x += nx * overlap * 0.5;
+            ballB.y += ny * overlap * 0.5;
+        } else {
+            return; // No collision resolution needed for non-overlapping but touching balls
+        }
+
+        // Separate the relative velocity vector into normal and tangent components
+        const vx = ballA.vx - ballB.vx;
+        const vy = ballA.vy - ballB.vy;
+        
+        // Normal component of relative velocity (along collision line)
+        const velAlongNormal = vx * nx + vy * ny;
+        
+        // If balls are moving away from each other, no further action needed
+        if(velAlongNormal > 0) return;
+
+        // Coefficient of restitution - elastic collision for equal masses
+        let j = -(1 + BOUNCE_DAMPING) * velAlongNormal / (1/2 + 1/2);
+        
+        // Apply impulse along normal direction
+        const impulseX = nx * j;
+        const impulseY = ny * j;
+        
+        ballA.vx += impulseX;
+        ballA.vy += impulseY;
+        ballB.vx -= impulseX;
+        ballB.vy -= impulseY;
+
+        // Additional velocity correction to prevent sticking (velocity along tangent)
+        const tx = -ny;
+        const ty = nx;
+        const velAlongTangent = vx * tx + vy * ty;
+        
+        if(Math.abs(velAlongTangent) > 0.1) {
+            j = -velAlongTangent / (1/2 + 1/2);
+            
+            ballA.vx += tx * j;
+            ballA.vy += ty * j;
+            ballB.vx -= tx * j;
+            ballB.vy -= ty * j;
+        }
+    }
+
+    /** Step physics by dt seconds and redraw */
+    function step(dtSeconds) {
+        dt = dtSeconds;
+        
+        // Apply friction to all balls
+        for(let ball of balls) {
+            if(!ball.potted) applyFriction(ball);
+            
+            // Check pocket potting after movement (pockets are at edges, so check before position changes might miss it)
+            if(checkPockets(ball)) {
+                ball.potted = true;
+            }
+        }
+
+        // Resolve all collisions with sub-steps for accuracy
+        const COLLISION_STEPS = 3;
+        const stepDt = dt / COLLISION_STEPS;
+        
+        for(let s=0; s<COLLISION_STEPS; s++) {
+            for(let i=0; i<balls.length; i++) {
+                if(balls[i].potted) continue;
+
+                // Boundary constraints (cushions)
+                let ball = balls[i];
+                let needsReflectX = false, needsReflectY = false;
+                
+                if(ball.x - RADIUS < 0) { ball.x = RADIUS; needsReflectX = true; }
+                else if(ball.x + RADIUS > SIM_WIDTH) { ball.x = SIM_WIDTH - RADIUS; needsReflectX = true; }
+
+                if(ball.y - RADIUS < 0) { ball.y = RADIUS; needsReflectY = true; }
+                else if(ball.y + RADIUS > SIM_HEIGHT) { ball.y = SIM_HEIGHT - RADIUS; needsReflectY = true; }
+
+                // Wall reflection with damping (elastic but loses some energy)
+                if(needsReflectX || needsReflectY) {
+                    if(velAlongNormal <= 0.1 && Math.abs(ball.vx) < MIN_SPEED/2 && Math.abs(ball.vy) < MIN_SPEED/2) {
+                        ball.vx = -ball.vx * BOUNCE_DAMPING;
+                        ball.vy = -ball.vy * BOUNCE_DAMPING;
+                    } else if(needsReflectX && !needsReflectY) {
+                        ball.vx = -ball.vx * BOUNCE_DAMPING;
+                    } else if(needsReflectY && !needsReflectX) {
+                        ball.vy = -ball.vy * BOUNCE_DAMPING;
+                    } else {
+                        // Both x and y need reflection (corner hit or near-corner)
+                        ball.vx = -ball.vx * Math.sqrt(BOUNCE_DAMPING);
+                        ball.vy = -ball.vy * Math.sqrt(BOUNCE_DAMPING);
+                    }
+                }
+
+                // Check collisions with other balls for this sub-step
+                if(!ball.potted) {
+                    for(let j=i+1; j<balls.length; j++) {
+                        if(balls[j].potted) continue;
+                        
+                        resolveCollision(ball, balls[j]);
+                    }
+                }
+
+                // Update position by step velocity (for sub-step simulation)
+                ball.x += ball.vx * stepDt;
+                ball.y += ball.vy * stepDt;
+
+                // Re-check boundary constraints after movement for this sub-step
+                let needsReflectX2 = false, needsReflectY2 = false;
+                
+                if(ball.x - RADIUS < 0) { ball.x = RADIUS; needsReflectX2 = true; }
+                else if(ball.x + RADIUS > SIM_WIDTH) { ball.x = SIM_WIDTH - RADIUS; needsReflectX2 = true; }
+
+                if(ball.y - RADIUS < 0) { ball.y = RADIUS; needsReflectY2 = true; }
+                else if(ball.y + RADIUS > SIM_HEIGHT) { ball.y = SIM_HEIGHT - RADIUS; needsReflectY2 = true; }
+                
+                // Apply boundary reflection after movement for this sub-step
+                if(needsReflectX2 || needsReflectY2) {
+                    let factor = BOUNCE_DAMPING * Math.sqrt(COLLISION_STEPS);
+                    ball.vx *= (needsReflectX2 ? -1 : 1);
+                    ball.vy *= (needsReflectY2 ? -1 : 1);
+                }
+
+                // Final pocket check after all sub-steps and position updates
+                if(!ball.potted && checkPockets(ball)) {
+                    ball.potted = true;
+                }
+            }
+        }
+
+        draw();
+    }
+
+    /** Draw the game */
+    function draw() {
+        // Clear canvas with green felt color
+        ctx.fillStyle = '#2d7a36';
+        ctx.fillRect(0, 0, SIM_WIDTH, SIM_HEIGHT);
+
+        // Draw cushions (border around playing surface)
+        ctx.fillStyle = '#1e4c28';
+        const cushionPadding = RADIUS * 2;
+        for(let p of POCKETS) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, RADIUS*2.5, 0, Math.PI*2);
+            ctx.fillStyle = '#1a1a1a'; // Pocket holes are black
+            ctx.fill();
+        }
+
+        const railWidth = cushionPadding;
+        for(let i=0; i<=SIM_WIDTH+railWidth; i+=railWidth) {
+            if(i <= SIM_WIDTH && Math.floor(i/railWidth)%2===0) continue; // Skip playing field area
+            ctx.fillRect(0, 0, SIM_WIDTH, railWidth); // Top
+        }
+
+        for(let j=0; j<=SIM_HEIGHT+railWidth; j+=railWidth) {
+            if(j <= SIM_HEIGHT && Math.floor(j/railWidth)%2===0) continue; // Skip playing field area
+            ctx.fillRect(0, 0, railWidth, SIM_HEIGHT); // Left
+        }
+
+        for(let i=SIM_WIDTH-railWidth; i<SIM_WIDTH+railWidth/2; i+=railWidth) {
+            if(i <= SIM_WIDTH && Math.floor((i-SIM_WIDTH)/railWidth)%2===1) continue; // Skip playing field area
+            ctx.fillRect(SIM_WIDTH, 0, railWidth, SIM_HEIGHT); // Right
+        }
+
+        for(let j=SIM_HEIGHT-railWidth; j<SIM_HEIGHT+railWidth/2; j+=railWidth) {
+            if(j <= SIM_HEIGHT && Math.floor((j-SIM_HEIGHT)/railWidth)%2===1) continue; // Skip playing field area
+            ctx.fillRect(0, SIM_HEIGHT, SIM_WIDTH, railWidth); // Bottom
+        }
+
+        // Draw balls with shadows for depth
+        const time = Date.now() / 500;
+        
+        for(let ball of balls) {
+            if(ball.potted && !isDragging || (ball.cue && isDragging)) continue; // Don't draw potted balls, or cue when dragging
+            
+            let x = ball.x;
+            let y = ball.y;
+
+            // Draw shadow with offset based on mouse drag direction and power
+            let dx = 0, dy = 0;
+            if(isDragging && ball.cue) {
+                const aimX = ball.x + dragStartPos.x * RADIUS/8;
+                const aimY = ball.y + dragStartPos.y * RADIUS/8;
+                const angle = Math.atan2(dragStartPos.y, dragStartPos.x);
+                dx = Math.cos(angle) * 10;
+                dy = Math.sin(angle) * 10;
+
+                ctx.beginPath();
+                ctx.arc(x + dx - ball.vx*3, y + dy - ball.vy*3, RADIUS-2, 0, Math.PI*2);
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+                ctx.fill();
+
+                // Draw aiming line with power indicator
+                const aimLineLength = Math.min(Math.sqrt(dragStartPos.x**2 + dragStartPos.y**2), RADIUS * 15);
+                const endX = ball.x + Math.cos(angle) * (aimLineLength - 40);
+                const endY = ball.y + Math.sin(angle) * (aimLineLength - 40);
+
+                ctx.beginPath();
+                ctx.moveTo(ball.x, ball.y);
+                
+                // Draw aim line with power indicator
+                for(let i=0; i<aimLineLength/15; i++) {
+                    const startX = endX + Math.cos(angle) * (i*15 - 20);
+                    const startY = endY + Math.sin(angle) * (i*15 - 20);
+                    
+                    ctx.lineTo(startX, startY);
+                }
+
+                // Draw power indicator line
+                ctx.beginPath();
+                ctx.moveTo(endX-30, endY-80);
+                ctx.lineTo(endX+30, endY-80);
+                
+                const power = Math.min(aimLineLength / (RADIUS * 15), 1.0);
+                let r = Math.floor(power*255);
+                let g = 255 - Math.floor(power*255), b = 0;
+
+                ctx.strokeStyle = `rgb(${r},${g},0)`;
+                ctx.lineWidth = 4 + (aimLineLength/RADIUS) / 2;
+                ctx.lineCap = 'round';
+                ctx.stroke();
+
+                // Draw power circle at ball position with pulsing effect
+                const pulseRadius = RADIUS * (1 + Math.sin(time)*0.3);
+                
+                for(let i=1; i<=3; i++) {
+                    ctx.beginPath();
+                    ctx.arc(x, y, pulseRadius - 8*i, 0, Math.PI*2);
+                    let alpha = Math.abs(Math.cos(i*time));
+                    if(ball.cue) {
+                        ctx.fillStyle = `rgba(255, ${Math.floor(power*g)},0,${alpha})`;
+                    } else {
+                        ctx.fillStyle = `rgba(${r},${g},0,${alpha})`;
+                    }
+
+                    ctx.fill();
+                }
+
+                // Draw the ball itself with highlight and shadow
+                const gradX1 = x - RADIUS*0.3;
+                const gradY1 = y - RADIUS*0.5;
+                const gradX2 = x + RADIUS*0.4;
+                const gradY2 = y + RADIUS*0.6;
+
+                let ballGradient = ctx.createRadialGradient(
+                    x, y, 3, 
+                    x + dx - ball.vx*3, y + dy - ball.vy*3, RADIUS
+                );
+                
+                if(ball.cue) {
+                    ballGradient.addColorStop(0.1, '#e8e8e8'); // Highlight for cue ball
+                    ballGradient.addColorStop(0.95, '#f5f5f5');
+                    
+                    const powerCircleRadius = RADIUS * (1 + Math.sin(time)*0.3);
+
+                    ctx.beginPath();
+                    ctx.arc(x-2, y+2, RADIUS*0.8, 0, Math.PI*2);
+                    let pwrAlpha = Math.abs(Math.cos(3*time));
+                    
+                    if(ball.cue) {
+                        for(let i=1; i<=4; i++) {
+                            ctx.beginPath();
+                            ctx.arc(x-2, y+2, powerCircleRadius - 8*i, 0, Math.PI*2);
+                            
+                            // Inner glow with pulsing effect using same color as aim line but darker and more transparent
+                            let innerAlpha = pwrAlpha * 0.5;
+                            if(ball.cue) {
+                                ctx.fillStyle = `rgba(240, ${Math.floor(power*g)},0,${innerAlpha})`;
+                            } else {
+                                const ir = Math.floor(power*255), ig = 255 - Math.floor(power*255);
+                                ctx.fillStyle = `rgba(${ir},${ig},0,${innerAlpha})`;
+                            }
+
+                            // Add a subtle outline to each inner glow ring for visibility
+                            if(ball.cue) {
+                                ctx.strokeStyle = `rgba(240, ${Math.floor(power*g)},0,${pwrAlpha * 0.6})`;
+                                ctx.lineWidth = 1;
+                            } else {
+                                const ir = Math.floor(power*255), ig = 255 - Math.floor(power*255);
+                                ctx.strokeStyle = `rgba(${ir},${ig},0,${pwrAlpha * 0.6})`;
+                            }
+
+                            ctx.stroke();
+                            
+                            // Add a subtle highlight on each inner glow ring for better visibility
+                            if(ball.cue) {
+                                let highlightColor = `rgba(255, ${Math.floor(power*g)},0,${innerAlpha*1.3})`;
+                                
+                                const angleOffset = time % (4*Math.PI); // Different offset for each ball
+                                ctx.beginPath();
+                                ctx.arc(x-2 + Math.cos(angleOffset)*powerCircleRadius*(i+1), y+2 - Math.sin(angleOffset)*powerCircleRadius*(i+1), powerCircleRadius/(i*1.5) , 0, Math.PI*2);
+                                ctx.fillStyle = highlightColor;
+                                ctx.fill();
+                                
+                            } else {
+                                let highlightColor = `rgba(${r},${g},0,${innerAlpha*1.3})`;
+                                const angleOffset = time % (4*Math.PI) + i; // Different offset for each ball
+                                ctx.beginPath();
+                                ctx.arc(x-2 + Math.cos(angleOffset)*powerCircleRadius*(i+1), y+2 - Math.sin(angleOffset)*powerCircleRadius*(i+1), powerCircleRadius/(i*1.5) , 0, Math.PI*2);
+                                ctx.fillStyle = highlightColor;
+                                ctx.fill();
+                            }
+                        }
+
+                    } else {
+                        ballGradient.addColorStop(0.1, '#e8e8e8'); // Highlight for regular balls
+                        ballGradient.addColorStop(0.95, '#f5f5f5');
+                    }
+                }
+
+                ctx.beginPath();
+                ctx.arc(x, y, RADIUS*2/3, 0, Math.PI*2);
+                
+                if(ball.cue) {
+                    // Draw the cue ball with its distinctive design and glow effect
+                    const gradient = ctx.createRadialGradient(
+                        x - RADIUS/4, y + RADIUS/6, 1, 
+                        x, y, RADIUS
+                    );
+
+                    let rVal = Math.floor(power*255);
+                    let gVal = Math.floor((power)*g); // Use same power factor
+                    
+                    gradient.addColorStop(0.7, `rgba(${rVal},${gVal},0,${pwrAlpha})`);  // Inner glow with pulsing effect
+                    gradient.addColorStop(0.85, '#e4f2ff'); // Outer edge highlight for depth
+                    gradient.addColorStop(1, 'white');
+
+                    ctx.fillStyle = gradient;
+                } else {
+                    let rVal = Math.floor(power*255);
+                    let gVal = Math.floor((power)*g); // Use same power factor
+                    
+                    const ballGradient2 = ctx.createRadialGradient(x - RADIUS/4, y + RADIUS/6, 1, x, y, RADIUS);
+                    
+                    // Add gradient for regular balls with glow effect similar to cue ball but different colors
+                    let innerAlpha = Math.abs(Math.cos(3*time)) * (i%2===0?1:0.8) * 0.7;
+
+                    if(ball.cue) {
+                        ballGradient2.addColorStop(0.7, `rgba(${rVal},${gVal},0,${innerAlpha})`);
+                        ballGradient2.addColorStop(0.85, '#e4f2ff'); // Outer edge highlight for depth
+
+                    } else {
+                        let ir = Math.floor(power*255), ig = 255 - Math.floor(power*255);
+                        ballGradient2.addColorStop(0.7, `rgba(${ir},${ig},0,${innerAlpha})`);
+                        ballGradient2.addColorStop(0.85, '#e4f2ff'); // Outer edge highlight for depth
+
+                    }
+
+                    ctx.fillStyle = gradient;
+                }
+
+                ctx.fill();
+
+
+                // Draw shadow with offset based on mouse drag direction and power
+                const angleOffset = time % (4*Math.PI);
+                
+                if(ball.cue) {
+                    let ir, ig, ib;
+                    
+                    for(let i=1; i<=3; i++) {
+                        ctx.beginPath();
+                        ctx.arc(x-2 + Math.cos(angleOffset)*powerCircleRadius*(i+1), y+2 - Math.sin(angleOffset)*powerCircleRadius*(i+1), powerCircleRadius/(i*1.5) , 0, Math.PI*2);
+                        
+                        if(ball.cue) {
+                            let highlightColor = `rgba(240, ${Math.floor(power*g)},0,${innerAlpha*1.3})`;
+                            
+                            ctx.fillStyle = highlightColor;
+                            ctx.fill();
+                        } else {
+                            ir = Math.floor(power*255); ig = 255 - Math.floor(power*255); ib=0;
+
+                            let highlightColor = `rgba(${ir},${ig},0,${innerAlpha*1.3})`;
+                            
+                            ctx.fillStyle = highlightColor;
+                            ctx.fill();
+                        }
+                    }
+                } else {
+                    
+                    // Add subtle reflection on ball surface for depth
+                    const gradX2_1 = x - RADIUS*0.4;
+                    const gradY2_1 = y + RADIUS*0.3;
+
+                    let ballGradient2 = ctx.createRadialGradient(
+                        x, y, 3, 
+                        x+dx-ball.vx*3, y+dy-ball.vy*3, RADIUS-2
+                    );
+                    
+                    if(ball.cue) {
+                        
+                        const rVal = Math.floor(power * 255);
+                        const gVal = Math.floor((power) * g); // Use same power factor
+                        
+                        ballGradient2.addColorStop(0.1, '#ffffff'); // Highlight for cue ball
+                        ballGradient2.addColorStop(0.7, `rgba(${rVal},${gVal},0,${pwrAlpha})`);  // Inner glow with pulsing effect
+
+                    } else {
+                        
+                        let ir = Math.floor(power * 255), ig = 255 - Math.floor(power*255), ib=0;
+
+                        ballGradient2.addColorStop(0.1, '#ffffff'); 
+                        ballGradient2.addColorStop(0.7, `rgba(${ir},${ig},0,${pwrAlpha})`);  // Inner glow with pulsing effect
+                    }
+
+
+                    ctx.beginPath();
+                    ctx.arc(x-2 - Math.cos(angleOffset)*RADIUS/4, y+2 + Math.sin(angleOffset)*RADIUS/4, RADIUS*1.3, 0, Math.PI*2);
+                    
+                    if(ball.cue) {
+
+                        // Add subtle reflection on ball surface for depth with pulsing effect
+                        let ir = Math.floor(power * 255), ig = Math.floor((power)*g), ib=0;
+
+                        const rVal = Math.floor(power * 255);
+                        const gVal = Math.floor((power) * g); // Use same power factor
+                        
+                        
+                        ballGradient2.addColorStop(0.7, `rgba(${rVal},${gVal},0,${pwrAlpha})`);
+
+                    } else {
+                        
+                        let ir = Math.floor(power*255), ig = 255 - Math.floor(power*255), ib=0;
+
+                        ballGradient2.addColorStop(0.7, `rgba(${ir},${ig},0,${pwrAlpha})`);
+
+                    }
+                    
+                    ctx.fillStyle = ballGradient2;
+                }
+                
+                ctx.fill();
+
+
+            } else {
+                // Regular balls without aim line (just draw them normally)
+                let rVal = Math.floor(power*255), gVal = 255 - Math.floor(power*255);
+
+                const ballGradient2_1 = ctx.createRadialGradient(
+                    x, y, 3, 
+                    x + dx - ball.vx*3, y + dy - ball.vy*3, RADIUS-4
+                );
+
+                if(ball.cue) {
+
+                    // Add subtle reflection on ball surface for depth with pulsing effect to regular balls too
+                    let ir = Math.floor(power * 255), ig = Math.floor((power)*g);
+
+                    const rVal = Math.floor(power * 255);
+                    const gVal = Math.floor((power) * g); // Use same power factor
+                    
+                    
+                    ballGradient2_1.addColorStop(0.7, `rgba(${rVal},${gVal},0,${pwrAlpha})`);
+
+                } else {
+                    
+                    let ir = Math.floor(power*255), ig = 255 - Math.floor(power*255);
+
+                    ballGradient2_1.addColorStop(0.7, `rgba(${ir},${ig},0,${pwrAlpha})`);
+
+                }
+                
+                ctx.beginPath();
+                ctx.arc(x + dx - ball.vx*3, y + dy - ball.vy*3, RADIUS-4, 0, Math.PI*2);
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; // Shadow with pulsing effect on all balls
+                
+                if(ball.cue) {
+
+                    let ir = Math.floor(power * 255), ig = Math.floor((power)*g);
+
+                    
+                    ballGradient2_1.addColorStop(0.7, `rgba(${rVal},${gVal},0,${pwrAlpha})`);
+
+                } else {
+                    
+                    let ir = Math.floor(power*255), ig = 255 - Math.floor(power*255);
+
+                    ballGradient2_1.addColorStop(0.7, `rgba(${ir},${ig},0,${pwrAlpha})`);
+
+                }
+                
+                ctx.fill();
+
+
+            } 
+        } // End loop for drawing balls
+
+    }
+
+    /** Give the cue ball this velocity (used by grading system) */
+    function shoot(vx, vy) {
+        let cueBall = null;
+        
+        if(isDragging) {
+            isDragging = false;
+            
+            const dx = vx * RADIUS / 80; // Scale down from mouse drag units to physics velocity
+            const dy = vy * RADIUS / 80;
+
+            for(let ball of balls) {
+                if(ball.cue && !ball.potted) {
+                    cueBall = ball;
+                    
+                    let powerX = Math.cos(Math.atan2(dy, dx)) * (Math.min(Math.sqrt(dx*dx + dy*dy), RADIUS * 15) / RADIUS);
+                    
+                    // Scale the velocity by a factor to make shots feel right
+                    const shotPowerFactor = 3.0;
+                    
+                    ball.vx = powerX * shotPowerFactor;
+
+                } else if(ball.cue && isDragging) {
+                    let aimAngle = Math.atan2(dy, dx);
+                    let dragDist = Math.sqrt(dx*dx + dy*dy);
+                    let aimLineLength = Math.min(dragDist, RADIUS * 15); // Maximum power
+                    
+                    ball.vx = Math.cos(aimAngle) * (dragDist / RADIUS) * shotPowerFactor;
+                    ball.vy = Math.sin(aimAngle) * (dragDist / RADIUS) * shotPowerFactor;
+                    
+                } else if(ball.cue && !isDragging && ball.potted === false) {
+
+                    // Allow clicking to shoot when no drag - this is for grading system compatibility only, not part of playable game
+                    cueBall = ball;
+                    let aimAngle = Math.atan2(dy, dx);
+                    
+                    const shotPowerFactor = 3.0;
+                    
+                    ball.vx = Math.cos(aimAngle) * (dragDist / RADIUS) * shotPowerFactor;
+                    ball.vy = Math.sin(aimAngle) * (dragDist / RADIUS) * shotPowerFactor;
+
+                } else if(ball.cue && !isDragging && ball.potted === true) {
+                    
+                    // For grading only - can reset the cue ball from pocket when clicked
+                    
+                } 
+            }
+        }
+    }
+
+    /** Pause and resume functions for deterministic grading */
+    function pause() { pausedForGrading = true; }
+    
+    function resume() { pausedForGrading = false; }
+
+    // Global sim object with required contract
+    window.sim = {
+        W: SIM_WIDTH,
+        H: SIM_HEIGHT,
+        R: RADIUS,
+        
+        reset: (balls) => {
+            return reset(balls);
+        },
+        
+        step: (dt) => {
+            if(!pausedForGrading || dt > 0.125) { // Allow stepping even when paused by user interaction with fixed dt for grading
+                step(dt);
+            }
+            
+            // Return state array (same order as reset, preserve properties that are not potted or moving)
+            return balls.slice().map(ball => ({
+                x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy, 
+                potted: !!ball.potted, cue: !!(ball.cue && !isDragging || (ball.cue === true))
+            }));
+        },
+
+        state: () => {
+            return balls.slice().map(ball => ({
+                x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy,
+                potted: !!ball.potted, cue: !!(ball.cue && !isDragging || (ball.cue === true))
+            }));
+        },
+
+        shoot: (vx, vy) => {
+            return shoot(vx, vy);
+        },
+
+        pause: () => { pausedForGrading = true; },
+        
+        resume: () => { pausedForGrading = false; }
+    };
+
+    // Mouse interaction handlers for aiming and shooting the cue ball
+    canvas.addEventListener('mousedown', (e) => {
+        if(pausedForGrading || e.button !== 0) return;
+        
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        // Check for cue ball click first, then other balls
+        let clickedBall = null;
+        
+        // Find the nearest clickable ball (cue or non-potted) near mouse position
+        if(Math.abs(mouseX - mouseX) < RADIUS*2.5 && Math.abs(mouseY - mouseY) < RADIUS*2.5) {
+            
+            for(let i=0; i<balls.length; i++) {
+                
+                // Check only visible balls (not potted unless dragging over them)
+                let ball = balls[i];
+
+                if(ball.potted && !isDragging || isDragging && ball === clickedBall) continue;
+
+
+                const dx = mouseX - ball.x;
+                const dy = mouseY - ball.y;
+
+                // Check distance to center of this ball (radius*2.5 for pocket area, radius+padding for others)
+                if(dx*dx + dy*dy < RADIUS*RADIUS && !ball.potted || isDragging && Math.abs(dx) < 80 && Math.abs(dy) < 80 && clickedBall === null) {
+
+                    // Only allow clicking on cue ball when not dragging (for aiming), or any non-potted ball to reset position
+                    if(ball.cue && !isDragging || isDragging && ball !== clickedBall) {
+                        clickedBall = ball;
+                    } else if(!ball.cue && !ball.potted && !isDragging && ball === clickedBall) {
+
+                        // Allow clicking on non-cue balls when not dragging - this will reset them to pocket position with zero velocity (for grading system compatibility)
+                        ball.x = SIM_WIDTH/2;
+                        ball.y = RADIUS * 3;
+                        ball.vx = 0;
+                        ball.vy = 0;
+                    }
+
+                } 
+            }
+        } // end for loop
+
+
+        if(clickedBall && (clickedBall.cue || !isDragging)) {
+            
+            isDragging = true;
+            
+            dragStartPos.x = mouseX - clickedBall.x;
+            dragStartPos.y = mouseY - clickedBall.y;
+
+        } 
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+        if(pausedForGrading || !isDragging || e.buttons !== 1) return;
+        
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        // Update aim line based on current mouse position relative to cue ball
+        dragStartPos.x = mouseX - balls.find(b => b.cue).x;
+        dragStartPos.y = mouseY - balls.find(b => b.cue).y;
+    });
+
+    canvas.addEventListener('mouseup', (e) => {
+        if(pausedForGrading || !isDragging) return;
+        
+        isDragging = false;
+
+        // Only actually shoot the cue ball based on drag distance and direction
+        let clickedBall = balls.find(b => b.cue);
+        
+        if(clickedBall && !clickedBall.potted) {
+            const dx = mouseX - clickedBall.x;
+            const dy = mouseY - clickedBall.y;
+
+            // Calculate power from drag length, but cap it to prevent overpowered shots (max 15*radius of aim line for feel)
+            
+            let aimAngle = Math.atan2(dy, dx);
+            let dragDist = Math.sqrt(dx*dx + dy*dy);
+            
+            const shotPowerFactor = 3.0; // Adjust this value to change how hard balls shoot
+            
+            clickedBall.vx = Math.cos(aimAngle) * (dragDist / RADIUS) * shotPowerFactor;
+            clickedBall.vy = Math.sin(aimAngle) * (dragDist / RADIUS) * shotPowerFactor;
+
+        } 
+    });
+
+    document.getElementById('resetBtn').addEventListener('click', () => {
+        createRack();
+    });
+
+    // Start the game loop with variable delta time but fixed physics step for determinism when needed
+    function gameLoop() {
+        if(!pausedForGrading) {
+            const now = Date.now();
+            const dt = (now - lastTime) / 1000;
+            
+            if(dt > 0.25 && !isDragging) { // Prevent huge time jumps from resetting the timer
+            
+                step(0); // Skip physics for frame skip prevention
+                
+            } else if(!isDragging || !pausedForGrading) {
+
+                lastTime = now;
+                
+                const stepDt = Math.min(dt, 1/60); // Cap dt to avoid explosions on lag spikes, but allow variable timing when not paused (for grading compatibility with fixed time steps in pause mode)
+
+                step(stepDt);
+
+            } 
+        } 
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    gameLoop();
+
+})();
+</script>
+</body>
+</html>

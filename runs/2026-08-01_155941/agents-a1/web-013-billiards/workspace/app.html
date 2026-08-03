@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Billiards Physics</title>
+    <style>
+        body { margin: 0; background-color: #121212; display: flex; justify-content: center; align-items: center; height: 100vh; color: white; font-family: sans-serif; overflow: hidden; }
+        .container { position: relative; text-align: center; display: flex; flex-direction: column; align-items: center;}
+        canvas { border-radius: 8px; box-shadow: 0 20px 50px rgba(0,0,0,0.7); cursor: crosshair; background-color: #fff; }
+        .overlay { margin-top: 15px; display: flex; justify-content: space-between; align-items: center; width: 900px; color: #ccc;}
+        button { padding: 8px 20px; font-size: 16px; background: #333; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #555; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <canvas id="poolTable" width="900" height="450"></canvas>
+    <div class="overlay">
+        <span style="font-size: 18px;" id="instructions">Click on the white cue ball, drag back to aim and release to shoot.</span>
+        <button id="resetBtn">Rack / Reset</button>
+    </div>
+</div>
+
+<script>
+(function() {
+    // --- Configuration & Constants ---
+    const W = 900;      // Table width in pixels (playable area)
+    const H = 450;      // Table height
+    const R = 12;       // Ball radius in pixels
+    
+    const FRICTION_ACCEL = 200; // Deceleration magnitude px/sec^2
+    const POCKET_RADIUS = 3.5 * R; 
+    const WALL_ELASTICITY = 1.0;
+
+    // --- State Variables ---
+    let balls = [];         // Array of ball objects {x,y,vx,vy,potted,cue}
+    
+    // Mouse Interaction state
+    let mouse = { x: 0, y: 0 };
+    let isDragging = false;
+    let dragStart = null;
+
+    const canvas = document.getElementById('poolTable');
+    const ctx = canvas.getContext('2d');
+    const resetBtn = document.getElementById('resetBtn');
+    const instructions = document.getElementById('instructions');
+
+    // --- Physics Logic ---
+
+    function resolveBallCollision(b1, b2) {
+        let dx = b2.x - b1.x;
+        let dy = b2.y - b1.y;
+        let distSq = dx*dx + dy*dy;
+        
+        if (distSq <= 0 || Math.sqrt(distSq) >= 2*R) return; // No overlap or collision
+        
+        // Normal vector pointing from ball 1 to ball 2
+        let nx = dx / Math.sqrt(distSq);
+        let ny = dy / Math.sqrt(distSq);
+
+        // Penetration depth (overlap amount)
+        let penetration = (2*R) - Math.sqrt(distSq);
+        
+        // Separate balls along normal vector to prevent sticking (50/50 split for equal mass)
+        b1.x -= nx * (penetration / 2);
+        b1.y -= ny * (penetration / 2);
+        b2.x += nx * (penetration / 2);
+        b2.y += ny * (penetration / 2);
+
+        // Check if balls are moving towards each other along the normal to apply impulse.
+        // Relative velocity vector: v1 - v2. Normal component indicates approach.
+        let relX = b1.vx - b2.vx;
+        let relY = b1.vy - b2.vy;
+        
+        // Dot product of relative velocity with normal (n points from 1 to 2)
+        // If positive, distance along n is increasing? Wait: 
+        // Vector r_12 = p2 - p1. Normalized n = r_12 / dist. Points FROM 1 TO 2.
+        // Distance derivative d/dt |r| = (v2 - v1) . n. If this < 0, they approach.
+        // So we check if (v2 - v1).n > 0 -> separating? 
+        // Let's compute approach: `rel_vel_along_n`. We want to apply bounce only if approaching.
+        // Approach condition: relative velocity along n is negative. i.e., `(b2.v - b1.v) . n < 0`
+        let v_rel = (b2.vx - b1.vx) * nx + (b2.vy - b1.vy) * ny;
+        
+        if (v_rel >= 0) return; // Not approaching, no bounce needed.
+
+        // For equal mass elastic collision: exchange velocity components along the normal vector.
+        let v1n = b1.vx * nx + b1.vy * ny;
+        let v2n = b2.vx * nx + b2.vy * ny;
+
+        // New velocities along n (swap)
+        let newV1n = v2n;
+        let newV2n = v1n;
+
+        // Decompose original vectors into normal and tangent components
+        let vx1t = b1.vx - v1n * nx;
+        let vy1t = b1.vy - v1n * ny;
+        
+        let vx2t = b2.vx - v2n * nx;
+        let vy2t = b2.vy - v2n * ny;
+
+        // Reconstruct vectors with swapped normal components
+        b1.vx = vx1t + newV1n * nx;
+        b1.vy = vy1t + newV1n * ny;
+        
+        b2.vx = vx2t + newV2n * nx;
+        b2.vy = vy2t + newV2n * ny;
+    }
+
+    // --- Core API Implementation ---
+    
+    window.sim = {
+        W: W, H: H, R: R,
+
+        reset: function(ballData) {
+            balls = [];
+            
+            const rack = ballData || [
+                {x: R + 50, y: H/2, vx: 0, vy: 0, cue: true},
+                {x: W - (R+30), y: R + 10, vx: 0, vy: 0},
+                {x: W - (R+30), y: H - (R+10), vx: 0, vy: 0}
+            ];
+
+            for(let d of rack) {
+                balls.push({
+                    x: d.x, y: d.y, 
+                    vx: d.vx !== undefined ? d.vx : 0, vy: d.vy !== undefined ? d.vy : 0,
+                    potted: false,
+                    cue: !!d.cue
+                });
+            }
+        },
+
+        step: function(dt) {
+            if (balls.length === 0) return;
+            
+            // Update all balls in a deterministic order.
+            for(let i=0; i<balls.length; i++) {
+                let b = balls[i];
+                if(b.potted) continue;
+
+                // --- Friction & Velocity Decay ---
+                let speedSq = b.vx*b.vx + b.vy*b.vy;
+                if(speedSq > 1e-6 && !b.potted) {
+                    let decel = FRICTION_ACCEL * dt;
+                    let speed = Math.sqrt(speedSq);
+                    
+                    // Apply friction vector opposite to motion, clamped to zero.
+                    if(decel >= speed) {
+                        b.vx = 0; 
+                        b.vy = 0;
+                    } else {
+                        b.vx -= (b.vx / speed) * decel;
+                        b.vy -= (b.vy / speed) * decel;
+                    }
+                }
+
+                // --- Position Update ---
+                b.x += b.vx * dt;
+                b.y += b.vy * dt;
+
+                // --- Pockets Check (Before Wall Clamping to allow pottable near boundary without bounce conflict?)
+                // Actually, check potted after movement. If ball center is close enough to a pocket point -> potted.
+                let isPotted = false;
+                
+                // Define 6 pockets: Corners + Middle of Long Rails (Top/Bottom)
+                const Pockets = [
+                    {x: R+5, y: R+5},          // Top Left Corner-ish
+                    {x: W-R-5, y: R+5},        // Top Right
+                    {x: W-R-5, y: H-R-5},      // Bottom Right
+                    {x: R+5, y: H-R-5},        // Bottom Left
+                    
+                    {x: W/2, y: R+10},         // Mid Long Rail (Top) - assuming top/bottom are long rails relative to width? Actually table 900x450. Width is longer side. So Top/Bottom edges are length ~W. Midpoint x=W/2.
+                    {x: W/2, y: H-R-10}        // Bottom Long Rail Midpoint
+                
+                    // Note: Standard pool has corners and mid SHORT rails? 
+                    // Actually standard 9ft table pockets at all sides except one side of short rail sometimes (but prompt says "four corners + middle of each long rail").
+                    // So my list is valid for the interpretation.
+                ];
+
+                for(let p of Pockets) {
+                    let dx = b.x - p.x;
+                    let dy = b.y - p.y;
+                    if(Math.hypot(dx, dy) < POCKET_RADIUS * 1.25) { // Slightly generous radius to catch balls near edge
+                        isPotted = true;
+                        break;
+                    }
+                }
+
+                if(isPotted) {
+                    b.potted = true;
+                    b.vx = 0; 
+                    b.vy = 0;
+                    continue; // Skip further processing for this ball (like bounds check/colliions next loop iteration?) - We still run collision resolution above? No, we are inside ball update. Let's skip collisions with potted balls in the nested loops below by checking condition there. Here just mark and skip rest of THIS ball logic (bounds/clamp) if desired? The prompt says "out of play".
+                    // To keep simulation simple: Mark as potted and stop updating it further, but let other balls interact normally.
+                }
+
+                // --- Wall Bounds & Collision ---
+                // Constraint: stay within R .. W-R, R .. H-R (for non-potted).
+                
+                if(b.x < R) { 
+                    b.x = R; 
+                    b.vx = -b.vx * WALL_ELASTICITY; 
+                } else if (b.x > W - R) {
+                    b.x = W - R;
+                    b.vx = -b.vx * WALL_ELASTICITY;
+                }
+
+                if(b.y < R) {
+                    b.y = R;
+                    b.vy = -b.vy * WALL_ELASTICITY;
+                } else if (b.y > H - R) {
+                    b.y = H - R;
+                    b.vy = -b.vy * WALL_ELASTICITY;
+                }
+
+            } // End Ball Updates
+
+            // --- Ball-Ball Collisions (Iterative Resolution) ---
+            for(let i=0; i<balls.length; i++) {
+                let a = balls[i];
+                if(a.potted) continue;
+
+                for(let j=i+1; j<balls.length; j++) {
+                    let b = balls[j];
+                    if(b.potted || a.potted) continue; // Skip potted in collision
+                    
+                    resolveBallCollision(a, b);
+                }
+            }
+
+            draw(); // Redraw as part of step.
+        },
+
+        state: function() {
+            return balls.map(b => ({ x:b.x, y:b.y, vx:b.vx, vy:b.vy, potted:b.potted, cue:b.cue }));
+        },
+
+        shoot: function(vx, vy) {
+            // Find first non-potted cue ball and set velocity.
+            let cb = null;
+            for(let b of balls) if(b.cue && !b.potted) { cb=b; break; }
+            if(cb) {
+                cb.vx = vx; 
+                cb.vy = vy; 
+            }
+        },
+
+        pause: function() { stopGameLoop(); }, 
+        resume: function() { startGameLoop(); } 
+
+    };
+
+    // --- Game Loop & Animation ---
+    
+    let lastTime = 0;
+    let rafId = null;
+    
+    function startGameLoop() {
+        if(rafId) cancelAnimationFrame(rafId);
+        
+        function loop(timestamp) {
+            if(!lastTime) lastTime = timestamp;
+            let dt = (timestamp - lastTime) / 1000; 
+            // Cap dt to avoid huge jumps after tab inactivity? Usually not needed for this small sim.
+            
+            window.sim.step(dt);
+            
+            rafId = requestAnimationFrame(loop);
+        }
+        lastTime = 0;
+        rafId = requestAnimationFrame(loop);
+    }
+
+    function stopGameLoop() {
+        if(rafId) cancelAnimationFrame(rafId);
+        rafId = null;
+    }
+    
+    // Hook into window.sim as per spec? 
+    // The prompt asks for global `window.sim`. I'm attaching methods to it.
+    // Start animation automatically on load (it's playable).
+
+    function defaultRack() {
+        return [
+            {x: R + 20, y: H/2, vx: 0, vy: 0, cue: true}, 
+            {x: W - 50, y: H/4, vx: 0, vy: 0},
+            {x: W - 80, y: H/2, vx: 0, vy: 0}
+        ]; 
+    }
+
+    window.sim.reset(defaultRack());
+
+    // --- UI & Drawing ---
+    
+    function draw() {
+        ctx.clearRect(0,0,W,H);
+        
+        // Draw Table (Felt) and Rails
+        
+        // Felt Green Area
+        ctx.fillStyle = "#2e8b57"; 
+        let feltPad = R;
+        ctx.fillRect(R, R, W - 2*R, H - 2*R);
+        
+        // Pockets Visuals: Draw black circles at pocket centers.
+        const PocketsVis = [
+            {x: R+10, y: R+10}, 
+            {x: W-R-10, y: R+10}, 
+            {x: W-R-10, y: H-R-10}, 
+            {x: R+10, y: H-R-10},
+            {x: W/2, y: R+5},
+            {x: W/2, y: H-R-5}
+        ];
+
+        for(let p of PocketsVis) {
+            ctx.beginPath();
+            let radius = POCKET_RADIUS * 0.8; // Visual size slightly smaller than detection radius
+            if(p.x === W/2 && (p.y===R+5 || p.y===H-R-5)) radius *= 1.2; // Make mid pockets bigger? No uniform for simplicity.
+            
+            ctx.arc(p.x, p.y, POCKET_RADIUS * 0.8, 0, Math.PI*2);
+            ctx.fillStyle = "#1a0f09"; // Dark pocket hole color
+            ctx.fill();
+        }
+
+        // Draw Balls (non-potted only)
+        for(let b of balls) {
+            if(b.potted) continue;
+            
+            let cx = b.x, cy = b.y;
+            let radius = R;
+            
+            // Ball body color
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius - 1, 0, Math.PI*2);
+            if(b.cue) {
+                ctx.fillStyle = "#ffffff";
+            } else {
+                // Simple distinct colors for numbered balls (or random cycling)
+                let idx = balls.indexOf(b);
+                const colors = ["#ff4d4d", "#4d79ff", "#ffd500", "#2ecc71", "#e67e22"]; 
+                ctx.fillStyle = colors[idx % colors.length];
+            }
+            
+            ctx.fill();
+            // Shine effect (white glint) for better 3D look
+            ctx.beginPath();
+            ctx.arc(cx - radius*0.4, cy - radius*0.4, radius/2.5, 0, Math.PI*2);
+            ctx.fillStyle = "rgba(255,255,255,0.3)";
+            ctx.fill();
+
+        }
+
+        // Draw Aim Line (Drag Back Visualizer) if dragging cue ball
+        let cb = null;
+        for(let b of balls) if(b.cue && !b.potted) { cb=b; break; }
+        
+        if(cb && isDragging && dragStart) {
+            ctx.beginPath();
+            
+            // Calculate direction vector based on mouse position relative to start.
+            let dx = mouse.x - dragStart.x;
+            let dy = mouse.y - dragStart.y;
+            
+            // The shot goes opposite of the "pull" (drag back). 
+            // If I pull right, shoot left? No: In pool you pull stick away from target to go towards it.
+            // My logic: Dragging *back* means moving away from where ball will travel? 
+            // If mouse moves down-left relative to start, then dx negative, dy negative. Direction of "pull" vector is (-dx,-dy).
+            // Inverse (shoot direction) is opposite of pull direction? Actually if I drag stick back (down), ball goes forward (up). So shoot dir = -(mouse - ball_start)?
+            
+            let vx_draw = -dx; 
+            let vy_draw = -dy;
+            
+            ctx.moveTo(cb.x, cb.y);
+            // Draw a line extending from the cue ball in the direction of the shot (inverse drag) but limited length for visibility.
+            ctx.lineTo(cb.x + vx_draw * 2, cb.y + vy_draw * 2); 
+            
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+        }
+    }
+
+    // --- Input Handling ---
+
+    function getBallAt(x,y) {
+        for(let b of balls) if(!b.potted && Math.hypot(b.x-x, b.y-y) < R*2.5) return b; // slightly larger hit area
+        return null;
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        mouse.x = e.clientX - rect.left;
+        mouse.y = e.clientY - rect.top;
+        
+        let ball = getBallAt(mouse.x, mouse.y);
+        if(ball && ball.cue) {
+            isDragging = true;
+            dragStart = { x: mouse.x, y: mouse.y }; 
+            instructions.style.color = "#fff";
+        } else if(ball) {
+             instructions.innerText = "You can only shoot the cue ball.";
+             setTimeout(() => {instructions.innerText = "..."}, 1500);
+        }
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        mouse.x = e.clientX - rect.left;
+        mouse.y = e.clientY - rect.top;
+    });
+
+    window.addEventListener('mouseup', () => {
+        if(isDragging) {
+            isDragging = false;
+            
+            // Calculate shot velocity vector from DragStart to current Mouse.
+            let dx = mouse.x - dragStart.x;
+            let dy = mouse.y - dragStart.y;
+            
+            let powerSq = dx*dx + dy*dy;
+            if(powerSq > 1) {
+                let maxSpeed = 400; // px/sec
+                
+                // Direction: opposite of Drag vector (since dragging back means moving away from shot direction).
+                // If I pull mouse left, ball shoots right. Vector points Left (-x), Shot is Right (+x). So shot = -dx,-dy normalized * speed_factor.
+                
+                let mag = Math.sqrt(powerSq);
+                let vx = -(dx / mag) * 50; 
+                let vy = -(dy / mag) * 50;
+
+                if(Math.hypot(vx,vy) > maxSpeed) {
+                    let m = Math.hypot(vx,vy);
+                    vx = (vx/m)*maxSpeed;
+                    vy = (vy/m)*maxSpeed;
+                }
+
+                window.sim.shoot(vx, vy);
+            }
+            
+            dragStart = null;
+        }
+    });
+
+    resetBtn.addEventListener('click', () => {
+        let r = defaultRack();
+        window.sim.reset(r);
+    });
+
+    // Start loop immediately on load.
+    startGameLoop(); 
+
+})();
+</script>
+</body>
+</html>

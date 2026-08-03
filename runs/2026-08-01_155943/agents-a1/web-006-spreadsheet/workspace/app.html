@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Spreadsheet</title>
+    <style>
+        body { 
+            font-family: sans-serif; padding: 20px; background-color: #f5f5f5; display:flex; flex-direction:column; align-items:center; justify-content:start; height:100vh; margin:0;}
+        
+        .app-wrapper { width:min-content; }
+
+        /* Main Grid Container */
+        #sheet-grid {
+            display: grid;
+            gap: 2px;
+            background-color: #888;
+            
+            /* Force min size constraints for the visible app (>=600x400) */
+            width: auto; 
+            padding-bottom:10px;
+
+            /* Grid Layout Definition 
+               We define enough columns to align headers with cells.
+               Each logical row will have 12 items? Let's use sequential flow logic for simplicity and robustness.
+               Logical rows (data + header) should have consistent counts per line to avoid wrapping misalignment, but CSS grid auto-placement handles this based on available tracks if we define enough columns total or let it wrap naturally? 
+               To guarantee alignment, I'll set a fixed number of column tracks > items per row.
+            */
+            grid-template-columns: repeat(13, 60px); /* Define 13 tracks (wide) so 12 fit easily without wrapping issues if needed). */
+        }
+
+        .cell-header { 
+            background-color: #e8e8e8; font-weight:bold; display:flex; justify-content:center; align-items:center; height:auto; border:none;}
+        
+        /* The inputs inside the data cells. Also RowHeaders use this class? No, header uses different style but layout is same size. */
+        .cell-wrapper { 
+            background-color: white; width:100%; display:flex; justify-content:center; align-items:center; height:auto; padding-bottom:2px;}
+        
+        /* Inputs styling */
+        #sheet-grid input { 
+            border:none; outline:none; text-align:right; font-family:sans-serif; cursor:text; width:95%; box-sizing:border-box; background:white;}
+
+        /* Controls area below grid */
+        .controls-area { margin-top:10px; display:flex; flex-direction:column; align-items:center; }
+        
+        #export-btn, #csv-textarea { 
+            font-family:sans-serif; padding:8px 12px; width:min-content; min-width:300px; max-width:600px;}
+            
+    </style>
+</head>
+<body>
+
+<div class="app-wrapper">
+   <div id="sheet-grid"></div>
+   
+   <div class="controls-area">
+       <button id="export-btn" style="margin-top:10px;">Export CSV</button>
+       <textarea id="csv-textarea" rows="5" cols="60"></textarea>
+   </div>
+</div>
+
+<script>
+// Constants and State
+const COLS = ['A','B','C','D','E','F','G','H','I','J']; // 10 columns (Indices 0-9)
+const ROWS = [1,2,3,4,5,6,7,8,9,10];                   // 10 rows
+
+// State: Raw values Map. Key is "A1". Value is string "".
+const rawValues = new Map(); 
+
+// Cell DOM Elements map ID -> Input Element (for data cells)
+const cellEls = {}; 
+// To track currently evaluating cells for cycle detection
+let evaluatingCells = new Set();
+
+function init() {
+    const grid = document.getElementById('sheet-grid');
+    
+    // Add CSS Grid Styles to ensure layout & Size >= 600x400 px visible app.
+    // We need the container to be at least that size. 
+    // By setting width auto and items with fixed height (via content or explicit style), we can reach min dimensions if needed, but better enforce via CSS on wrapper?
+    // The prompt says "The visible app must be at least 600×400 px". I will ensure the grid container meets this.
+    
+    // We define enough tracks to accommodate headers and cells without wrapping misalignment issues in typical view (though we use sequential flow). 
+    // Let's just set a fixed width/height on the wrapper? Or rely on content size + min-width/height constraints via CSS classes defined above or inline here.
+    // I'll add explicit styles for grid container to guarantee visibility if needed, but mainly ensure inputs are large enough.
+
+    // Generate Top Header Row (Row 0 in visual layout) - This row will contain: Corner Cell + Headers A-J. Total 11 items? No. 
+    // To align headers with cells below them using sequential flow, each logical row must have the same number of children?
+    // If I put 11 items in first line (Corner+Headers), and next lines also 11 items (RowHeader + Cells A-J). This guarantees alignment because grid fills tracks left to right.
+    
+    let currentGridCol = 0; 
+    
+    // Create Corner Cell at Top Left. 
+    const cornerDiv = document.createElement('div');
+    cornerDiv.className = 'cell-header';
+    cornerDiv.style.width='100%'; // Fill track width
+    grid.appendChild(cornerDiv);
+
+    // Create Column Headers A-J at Row 1, Columns... they will automatically fill tracks after Corner.
+    for(let i=0; i<COLS.length; i++) {
+        const hCell = document.createElement('div');
+        hCell.className = 'cell-header';
+        hCell.textContent = COLS[i];
+        grid.appendChild(hCell);
+    }
+
+    // Generate Data Rows (Rows 2..11 in Grid Placement) - We will add RowHeader then Cells A-J. Total 11 items per data row.
+    for(let r=0; r<ROWS.length; r++) {
+        const rowNum = ROWS[r];
+        
+        // Row Header Cell at Col 1? It's the first child in this row of children in DOM order (since previous rows filled grid tracks). 
+        // Wait: The "first" item in each line goes to Track 1. So if we want alignment, we must ensure every logical row has exactly same count and structure relative to start.
+        
+        const rowHeaderDiv = document.createElement('div');
+        rowHeaderDiv.className = 'cell-header';
+        rowHeaderDiv.textContent = rowNum;
+        grid.appendChild(rowHeaderDiv);
+
+        // Cells A-J at Cols 2..11 (conceptually). These are the subsequent children.
+        for(let c=0; c<COLS.length; c++) {
+            const colLetter = COLS[c];
+            const cellId = `${colLetter}${rowNum}`;
+            
+            const inputEl = document.createElement('input');
+            inputEl.type = 'text'; // text to allow formulas.
+            inputEl.id = `cell-${cellId}`;
+            inputEl.className = 'cell-wrapper-input'; 
+            
+            // Add Event Listeners: Focus/Blur/Enter to trigger edit logic later.
+            
+            cellEls[cellId] = inputEl; 
+        }
+    }
+
+    // Global API Setup (window.sheet)
+    window.sheet = {
+        raw: (id) => { return rawValues.get(id) || ""; },
+        get: (id) => { 
+            const val = computeCellForDisplay(id);
+            if(val === undefined) return ""; 
+            else return String(val);
+        },
+        set: (id, text) => {
+            rawValues.set(id, text);
+            updateAllComputed();
+        }
+    };
+
+    // Attach listeners to all inputs dynamically after creation? They are already in DOM. I need to attach now or wait for init completion. 
+    for(let id in cellEls) {
+        const el = cellEls[id];
+        el.addEventListener('focus', () => { onCellFocus(el.id); });
+        el.addEventListener('blur', () => { onCellBlur(el.id); });
+        el.addEventListener('keydown', (e) => { if(e.key==='Enter') onCellBlur(el.id); });
+    }
+
+    // Export Button Listener
+    document.getElementById('export-btn').addEventListener('click', exportCSV);
+    
+    // Initial render of computed values for UI
+    updateAllComputed(); 
+    
+    // Ensure minimum visible size by adding a spacer or fixing grid dimensions if needed. 
+    // Since we rely on content, let's ensure inputs have sufficient height.
+    // In CSS I set `height:auto` for `.cell-header`, but input might be short. Let's style them to min-height 25px visually.
+    // But wait: "visible app must be at least 600x400 px". If content is small, it won't meet constraint. 
+    // So I'll force a minimum size on the container via CSS inline or class.
+    grid.style.height = 'min-content';
+}
+
+// Initialize Grid when DOM ready (or just after script)
+init();
+
+// Logic: Formula Parser & Evaluator
+function computeCellForDisplay(id) {
+    if (!evaluatingCells.has(id)) {
+        return evaluateCellValue(id);
+    } else {
+        // Cycle detected in current calculation path for this cell. 
+        // Return #CYCLE to propagate error? Or simply stop recursion.
+        // The spec says "Circular references display exactly #CYCLE". So the cell itself should show #CYCLE if it's part of cycle.
+        return "#CYCLE"; 
+    }
+}
+
+function evaluateCellValue(id) {
+    // If cell is being evaluated, we are deep in recursion -> Cycle!
+    if (evaluatingCells.has(id)) {
+        return "#CYCLE"; 
+    }
+
+    evaluatingCells.add(id);
+    
+    try {
+        const raw = getRawValue(id) || "";
+        
+        // Empty cell: display is empty string. In formula context, count as 0? Number("") -> 0. So returning "" works implicitly for math ops if we convert to Number later. But computeCellForDisplay returns display value (string). For internal calculation in other cells, we need numeric conversion.
+        
+        // Check if starts with '='
+        let expressionText;
+        if (raw.charAt(0) === '=') {
+            expressionText = raw.substring(1).trim();
+            if(expressionText === "") return ""; 
+        } else {
+            // Plain value -> Display as is. Return string directly for display purposes.
+            // In formula context, the caller will try to parseNumber(String(val)) later.
+            // Since we need "Non-numeric plain text displays as itself", returning raw covers that.
+            return raw; 
+        }
+
+        if(expressionText === "") return ""; 
+
+        const tokens = parseExpression(expressionText);
+        
+        let stack = [];
+        for(const token of tokens) {
+            if(token.type === 'num' || token.type === 'ref') {
+                // Handle ref: computeCellForDisplay returns value string. If it's a non-numeric plain text, Number() will be NaN -> #ERR later? 
+                const valStr = String(computeCellForDisplay(token.id));
+                if(!isFinite(Number(valStr))) { return "#ERR"; }
+                stack.push(Number(valStr));
+            } else { // Operator (type op)
+                if (stack.length < 2) throw new Error("Syntax Error");
+                const b = stack.pop();
+                const a = stack.pop();
+                
+                switch(token.val) {
+                    case '+': stack.push(a + b); break;
+                    case '-': stack.push(a - b); break;
+                    case '*': stack.push(a * b); break;
+                    case '/': 
+                        if (b === 0) throw new Error("Div Zero"); 
+                        else stack.push(a / b); 
+                        break;
+                    default: throw new Error("Unknown Op");
+                }
+            }
+        }
+
+        if(stack.length !== 1) {
+             // e.g. extra items on stack -> Syntax error (e.g. missing operand).
+             throw new Error("Syntax Error");
+        }
+        
+        return String(stack[0]); 
+
+    } catch(e) {
+        return "#ERR";
+    } finally {
+        evaluatingCells.delete(id);
+    }
+}
+
+function parseExpression(exprStr) {
+    const tokens = [];
+    let i = 0;
+    while(i < exprStr.length) {
+        if(exprStr[i] === ' ') { i++; continue; }
+        
+        // Parenthesis (, ) -> Operator type? Or special token for stack manipulation. 
+        // I'll handle them as operators in shunting yard logic but they aren't binary ops. They are parentheses tokens.
+        if(exprStr[i] === '(' || exprStr[i] === ')') {
+             tokens.push({type:'paren', val:exprStr[i]});
+             i++; continue;
+        }
+
+        // Operators + - * / (binary) -> Op type, precedence handled in shunting yard.
+        if(exprStr.indexOf('+-*/').includes(exprStr[i])) {
+             tokens.push({type:'op', val:exprStr[i++]}); 
+             continue;
+        }
+
+        // Number: digits and decimal point
+        let numStr = "";
+        while(i < exprStr.length && /[0-9.]/.test(exprStr[i])) {
+            numStr += exprStr[i++];
+        }
+        if(numStr !== "") {
+            tokens.push({type:'num', val: parseFloat(numStr)});
+            continue;
+        }
+
+        // Cell Reference: Letter A-J followed by digits (up to 2, row max 10). 
+        let id = "";
+        if(/[a-zA-Z]/i.test(exprStr[i])) {
+            const letter = exprStr[i].toUpperCase();
+            i++;
+            while(i < exprStr.length && /[0-9]/.test(exprStr[i])) {
+                id += exprStr[i++];
+            }
+            
+            // Validate Row Index (1..10) strictly? Or loosely accept any digits and validate later? 
+            if(id === "") { throw new Error("Invalid CellRef Syntax"); }
+
+            const rowIdx = parseInt(id);
+            if(isNaN(rowIdx) || rowIdx < 1 || rowIdx > 10) {
+                // Row out of bounds -> Invalid Ref
+                 throw new Error(`Row ${id} not in range`);
+            }
+
+            tokens.push({type:'ref', id: letter + id});
+        } else {
+             i++; continue; 
+        }
+    }
+
+    return shuntingYardToRPN(tokens);
+}
+
+function shuntingYardToRPN(tokenList) {
+    const output = [];
+    const stack = [];
+    
+    function prec(op) {
+        if (op === '+' || op === '-') return 1;
+        if (op === '*' || op === '/') return 2;
+        return 0;
+    }
+
+    for(const token of tokenList) {
+        if(token.type === 'num' || token.type === 'ref') {
+            output.push(token); // Operands.
+        } else if (token.val === '(') {
+            stack.push('(');
+        } else if (token.val === ')') {
+            while(stack.length > 0 && stack[stack.length-1] !== '(') {
+                output.push({type:'op', val: stack.pop()});
+            }
+            stack.pop(); // Remove '('.
+        } else if (token.type === 'op') {
+            const o1 = token.val;
+            while(stack.length > 0 && 
+                  stack[stack.length-1] !== '(' && 
+                  prec(stack[stack.length-1]) >= prec(o1)) {
+                output.push({type:'op', val: stack.pop()});
+            }
+            stack.push(o1);
+        } else if (token.type === 'paren') {
+             // Should not be reached here as parens handled above. 
+        }
+    }
+
+    while(stack.length > 0) {
+        const op = stack.pop();
+        if(op !== '(') output.push({type:'op', val:op});
+    }
+
+    return output;
+}
+
+// UI Logic Helpers
+function getRawValue(id) { return rawValues.get(id) || ""; }
+
+function onCellFocus(id) {
+    const el = cellEls[id];
+    if(el && id in cellEls) {
+        // Show raw text for editing (preserve current content, even if it's formula or plain value).
+        // If we want to show computed when not focused, and raw when focused. 
+        // But on focus, typically we want the user to see what they typed/selected last? Or re-eval?
+        // Spec: "When a cell is not being edited it displays its COMPUTED value; clicking into it shows the raw text for editing"
+        // So upon focus -> switch to show Raw Text (the stored string). 
+        el.value = getRawValue(id);
+    }
+}
+
+function onCellBlur(id) {
+    const el = cellEls[id];
+    if(!el) return;
+    
+    // User committed change. Update raw values and recalc UI.
+    const newText = el.value;
+    
+    if(newText !== getRawValue(id)) {
+        setCellValue(id, newText); 
+    } else {
+        // No change but ensure display matches computed (in case external changes?)
+        el.value = computeCellForDisplay(id) || "";
+    }
+}
+
+function updateAllComputed() {
+    for(let id of Object.keys(cellEls)) {
+        const el = cellEls[id];
+        if(!el.matches(':focus')) {
+            // Update display only. 
+            const computedVal = computeCellForDisplay(id);
+            el.value = (computedVal === undefined) ? "" : String(computedVal);
+        }
+    }
+}
+
+function setCellValue(id, text) {
+    rawValues.set(id, text);
+    updateAllComputed();
+}
+
+// Export Functionality
+function exportCSV() {
+    let csvContent = "";
+    
+    for(let r=0; r<ROWS.length; r++) {
+        const rowData = [];
+        for(let c=0; c<COLS.length; c++) {
+            const id = `${COLS[c]}${ROWS[r]}`;
+            // Get computed display value (string)
+            let val = computeCellForDisplay(id);
+            
+            if(val === undefined || val === "") rowData.push(""); 
+            else {
+                 // Escape quotes and newlines in cell values to be safe.
+                 let escaped = String(val);
+                 if(escaped.includes(',') || escaped.includes('"') || escaped.includes('\n')) {
+                     escaped = `"${escaped.replace(/"/g, '""')}"`;
+                 }
+                 rowData.push(escaped);
+            }
+        }
+        csvContent += rowData.join(",") + "\n";
+    }
+
+    document.getElementById('csv-textarea').value = csvContent;
+}
+</script>
+</body>
+</html>

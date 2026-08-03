@@ -24,7 +24,160 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
-## Unreleased
+## 0.7.5 — whose fault was the zero
+
+### Uptime: a zero now says whose fault it was
+A score of 0 meant two different things and the site showed them the same way:
+the model answered wrong, or the endpoint never let it answer. Both still count
+against the model — one you cannot get an answer out of is a worse one to buy —
+but they are now told apart.
+
+Every attempt is classified from what came back. Charged to the endpoint:
+`rate_limit` (429), `connect` (DNS, reset, dropped), `transport` (empty body
+with no tokens and no stop reason), and provider refusals matched on their own
+wording — capacity exhaustion, 5xx, "no instances available". Charged to the
+model: `runaway`, `format`, `timeout`, `repetition_loop`, a rejection for
+exceeding its own context window, and the CLI running out of turns. An
+unrecognised phrase falls to the model, which never invents an excuse for one.
+
+36 of 43 models sit at 100%. The seven that do not: laguna-s-2.1 **79.2%**
+(32 of 154 attempts, 28 of them 429s), nemotron-3-ultra-550b-a55b-free
+**92.4%** (13 of 170, twelve of them one endpoint admitting it was
+oversubscribed — once by a factor of three, "94/32"), then kimi-k2.7-code
+97.4%, gpt-5.6-terra 98.3%, minimax-m3 98.4%, ling-3.0-flash-free 99.3%,
+gemini-3.6-flash 99.4%.
+
+A leaderboard **Uptime** column, amber below 100%, hovering to the failing
+tasks and kinds; an *Endpoint availability* row on every model page naming
+them; and `#availability` on the info page stating the split, both lists, and
+that the wording match is best-effort.
+
+### A cell that never reached the provider is not a measurement
+One condition: if every attempt failed with `connect` and no tokens moved in
+either direction, no request was delivered, so nothing about the model was
+measured. No score, and the cell re-runs. Everything that made contact still
+earns what it earned — a full endpoint, an empty body, a runaway at the
+ceiling, a timeout, a 400 for exceeding the context window.
+
+It dropped exactly one recorded cell out of 3,623: gpt-5.6-terra on
+web-013-billiards, two attempts, connection reset then `getaddrinfo failed`
+against openrouter.ai — a resolver hiccup on the operator's machine, not a
+provider with a blocked hostname. It had published at 0.0 with the summary
+"run failed (all attempts errored)". That task now reads 0.975 from four
+scored runs of five, and the badge says "×4/5 — 1 unscored, left out" and
+names the run. metrics.json and the transcript stay, so the drop is visible
+rather than silent. Four runs at 0.96–0.98 do not dilute a zero at n=5: it was
+costing 0.195 on a frontier task.
+
+### Startup 42s → 11s, and the slowest part was getting slower every week
+Measured with cProfile, then before and after in fresh processes against the
+same warm data.
+
+The LM Studio log reader was quadratic: for every request marker it sliced the
+whole remaining file and `splitlines()` the slice. 9,982 requests now parse in
+4.5s instead of 119s, output identical field by field. That cost grew with the
+size of the server logs, which only accumulate — which is why startup had
+drifted back up on its own.
+
+`load_models` re-parsed all 52 yamls per call, and one `generate_all` called it
+60 times plus `get_model` 43 — 3,898 `yaml.safe_load`. Parsed fields now cache
+per file on `(mtime_ns, size)` and deep-copy out, so a backend-page edit is
+picked up on the next read and no caller can poison the cache. Within one
+generation `load_all_runs` ran 7 times, `load_tasks` 14 and
+`collect_task_data` 54; they now share one snapshot, keyed by directory and
+released in a `finally`. Templates were recompiled per page: 147 jinja
+compilations, now once each.
+
+Proof it changed nothing: the whole site rendered with caches on and off in one
+process — 148 files, every SHA-256 identical, 14.3s against 6.0s.
+
+### Pick which avenues the cost probe runs
+The direct API cost compare ran cli, api and gateway on every ticked cell every
+time. An avenue picker now sits beside the trials box. Unknown names are
+refused by name; none ticked never leaves the page.
+
+Two things had to follow. The shortfall was avenue-blind — `results()` reports
+a cell's trials as the minimum across every avenue it expects, and 0 whenever
+one is missing, so after the CLI purge every cell read "short" and a top-up
+would have re-run and re-billed the api and gateway legs that were already
+done. Counting is now per (compare_key, task, avenue) and a leg at target is
+skipped even when its cell is not, so ticking all three is cheaper than it was.
+The done badge read the same blind number and now counts only ticked avenues.
+
+Also scoped the apicost selectors to `input[data-am]`: the shared done-bar
+injects its own "include completed" checkbox into the same box, so "Select all"
+was ticking it as a cell and the selection posted a key of `"undefined"`.
+
+### do_GET and do_POST become route tables
+598 lines and 29 branches down to 8, then 292 lines and 33 branches down to 17.
+Each `elif self.path == …` became a `_post_*` / `_get_*` method; 30 of the GET
+branches matched a constant or a tuple of aliases, so `/info`, `/info/` and
+`/info.html` now share one handler instead of three near-identical branches.
+Three GET branches are prefixes and stay explicit after the lookup — safe only
+because no exact route lives under any of them, which the rewrite proved and a
+test keeps true, since a dict has no line order to settle it.
+
+Verified structurally: every extracted body was asserted AST-identical to its
+branch before the file was written, then all 49 exact paths exercised against a
+live server. Two answer 404 without a `?name=`, exactly as before, and `/` and
+`/index.html` hash identically. The body is still read before the 404 path
+returns — skipping that leaves it queued on a keep-alive connection and the
+next request on the socket misparses.
+
+`review.Handler` and `viewer.Handler` also carried byte-identical
+`log_message`, `_send`, `_json`, `_send_run_data` and `CTYPES`; review now
+inherits them and overrides only `_send_file`. No duplicate function bodies
+remain in the tree. A reported nesting depth of 34 in `do_GET` was an artifact
+of counting `elif` as nesting — real depth was 5, and is now 2.
+
+## 0.7.4 — the run tells you what it will cost
+
+### Local models stop reloading once per trial
+`--repeat N` wrapped the whole suite, so a local model with B context buckets
+paid B×N loads in the cycle ctx1,ctx2,…,ctx1,ctx2,… `run_model_cycles` inverts
+it: load a bucket once, then run that bucket's whole task list N times, writing
+cycle *i* into the *i*th run dir. Measured on ornith-1.0-9b over two buckets at
+`--repeat 2`: 2 loads instead of 4.
+
+The N run dirs are pre-created and filled interleaved. That is forced by storage
+— `runs/<id>/<model>/<task>/` has no per-attempt level, so N attempts of a cell
+need N dirs — and it keeps aggregation, coverage, reports and the mirror
+untouched. Manifests carry `cycle`/`cycles`/`cycle_group`; `run.log` is written
+to every cycle's dir; the three abandon paths mark all N manifests.
+
+`repeat=1` and every cloud/CLI model keep the old path exactly, so the change
+cannot affect a normal sweep.
+
+**A cycle reuses the previous cycle's KV cache.** Measured on
+ctx-008-recall-128k: cycle 1 took 288.7s and 22,055 output tokens, cycle 2 took
+18.0s and 1,381, on byte-identical input. Repeat variance now measures model
+nondeterminism *plus* cache warmth rather than load-to-load variance, and
+wall-time is not comparable across cycles of one load. Timing-scored tasks
+should not be repeat-run this way until that is resolved.
+
+### The run banner reports the plan instead of promising one
+It printed "will cycle Nx per context load" before the load plan existed, which
+says nothing about how many loads there will be — the number that matters. It now
+prints, per model, the count from `load_plan` and every context in it:
+`2 model load(s), each running all 2 cycles — was 4 loads. 81,920 max (1 task) +
+212,992 auto (1 task)`. A test asserts the count comes from `len(load_plan(…))`,
+and another fails if either caller prints its own promise again.
+
+### CLI `harness run` crashed at report generation
+A redundant function-local `from . import report` inside the `hardened` branch
+made `report` local to all of `cmd_run`, so `report.generate_all()` raised
+`UnboundLocalError` for every `--tasks` value except `hardened`. Run data was
+always saved; only the report step died. The web `/run` page goes through
+`jobs.py` and was never affected, which is why it survived unnoticed. An AST test
+now fails on any function-local import of a module-level name in that file.
+
+### One definition of the hardened predicate
+`("hard", "frontier")` appeared in four places: `hardened_ids`, a set-comprehension
+in the `/run` handler, a per-task boolean beside it, and a subset union in
+`report`. All four now go through `HARDENED_TIERS` / `is_hardened` /
+`hardened_from_stats`, and a test greps `harness/` to assert the tuple appears
+exactly once. The visible effect is that `hard_todo` is sorted rather than
+set-ordered, so the "finish sweep #N+1" list is stable between requests.
 
 ### The public export is now serveable on a domain
 It had no `robots.txt`, `sitemap.xml`, `llms.txt`, favicon, meta description,
@@ -55,6 +208,76 @@ emitted them unconditionally: 476 guaranteed 404s across the five archived
 datasets. `_nav` now drops any page the current dataset does not render, and a
 test asserts `_LIVE_ONLY` against what `generate_all` actually writes, so adding a
 live-only page cannot re-open this.
+
+### The Claude API becomes a measured avenue of its own
+Twelve `claude-api-*` twins now run the full suite as scored entries beside the
+CLI ones, so the same model is measured two ways. `/special`'s direct API cost
+compare probes one model across all three avenues; the cheapest-ten selector
+picks the tasks that cost least to re-measure. The Anthropic key is entered on
+the backend page like every other key, never by hand in a file.
+
+Claude's CLI cells carry no dollar figure. The estimate that would convert one
+avenue to the other was refuted by measurement: `claude -p` is a different
+agent, not a wrapper — 565,830 input tokens over 14 turns against 30,239 over
+12 through the API, sixteen times as much per turn. The leaderboard reports the
+CLI as-run and states that a subscription price is not a per-token price.
+
+### The API key was billing runs that a subscription had already paid for
+Adding `ANTHROPIC_API_KEY` to `.env` put it in the harness's environment, and
+`Popen` handed that environment to `claude -p`, which prefers a key over the
+logged-in subscription. 432 cells billed a real balance, about $35. The credit
+then ran out and 345 further attempts came back "Credit balance is too low" and
+were scored 0.00 — publishing `claude-cli-sonnet-5` at 0.4806 when its real
+figure is 0.9447. Every poisoned cell has been purged from `runs/` and
+`special/`; those legs are free to re-run on the subscription.
+
+Three fixes, because one was not enough. No credential reaches a child process:
+`util.child_env()` scrubs anything matching a secret prefix, suffix or exact
+name, and it is now the default environment for `run_capped` and for the
+checker that executes model-written code. A billing failure is classified
+`infra` and is not retryable, so it drops the model unscored instead of scoring
+a zero once per task. And a run that cannot be paid for does not start.
+
+### Check the balance before the run, and stop at a ceiling
+`run_suite` estimates the billable cost from what each model·task pair has cost
+before, asks each provider what is left, and refuses if the money is not there;
+`--force` still overrides. OpenRouter reports both a credit balance and a
+per-key period limit, and the smaller one is what actually stops a run, so that
+is the number used — $120 granted against $93.78 used still leaves only $9.49
+for the week, and the balance alone would have greenlit a run that dies partway.
+
+The second guard is a hard ceiling. Realised cost feeds a tracker as tasks
+complete; passing the ceiling aborts the run and keeps everything recorded so
+far. It is opt-in, set on the backend page beside the keys, and overridden by
+`MAX_SPEND_USD` in the environment. Anthropic exposes no balance on a standard
+key and a subscription has none at all — both say so rather than reading as
+unlimited.
+
+### Run asks before it spends, but only when it would
+Clicking Run opens a confirmation only when the selection contains an API
+model; local-only and subscription-only runs start as before, because a dialog
+on a run that spends nothing is a click that trains you to dismiss the one that
+matters. The dialog is built from the same preflight that guards the run, so
+the two cannot disagree.
+
+It splits the total into what the selected pairs have cost before and what is
+projected for pairs never run, and shows how many of each model's pairs have
+actually been measured. A projection prices peer token counts at that model's
+own rate rather than averaging its provider's dollars: opus and haiku are
+fifteen times apart, and the dollar average quoted opus at $10.44 against an
+honest $26.34. Cells with no comparable data at all count as $0 and the dialog
+says the real bill will be higher. Balance objections appear in the dialog and
+the button reads "Run anyway".
+
+### One HTTP transport, and a nesting depth that was not real
+`review.Handler` and `viewer.Handler` carried byte-identical `log_message`,
+`_send`, `_json`, `_send_run_data` and `CTYPES`. `review.Handler` now inherits
+them and overrides only `_send_file`, the one that differs. No duplicate
+function bodies remain in the tree.
+
+A reported nesting depth of 34 in `do_GET` was an artifact of counting `elif` as
+nesting; the real depth is 5 over a 33-branch flat dispatch. Seven functions in
+the whole tree reach depth 4 and none exceed 5.
 
 ## 0.7.3 — a links page, and every comment out of the tree
 

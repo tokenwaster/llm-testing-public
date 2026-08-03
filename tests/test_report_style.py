@@ -330,3 +330,65 @@ def test_live_only_pages_match_what_generate_all_actually_writes():
     for page in report._LIVE_ONLY:
         assert page in body, (
             f"{page} is in _LIVE_ONLY but not written in the live-only block")
+
+
+def test_no_css_or_js_comments_survive_inside_page_strings():
+    import io
+    import re
+    import tokenize
+
+    from harness import config
+    css = re.compile(r"/\*[^*\n]*\*/")
+    js = re.compile(r"(?<=[;{},)])[ \t]+//[^\n]*$", re.M)
+    found = []
+    for name in ("report.py", "review.py"):
+        p = config.ROOT / "harness" / name
+        src = p.read_text(encoding="utf-8").replace("\r\n", "\n")
+        for t in tokenize.generate_tokens(io.StringIO(src).readline):
+            if t.type != tokenize.STRING:
+                continue
+            for m in css.finditer(t.string):
+                if m.group(0) == "/*/*/":
+                    continue
+                found.append(f"{name} line ~{t.start[0]}: {m.group(0)[:60]}")
+            for m in js.finditer(t.string):
+                found.append(f"{name} line ~{t.start[0]}: {m.group(0).strip()[:60]}")
+    assert not found, (
+        "markup comments inside a page string are invisible to Python's "
+        "tokenizer, so a plain source scan misses them:\n  "
+        + "\n  ".join(found))
+
+
+def test_the_compare_dropdowns_are_alphabetical_not_ranked():
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    assert "D.names.map(m =>" in src, (
+        "the option list must come from the alphabetical D.names, not the "
+        "score-ranked D.models")
+    assert '"names": sorted(ranked, key=str.lower)' in src
+    assert "D.models[0]" in src and "D.models[1]" in src, (
+        "the default pair should stay the top two by score")
+
+
+def test_the_swap_button_sits_in_the_same_grid_column_as_the_divider():
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    row = re.search(r"\n\.cmp-row \{[^}]*grid-template-columns:([^;]+);", src)
+    pick = re.search(r"\n\.cmp-pick \{[^}]*grid-template-columns:([^;]+);", src)
+    assert pick, ".cmp-pick must be a grid to line up with the data rows"
+    assert row.group(1).strip() == pick.group(1).strip(), (
+        f"the picker grid {pick.group(1)!r} must match the row grid "
+        f"{row.group(1)!r}, or the swap button drifts off the divider")
+    assert '<span class="cmp-lead"></span>' in src, (
+        "an empty leading cell is what pushes selA into the row's 2nd column")
+    assert "justify-self:center" in re.search(
+        r"\n\.cmp-swap \{[^}]*\}", src).group(0)
+
+
+def test_the_picker_stacks_on_a_narrow_screen():
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    i = src.index(".cmp-swap:hover")
+    window = src[max(0, i - 500):i]
+    assert "@media (max-width:760px)" in window
+    block = window[window.index("@media (max-width:760px)"):]
+    assert "grid-template-columns:1fr" in block
+    assert ".cmp-lead { display:none" in block, (
+        "the spacer must collapse or it eats a whole stacked row")

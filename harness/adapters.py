@@ -104,7 +104,29 @@ def _retry_after_s(headers, body: str) -> float | None:
     return None
 
 
+_INFRA_PHRASES = (
+    "credit balance is too low",
+    "insufficient credit",
+    "insufficient funds",
+    "insufficient_quota",
+    "quota exceeded",
+    "billing",
+    "payment required",
+    "account is not active",
+    "spending limit",
+    "no credit",
+)
+
+
+def _is_infra_failure(text: str) -> bool:
+    low = (text or "").lower()
+    return any(p in low for p in _INFRA_PHRASES)
+
+
 def _classify_http(status: int, body: str, headers=None) -> AdapterError:
+    if _is_infra_failure(body):
+        return AdapterError(f"HTTP {status}: {body[:300]}", kind="infra",
+                            retryable=False)
     if status in (401, 403):
         return AdapterError(f"HTTP {status}: {body[:300]}", kind="auth", retryable=False)
     if status == 429:
@@ -473,11 +495,16 @@ class AnthropicAdapter(BaseAdapter):
                 tool_calls.append(ToolCall(id=block["id"], name=block["name"],
                                            args=block.get("input") or {}))
         usage = data.get("usage") or {}
+        cache_read = usage.get("cache_read_input_tokens") or 0
+        cache_write = usage.get("cache_creation_input_tokens") or 0
+        base_in = usage.get("input_tokens")
         return ChatResult(
             text="".join(text_parts),
             total_ms=total,
-            tokens_in=usage.get("input_tokens"),
+            tokens_in=((base_in or 0) + cache_read + cache_write) or None,
             tokens_out=usage.get("output_tokens"),
+            cache_read_tokens=cache_read or None,
+            cache_write_tokens=cache_write or None,
             stop_reason=data.get("stop_reason"),
             tool_calls=tool_calls,
         )
@@ -488,6 +515,7 @@ class AnthropicAdapter(BaseAdapter):
         ttft = None
         text_parts: list[str] = []
         tokens_in = tokens_out = None
+        cache_read = cache_write = 0
         stop_reason = None
         try:
             with httpx.stream("POST", self._url(), headers=self._headers(), json=payload,
@@ -503,7 +531,11 @@ class AnthropicAdapter(BaseAdapter):
                         continue
                     etype = data.get("type")
                     if etype == "message_start":
-                        tokens_in = (data.get("message", {}).get("usage") or {}).get("input_tokens")
+                        u0 = (data.get("message", {}).get("usage") or {})
+                        cache_read = u0.get("cache_read_input_tokens") or 0
+                        cache_write = u0.get("cache_creation_input_tokens") or 0
+                        tokens_in = ((u0.get("input_tokens") or 0)
+                                     + cache_read + cache_write) or None
                     elif etype == "content_block_delta":
                         piece = (data.get("delta") or {}).get("text")
                         if piece:
@@ -527,6 +559,8 @@ class AnthropicAdapter(BaseAdapter):
             ttft_ms=ttft,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            cache_read_tokens=cache_read or None,
+            cache_write_tokens=cache_write or None,
             stop_reason=stop_reason,
         )
 
@@ -602,6 +636,9 @@ class ClaudeCLIAdapter(BaseAdapter):
                     + (f" — {disp}" if disp else ""),
                     kind="usage_limit", retryable=False,
                     reset_at=reset_at, reset_hint=reset_hint)
+            if _is_infra_failure(str(detail)):
+                raise AdapterError(f"claude CLI failed: {str(detail)[:300]}",
+                                   kind="infra", retryable=False)
             raise AdapterError(f"claude CLI failed: {str(detail)[:300]}",
                                kind="api", retryable=True)
         usage = data.get("usage") or {}
@@ -662,6 +699,16 @@ def _safe_json(text: str) -> dict:
 from .util import terminate_tree as _terminate_tree
 
 
+CLI_BILLING_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                    "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+                    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+
+
+def _cli_env() -> dict:
+    from .util import child_env
+    return child_env()
+
+
 def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str,
                        timeout_s: int) -> dict:
     import json as _json
@@ -681,7 +728,7 @@ def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str,
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, cwd=cwd, text=True,
         encoding="utf-8", errors="replace", bufsize=1,
-        start_new_session=True)
+        env=_cli_env(), start_new_session=True)
 
     lines: _queue.Queue = _queue.Queue()
 
