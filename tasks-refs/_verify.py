@@ -18,6 +18,16 @@ def verify(task_dir: Path) -> bool:
     t = _T(meta)
     ans = str(meta["scoring"]["answer"])
     mt = meta["scoring"].get("match", "exact")
+    if mt == "regex":
+        own = task_dir.parent.parent / "tasks-refs" / task_dir.name / "verify.py"
+        print(f"\n{task_dir.name}  (match=regex)")
+        print("  the key is a pattern, so no correct response can be derived "
+              "from it here.")
+        print(f"  this task must ship its own verifier: {own.name} beside its "
+              "generator, asserting a correct answer scores 1.0 and the trap "
+              "answers score 0.")
+        return (task_dir.parent.parent / "tasks-refs" / task_dir.name
+                / "verify.py").exists()
     wrong = "0" if mt == "numeric" else "DEFINITELY-WRONG-XYZ"
     cases = {
         "correct": (f"Working it out...\nANSWER: {ans}", 1.0),

@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Spreadsheet</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        }
+        body {
+            margin: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #f5f6f8;
+        }
+        #app {
+            min-width: 600px;
+            min-height: 400px;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        #spreadsheet-container {
+            overflow: auto;
+            flex: 1;
+            min-height: 340px;
+        }
+        #spreadsheet {
+            display: grid;
+            grid-template-columns: 44px repeat(10, minmax(70px, 1fr));
+            grid-template-rows: 36px repeat(10, 32px);
+            gap: 1px;
+            background: #c0c4cc;
+            border: 1px solid #c0c4cc;
+            border-radius: 4px;
+            min-width: fit-content;
+        }
+        .corner {
+            background: #f0f1f3;
+            border: none;
+        }
+        .col-header {
+            background: #f0f1f3;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 13px;
+            color: #2c3e50;
+            user-select: none;
+            border: none;
+        }
+        .row-header {
+            background: #f0f1f3;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 13px;
+            color: #2c3e50;
+            user-select: none;
+            border: none;
+        }
+        .cell {
+            border: none;
+            padding: 2px 6px;
+            font-size: 13px;
+            background: #fff;
+            outline: none;
+            transition: background 0.1s;
+            width: 100%;
+            height: 100%;
+            min-width: 0;
+            box-sizing: border-box;
+            font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+        }
+        .cell:focus {
+            background: #fffde7;
+            box-shadow: inset 0 0 0 2px #4a90d9;
+            z-index: 2;
+            position: relative;
+        }
+        .cell.cycle {
+            color: #d32f2f;
+            font-weight: 600;
+        }
+        .cell.err {
+            color: #d32f2f;
+            font-weight: 600;
+        }
+        #toolbar {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        #export {
+            background: #4a90d9;
+            color: #fff;
+            border: none;
+            padding: 8px 20px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        #export:hover {
+            background: #357abd;
+        }
+        #export:active {
+            background: #2a5f9e;
+        }
+        #csv {
+            width: 100%;
+            height: 80px;
+            font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+            padding: 8px;
+            border: 1px solid #c0c4cc;
+            border-radius: 4px;
+            resize: vertical;
+            background: #fafbfc;
+            color: #2c3e50;
+        }
+        label {
+            font-size: 13px;
+            color: #555;
+            font-weight: 500;
+        }
+        @media (max-width: 640px) {
+            #app {
+                min-width: unset;
+                width: 100%;
+                padding: 8px;
+            }
+            #spreadsheet {
+                grid-template-columns: 36px repeat(10, minmax(60px, 1fr));
+                grid-template-rows: 30px repeat(10, 28px);
+            }
+            .cell { font-size: 12px; padding: 1px 4px; }
+        }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div id="toolbar">
+        <button id="export">Export CSV</button>
+        <label for="csv">CSV Output:</label>
+    </div>
+    <div id="spreadsheet-container">
+        <div id="spreadsheet"></div>
+    </div>
+    <textarea id="csv" placeholder="CSV output will appear here…" readonly></textarea>
+</div>
+<script>
+(function() {
+    'use strict';
+
+    const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+    const ROWS = [1,2,3,4,5,6,7,8,9,10];
+    const CELL_IDS = [];
+    for (let r = 0; r < 10; r++) {
+        for (let c = 0; c < 10; c++) {
+            CELL_IDS.push(COLS[c] + ROWS[r]);
+        }
+    }
+
+    // ----- Data -----
+    const rawData = {};      // cellId -> raw string
+    const computedData = {}; // cellId -> display string
+    CELL_IDS.forEach(id => { rawData[id] = ''; computedData[id] = ''; });
+
+    // ----- DOM references -----
+    const spreadsheetEl = document.getElementById('spreadsheet');
+    const csvTextarea = document.getElementById('csv');
+    const exportBtn = document.getElementById('export');
+
+    // ----- Build grid -----
+    function buildGrid() {
+        spreadsheetEl.innerHTML = '';
+        // Corner
+        const corner = document.createElement('div');
+        corner.className = 'corner';
+        spreadsheetEl.appendChild(corner);
+        // Column headers
+        for (let c = 0; c < 10; c++) {
+            const h = document.createElement('div');
+            h.className = 'col-header';
+            h.textContent = COLS[c];
+            spreadsheetEl.appendChild(h);
+        }
+        // Rows
+        for (let r = 0; r < 10; r++) {
+            const rh = document.createElement('div');
+            rh.className = 'row-header';
+            rh.textContent = ROWS[r];
+            spreadsheetEl.appendChild(rh);
+            for (let c = 0; c < 10; c++) {
+                const id = COLS[c] + ROWS[r];
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.id = 'cell-' + id;
+                input.className = 'cell';
+                input.dataset.cell = id;
+                input.autocomplete = 'off';
+                input.spellcheck = false;
+                spreadsheetEl.appendChild(input);
+            }
+        }
+    }
+    buildGrid();
+
+    // ----- Formula engine -----
+    // Tokenizer
+    function tokenize(s) {
+        const tokens = [];
+        let i = 0;
+        while (i < s.length) {
+            const ch = s[i];
+            if (ch === ' ') { i++; continue; }
+            // Number
+            if (/\d/.test(ch) || (ch === '.' && i+1 < s.length && /\d/.test(s[i+1]))) {
+                let num = '';
+                while (i < s.length && (/\d/.test(s[i]) || s[i] === '.')) {
+                    num += s[i];
+                    i++;
+                }
+                tokens.push({ type: 'NUMBER', value: parseFloat(num) });
+                continue;
+            }
+            // Cell reference
+            if (/[A-Za-z]/.test(ch)) {
+                let ref = '';
+                while (i < s.length && /[A-Za-z0-9]/.test(s[i])) {
+                    ref += s[i].toUpperCase();
+                    i++;
+                }
+                if (/^[A-J](10|[1-9])$/.test(ref)) {
+                    tokens.push({ type: 'CELLREF', value: ref });
+                } else {
+                    throw new Error('Invalid cell reference: ' + ref);
+                }
+                continue;
+            }
+            // Operators and parentheses
+            if ('+-*/()'.includes(ch)) {
+                tokens.push({ type: ch });
+                i++;
+                continue;
+            }
+            throw new Error('Unexpected character: ' + ch);
+        }
+        return tokens;
+    }
+
+    // Shunting-yard to RPN
+    function toRPN(tokens) {
+        const output = [];
+        const stack = [];
+        const prec = { '+': 1, '-': 1, '*': 2, '/': 2, 'UMINUS': 3 };
+        let prev = null;
+        for (const tok of tokens) {
+            if (tok.type === 'NUMBER' || tok.type === 'CELLREF') {
+                output.push(tok);
+            } else if (tok.type === '(') {
+                stack.push(tok);
+            } else if (tok.type === ')') {
+                while (stack.length && stack[stack.length-1].type !== '(') {
+                    output.push(stack.pop());
+                }
+                if (!stack.length || stack[stack.length-1].type !== '(') {
+                    throw new Error('Mismatched parentheses');
+                }
+                stack.pop(); // remove '('
+            } else if ('+-*/'.includes(tok.type)) {
+                // Detect unary minus
+                if (tok.type === '-' && (!prev || prev.type === '(' || '+-*/'.includes(prev.type))) {
+                    stack.push({ type: 'UMINUS' });
+                } else {
+                    while (stack.length && '+-*/UMINUS'.includes(stack[stack.length-1].type) &&
+                           prec[tok.type] <= prec[stack[stack.length-1].type]) {
+                        output.push(stack.pop());
+                    }
+                    stack.push(tok);
+                }
+            }
+            prev = tok;
+        }
+        while (stack.length) {
+            const op = stack.pop();
+            if (op.type === '(') throw new Error('Mismatched parentheses');
+            output.push(op);
+        }
+        return output;
+    }
+
+    // Evaluate RPN given a cell value resolver
+    function evaluateRPN(rpn, getVal) {
+        const stack = [];
+        for (const tok of rpn) {
+            if (tok.type === 'NUMBER') {
+                stack.push(tok.value);
+            } else if (tok.type === 'CELLREF') {
+                const v = getVal(tok.value);
+                if (typeof v !== 'number' || isNaN(v)) {
+                    throw new Error('Non-numeric value in cell ' + tok.value);
+                }
+                stack.push(v);
+            } else if (tok.type === '+') {
+                const b = stack.pop(), a = stack.pop();
+                stack.push(a + b);
+            } else if (tok.type === '-') {
+                const b = stack.pop(), a = stack.pop();
+                stack.push(a - b);
+            } else if (tok.type === '*') {
+                const b = stack.pop(), a = stack.pop();
+                stack.push(a * b);
+            } else if (tok.type === '/') {
+                const b = stack.pop(), a = stack.pop();
+                if (b === 0) throw new Error('Division by zero');
+                stack.push(a / b);
+            } else if (tok.type === 'UMINUS') {
+                const a = stack.pop();
+                stack.push(-a);
+            }
+        }
+        if (stack.length !== 1) throw new Error('Invalid expression');
+        const result = stack[0];
+        if (!isFinite(result)) throw new Error('Invalid numeric result');
+        return result;
+    }
+
+    // Find cell references in a formula string
+    function findCellReferences(formula) {
+        const refs = [];
+        const re = /[A-Za-z][A-Za-z0-9]*/g;
+        let m;
+        while ((m = re.exec(formula)) !== null) {
+            const ref = m[0].toUpperCase();
+            if (/^[A-J](10|[1-9])$/.test(ref)) {
+                if (!refs.includes(ref)) refs.push(ref);
+            }
+        }
+        return refs;
+    }
+
+    // ----- Dependency & Cycle Detection -----
+    function buildDeps() {
+        const deps = {};
+        CELL_IDS.forEach(id => {
+            const raw = rawData[id];
+            if (raw.startsWith('=')) {
+                try {
+                    deps[id] = findCellReferences(raw.substring(1));
+                } catch (e) {
+                    deps[id] = [];
+                }
+            } else {
+                deps[id] = [];
+            }
+        });
+        return deps;
+    }
+
+    // Find all cells that are in cycles or depend on cycles
+    function findCyclicAndAffected(deps) {
+        const color = {}; // 'white', 'gray', 'black'
+        const inCycle = {};
+        const stack = [];
+        CELL_IDS.forEach(id => { color[id] = 'white'; });
+
+        function dfs(node) {
+            color[node] = 'gray';
+            stack.push(node);
+            for (const dep of deps[node]) {
+                if (!CELL_IDS.includes(dep)) continue;
+                if (color[dep] === 'gray') {
+                    // Cycle found: mark from dep to top of stack
+                    const idx = stack.indexOf(dep);
+                    if (idx !== -1) {
+                        for (let i = idx; i < stack.length; i++) {
+                            inCycle[stack[i]] = true;
+                        }
+                    }
+                } else if (color[dep] === 'white') {
+                    dfs(dep);
+                }
+            }
+            stack.pop();
+            color[node] = 'black';
+        }
+
+        CELL_IDS.forEach(id => {
+            if (color[id] === 'white') dfs(id);
+        });
+
+        // Now propagate: any cell that depends (transitively) on a cyclic cell is also affected
+        // Build reverse deps (dependents)
+        const dependents = {};
+        CELL_IDS.forEach(id => { dependents[id] = []; });
+        for (const id of CELL_IDS) {
+            for (const dep of deps[id]) {
+                if (CELL_IDS.includes(dep)) {
+                    dependents[dep].push(id);
+                }
+            }
+        }
+
+        // BFS from cyclic cells
+        const affected = { ...inCycle };
+        const queue = Object.keys(inCycle);
+        while (queue.length) {
+            const node = queue.shift();
+            for (const dep of dependents[node]) {
+                if (!affected[dep]) {
+                    affected[dep] = true;
+                    queue.push(dep);
+                }
+            }
+        }
+        return affected;
+    }
+
+    // ----- Recompute all cells -----
+    function recomputeAll() {
+        const deps = buildDeps();
+        const affected = findCyclicAndAffected(deps);
+
+        // Build topological order for non-affected cells using Kahn's algorithm
+        const inDegree = {};
+        const graph = {};
+        CELL_IDS.forEach(id => {
+            if (!affected[id]) {
+                inDegree[id] = 0;
+                graph[id] = [];
+            }
+        });
+        for (const id of CELL_IDS) {
+            if (affected[id]) continue;
+            for (const dep of deps[id]) {
+                if (CELL_IDS.includes(dep) && !affected[dep]) {
+                    graph[dep].push(id);
+                    inDegree[id] = (inDegree[id] || 0) + 1;
+                }
+            }
+        }
+
+        const queue = [];
+        for (const id of CELL_IDS) {
+            if (!affected[id] && inDegree[id] === 0) {
+                queue.push(id);
+            }
+        }
+
+        const order = [];
+        while (queue.length) {
+            const id = queue.shift();
+            order.push(id);
+            for (const dep of graph[id]) {
+                inDegree[dep]--;
+                if (inDegree[dep] === 0) queue.push(dep);
+            }
+        }
+
+        // Compute values for non-affected cells in order
+        const computed = {};
+        CELL_IDS.forEach(id => { computed[id] = undefined; });
+
+        // Helper to get a cell's numeric value for formula evaluation
+        function getCellValue(id) {
+            if (affected[id]) throw new Error('Cycle');
+            if (computed[id] !== undefined) return computed[id];
+            // Should not happen if topological order is correct
+            throw new Error('Not yet computed: ' + id);
+        }
+
+        for (const id of order) {
+            const raw = rawData[id];
+            if (raw.startsWith('=')) {
+                try {
+                    const formula = raw.substring(1);
+                    const tokens = tokenize(formula);
+                    const rpn = toRPN(tokens);
+                    const val = evaluateRPN(rpn, getCellValue);
+                    computed[id] = val;
+                } catch (e) {
+                    computed[id] = '#ERR';
+                }
+            } else {
+                // Plain value
+                const trimmed = raw.trim();
+                if (trimmed === '') {
+                    computed[id] = 0;
+                } else if (!isNaN(Number(trimmed)) && trimmed !== '') {
+                    computed[id] = Number(trimmed);
+                } else {
+                    computed[id] = raw; // display as itself
+                }
+            }
+        }
+
+        // Fill in affected cells
+        for (const id of CELL_IDS) {
+            if (affected[id]) {
+                computedData[id] = '#CYCLE';
+            } else if (computed[id] === undefined) {
+                // Should not happen, but safety
+                computedData[id] = '#ERR';
+            } else if (computed[id] === '#ERR') {
+                computedData[id] = '#ERR';
+            } else if (typeof computed[id] === 'number') {
+                const str = String(computed[id]);
+                // If it's a whole number, don't show decimals
+                computedData[id] = Number.isInteger(computed[id]) ? String(computed[id]) : str;
+            } else {
+                computedData[id] = String(computed[id]);
+            }
+        }
+
+        // Edge case: cells that are not in affected but have #ERR from evaluation
+        for (const id of CELL_IDS) {
+            if (!affected[id] && computed[id] === '#ERR') {
+                computedData[id] = '#ERR';
+            }
+        }
+    }
+
+    // ----- Update display -----
+    function updateDisplay() {
+        for (const id of CELL_IDS) {
+            const input = document.getElementById('cell-' + id);
+            if (!input) continue;
+            // Only update if the input is not focused
+            if (document.activeElement !== input) {
+                input.value = computedData[id] || '';
+                input.className = 'cell';
+                if (computedData[id] === '#CYCLE') input.classList.add('cycle');
+                if (computedData[id] === '#ERR') input.classList.add('err');
+            }
+        }
+    }
+
+    // ----- Full refresh (recompute + display) -----
+    function refresh() {
+        recomputeAll();
+        updateDisplay();
+    }
+
+    // ----- Set a cell value (programmatic or internal) -----
+    function setCellValue(id, value) {
+        if (!CELL_IDS.includes(id)) return;
+        rawData[id] = String(value);
+        refresh();
+        // If the cell is currently focused, update its display value
+        const input = document.getElementById('cell-' + id);
+        if (input && document.activeElement !== input) {
+            input.value = computedData[id] || '';
+        }
+    }
+
+    // ----- Event handling for cells -----
+    function setupCellEvents() {
+        for (const id of CELL_IDS) {
+            const input = document.getElementById('cell-' + id);
+            if (!input) continue;
+
+            let focusValue = '';
+
+            input.addEventListener('focus', function() {
+                // Show raw text when editing
+                focusValue = rawData[id] || '';
+                this.value = focusValue;
+                this.select();
+            });
+
+            input.addEventListener('blur', function() {
+                const newValue = this.value;
+                if (newValue !== focusValue) {
+                    // Value changed
+                    setCellValue(id, newValue);
+                } else {
+                    // No change, just restore computed display
+                    this.value = computedData[id] || '';
+                    this.className = 'cell';
+                    if (computedData[id] === '#CYCLE') this.classList.add('cycle');
+                    if (computedData[id] === '#ERR') this.classList.add('err');
+                }
+            });
+
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    this.blur();
+                }
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this.value = computedData[id] || '';
+                    this.blur();
+                }
+            });
+        }
+    }
+    setupCellEvents();
+
+    // ----- Export CSV -----
+    function exportCSV() {
+        const lines = [];
+        for (let r = 0; r < 10; r++) {
+            const row = [];
+            for (let c = 0; c < 10; c++) {
+                const id = COLS[c] + ROWS[r];
+                const val = computedData[id] || '';
+                // Escape commas and quotes
+                let escaped = String(val);
+                if (escaped.includes(',') || escaped.includes('"') || escaped.includes('\n')) {
+                    escaped = '"' + escaped.replace(/"/g, '""') + '"';
+                }
+                row.push(escaped);
+            }
+            lines.push(row.join(','));
+        }
+        csvTextarea.value = lines.join('\n');
+    }
+    exportBtn.addEventListener('click', exportCSV);
+
+    // ----- Scripting API -----
+    window.sheet = {
+        set: function(cellId, value) {
+            const id = String(cellId).toUpperCase();
+            if (!CELL_IDS.includes(id)) return;
+            setCellValue(id, value);
+        },
+        get: function(cellId) {
+            const id = String(cellId).toUpperCase();
+            if (!CELL_IDS.includes(id)) return '';
+            return computedData[id] || '';
+        },
+        raw: function(cellId) {
+            const id = String(cellId).toUpperCase();
+            if (!CELL_IDS.includes(id)) return '';
+            return rawData[id] || '';
+        }
+    };
+
+    // ----- Initialize -----
+    refresh();
+
+    // Expose for debugging
+    window.__debug = { rawData, computedData, refresh, setCellValue };
+
+})();
+</script>
+</body>
+</html>

@@ -1065,7 +1065,8 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
     for i, rd in enumerate(run_dirs):
         rd.mkdir(parents=True, exist_ok=True)
         manifests.append(_manifest(models, tasks, rd, tag, parallel, i, n_cycles,
-                                   run_dirs[0].name))
+                                   run_dirs[0].name,
+                                   _forecast_record(pre, n_cycles)))
         write_json(rd / "run.json", manifests[i])
 
     from .util import keep_awake, read_json
@@ -1098,8 +1099,38 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
     return run_dir
 
 
+def _forecast_record(pre: dict, n_cycles: int) -> dict:
+    est = pre.get("estimate") or {}
+    rows = []
+    for r in est.get("rows") or []:
+        if r.get("local") or r.get("subscription"):
+            continue
+        rows.append({k: r[k] for k in
+                     ("model", "basis", "priced", "tasks", "missing",
+                      "modelled", "blind", "known", "projected", "total")
+                     if k in r})
+    bal = {}
+    for b in (pre.get("balances") or {}).values():
+        if b and b.get("remaining") is not None:
+            bal[b["provider"]] = b["remaining"]
+    return {
+        "at": now_iso(),
+        "billable": est.get("billable"),
+        "known": est.get("known"),
+        "projected": est.get("projected"),
+        "unpriced_cells": est.get("unpriced_cells"),
+        "repeat": est.get("repeat"),
+        "cycles": n_cycles,
+        "cap": pre.get("cap"),
+        "problems": pre.get("problems") or [],
+        "balance_at_start": bal,
+        "models": rows,
+    }
+
+
 def _manifest(models, tasks, run_dir: Path, tag: str, parallel: bool,
-              index: int, n_cycles: int, group: str) -> dict:
+              index: int, n_cycles: int, group: str,
+              forecast: dict | None = None) -> dict:
     manifest = {
         "run_id": run_dir.name, "tag": tag, "started": now_iso(),
         "suite_version": config.suite_version(),
@@ -1117,6 +1148,7 @@ def _manifest(models, tasks, run_dir: Path, tag: str, parallel: bool,
         "cli_effort_default": _cli_effort_default(),
         "tasks": [{"id": t.id, "hash": t.content_hash, "tier": t.tier,
                    "category": t.category} for t in tasks],
+        "cost_forecast": forecast,
         "finished": None,
     }
     if n_cycles > 1:

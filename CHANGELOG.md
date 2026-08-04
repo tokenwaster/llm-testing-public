@@ -24,6 +24,127 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
+## 0.7.6 — hard tasks exist again
+
+### Hard was unreachable, and 17 tasks belonged to no lens
+The suite reported zero hard tasks. Not because nothing is hard — because of the
+order of the classification ladder. There are two ways to earn `discriminator`:
+a low top-cohort mean, or a wide spread across the fleet. The spread test sat
+*below* `floor-gate`, and a task with real spread almost always has a wide
+top-to-bottom gap too, so `floor-gate` claimed it first and the spread rule
+never fired.
+
+The tasks it was swallowing are the ones carrying the discrimination:
+`ctx-012-aggregate-reversals-32k` at sd 0.48, `rs-006` 0.47, `rs-010` 0.46,
+`ag-007` 0.45, `web-006` 0.42. The two highest-sigma tasks at the top eight were
+filed as floor gates and hidden.
+
+Second fault: the lenses did not cover the suite. `discriminator` mapped to
+hard, `ceiling`/`dead` to easy, `frontier` to its own flag, and `floor-gate`
+and `mixed` to a "mid" bucket with no button. Hard + Frontier + Easy came to 39
+of 56, leaving 17 tasks selectable from nothing.
+
+Fixed three ways: the spread test runs before `floor-gate`; `floor-gate` counts
+as hard, because a task that splits the fleet is what a reader means by hard,
+while `frontier` stays the strict "even the top struggles" lens; and the top
+cohort is the top **8** rather than a third of the fleet, which with 46 models
+reached rank fifteen and made `top_spread` meaningless.
+
+hard 0 → **23**, frontier 2, easy 31, unbucketed **0**, summing to 56. Top-8
+spread reads 0.031. **`hardened` is hard ∪ frontier and drives
+`--tasks hardened`** — it held 2 tasks while hard was unreachable, so the repeat
+set was measuring almost nothing. It now holds 25.
+
+### rs-014: a ledger that fights scanning, after a dead first attempt
+The first rs-014 was a canonical chameleon-colony puzzle. It went 10 for 10 at
+1.0 — models recalled the mod-3 invariant rather than deriving it. Deleted with
+all 13 of its recorded cells. Checked whether the frame could be twisted into
+something hard by asking for the minimum number of meetings instead: brute
+force over all 300 solvable starts says the minimum is exactly the larger of
+the two non-target counts, so every question about that system collapses to a
+formula. Frame abandoned.
+
+The replacement uses the one mechanism here with proven discrimination that is
+not a memorisable insight — ctx-012's exhaustive aggregation. An append-only
+ledger of `POST`, `AMEND`, `VOID`, `RESTORE` over 93 lines; 28 entries belong to
+the target account and 15 count. An entry counts only if the last `VOID` or
+`RESTORE` affecting it is a `RESTORE`, with whatever amount the last `AMEND`
+set.
+
+The generator refuses any instance a shortcut solves: four shortcuts are
+computed per candidate and it is rejected unless all four miss and at least
+three miss differently (shipped seed: 409, 564, 792, 944 against 1115). The key
+is cross-checked by a second resolver that parses the rendered text rather than
+the generator's own structures, because writing the key once is how the
+chameleon version shipped broken. 40 seeds give 40 distinct keys; re-seedable
+tasks 6 → 7.
+
+Vetted on the operator's rule — run the weakest models first. 46 models: 33
+pass, 13 fail, including `minicpm5-1b` and `gemma-3-4b`. Honest limit: all eight
+top models score 1.0, so it discriminates through the middle of the fleet, not
+at the frontier. Suite is 56 tasks.
+
+### The review page stops embedding submissions
+Each app opens in its own tab behind a link; nothing model-written renders
+inside the review document, in either the full card or the compare grid. The
+freeze was architectural, not one bad file — measured in the browser, a child
+busy-loop blocks the parent 97% of the time, an `alert()` 95%, and neither
+`sandbox="allow-scripts"` nor a separate origin changes that, because all
+frames share one process. Compare mode was putting 132 model-written apps in
+one document; the worst task is 415 frames and 6.3 MB.
+
+One submission is worse than slow. `agents-a1 / web-013-billiards` contains
+`while(r < 4)` with `r` never incremented — the model left a dead-but-running
+loop above working code. Its `score.json` already recorded
+`Page.goto: Timeout 30000ms exceeded` and 0 of 16 tests: Playwright could not
+load it either. Items now carry a `hangs` flag read from that evidence, and a
+flagged submission offers its source on a `/raw/` route served as `text/plain`
+so nothing can execute. The live page stays reachable behind a confirm that
+explains why one tab froze another. Healthy cards gain a source link too. One
+cell of 3,506 is affected.
+
+Also fixed: the compare grid's header arrow had no `rel="noopener"` and linked
+the live app unconditionally, bypassing the guard.
+
+### The forecast is kept, so it can be checked against the bill
+`run.json` recorded nothing about cost; the estimate the confirmation dialog
+computed was logged as text and discarded. That made the check impossible after
+the fact for any model with history, because the data the estimate came from had
+already moved.
+
+Every run now writes `cost_forecast`: billable total split into known and
+projected, unpriced cell count, ceiling, preflight objections, provider balances
+at start, and a per-model row with basis and how many cells were measured rather
+than projected. `report.forecast_accuracy()` pairs it against the summed
+recorded cost and marks whether the provider returned a receipt or we did the
+arithmetic. Shown on `/backend` under the ceiling. An interrupted run is listed
+but excluded from the median, since it spent a fraction of what was forecast
+for the whole thing.
+
+Two data points so far, both conservative. deepseek-v4-flash over 55 tasks with
+no prior history: forecast $0.1402 against $0.1197 billed, −14.6% — but per task
+the median was −31% with a range of −97% to +505%, so the aggregate is partly
+cancellation. A three-model run over 3 tasks each: −43%, and uptime does not
+explain it (kimi-k2.7-code sits at 97.5% and still missed by 69%). All three
+used their own measured history on those exact tasks. The lesson is that
+forecast error is a function of how many cells you average over, not of whether
+the basis is your own: trust the dialog on a full sweep, not on a handful.
+
+### Cohort selector on the overview matrix
+All / Local ⚡ / API·CLI beside the task lens, each with its own count. The two
+axes are independent, so Local + Frontier is a valid view. Ranking runs over the
+filtered rows rather than all 46 with some hidden, and the fleet-average row
+recomputes for the cohort and renames itself — `ag-003-fix-package` is 0.83
+across all 46, 0.65 local, 0.94 API/CLI. Verified by recomputing all 165 figures
+(55 tasks × 3 cohorts) from `runs/` and comparing against what the page shows.
+
+### An unrecognized argument names the cause
+`--models minicpm5-1b,gemma-3-4b` failed with "unrecognized arguments:
+gemma-3-4b". `harness.ps1` forwards with `@args`, and PowerShell parses an
+unquoted `a,b` as an array, so the splat delivers two arguments — 6 argv entries
+unquoted, 5 quoted. The error now explains the quoting and `--models` says
+QUOTED in its help. The working form is `--models "minicpm5-1b,gemma-3-4b"`.
+
 ## 0.7.5 — whose fault was the zero
 
 ### Uptime: a zero now says whose fault it was

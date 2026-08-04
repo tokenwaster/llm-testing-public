@@ -187,6 +187,13 @@ def cmd_prune(args) -> int:
     return 0
 
 
+COMMA_HINT = (
+    "\n\nA comma-separated list has to be quoted. PowerShell turns an "
+    "unquoted a,b into two separate arguments before the harness sees "
+    "them:\n"
+    '  --models "model-one,model-two"'
+)
+
 def main() -> int:
     p = argparse.ArgumentParser(
         prog="harness",
@@ -223,7 +230,9 @@ def main() -> int:
     sub.add_parser("list", help="show enabled models and tasks")
 
     pr = sub.add_parser("run", help="run tasks against models")
-    pr.add_argument("--models", help="comma-separated model names (default: all enabled)")
+    pr.add_argument("--models", help="comma-separated model names, "
+                    "QUOTED (default: all enabled) — PowerShell splits "
+                    "an unquoted a,b into two arguments")
     pr.add_argument("--tasks", help="glob on task id or category (e.g. 'py-*' or "
                     "'reasoning'), 'hardened' for the curated repeat-run set, or "
                     "'new' for the v0.6.13 public-capability lanes")
@@ -286,7 +295,9 @@ def main() -> int:
     except ImportError:
         pass
 
-    args = p.parse_args()
+    args, rest = p.parse_known_args()
+    if rest:
+        p.error("unrecognized arguments: " + " ".join(rest) + COMMA_HINT)
     return commands[args.cmd](args)
 
 

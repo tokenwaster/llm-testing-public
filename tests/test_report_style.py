@@ -392,3 +392,133 @@ def test_the_picker_stacks_on_a_narrow_screen():
     assert "grid-template-columns:1fr" in block
     assert ".cmp-lead { display:none" in block, (
         "the spacer must collapse or it eats a whole stacked row")
+
+
+def test_the_matrix_has_a_cohort_selector():
+    from harness import config
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    assert 'id="mxcoh"' in src
+    for coh in ("all", "local", "remote"):
+        assert f'data-coh="{coh}"' in src, coh
+    assert "matrix.n_local" in src and "matrix.n_remote" in src, (
+        "each button states its own count, like every other cohort selector")
+    assert 'data-kind="{{ r.kind }}"' in src, (
+        "a row cannot be filtered by cohort unless it carries its cohort")
+
+
+def test_the_two_matrix_axes_are_independent():
+    from harness import config
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    i = src.index("var sub='all', cohort='all';")
+    seg = src[i:i + 4000]
+    assert "function inCohort(r)" in seg and "function showCell(c)" in seg, (
+        "cohort filters rows and the task lens filters columns; folding them "
+        "into one predicate would make Local+Frontier impossible")
+    assert "wire(seg,'mx'" in seg and "wire(coh,'coh'" in seg
+    assert seg.count("apply()") >= 2, (
+        "both selectors re-apply, and apply() runs once on load so the state "
+        "is never a lie about what is shown")
+
+
+def test_the_matrix_average_row_recomputes_per_cohort():
+    from harness import config
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    assert "function refoot(live)" in src
+    i = src.index("function refoot(live)")
+    seg = src[i:i + 1400]
+    assert "cohort avg" in seg, "the label has to stop saying fleet"
+    assert "no data in this cohort" in seg, (
+        "a task no model in the cohort ran must read as absent, not as zero")
+    assert "vals.push(0)" not in seg, (
+        "a trap/miss/dnf cell is not automatically a zero — it carries its "
+        "own scored value, and inventing one made the All footer disagree "
+        "with the server that rendered it")
+
+
+def test_a_scored_cell_carries_its_value_whatever_it_looks_like():
+    from harness import assess
+    from harness.report import _mx_cell
+    from harness.tasks import load_tasks
+    tdef = load_tasks()[0]
+    acfg = assess.load_cfg()
+
+    def cell(score, status="scored"):
+        return _mx_cell({"score": {"score": score, "status": status},
+                         "attempts": [], "status": "ok"},
+                        tdef, acfg, {}, "x.html")
+
+    assert cell(0.75)["v"] == "0.750000"
+    assert cell(0.0)["v"] == "0.000000"
+    assert "v" not in cell(None, status="pending"), (
+        "an unscored cell must not contribute a value to any average"
+    )
+    assert "v" not in _mx_cell(None, tdef, acfg, {}, "x.html")
+
+
+def test_the_matrix_footer_label_names_the_cohort():
+    from harness import config
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    i = src.index("var fl=foot&&foot.querySelector('.fl');")
+    seg = src[i:i + 260]
+    for word in ("fleet", "local", "API/CLI"):
+        assert word in seg, word
+
+
+def test_every_task_lands_in_exactly_one_lens():
+    from harness import report as rp
+    d = rp.discrimination_stats(rp.load_all_runs(), rp._task_defs())
+    hard = set(d["hard_subset"])
+    front = set(d["frontier_subset"])
+    easy = set(d["easy_subset"])
+    assert not (hard & front) and not (hard & easy) and not (front & easy), (
+        "the lenses must partition, or a task is selected twice")
+    total = len(hard) + len(front) + len(easy) + d["n_unbucketed"]
+    assert total == d["n_tasks"], (
+        f"{d['n_tasks']} tasks but the lenses account for {total}. Hard + "
+        f"Frontier + Easy used to sum to 39 of 56 with 17 tasks reachable "
+        f"from no button at all")
+    assert d["n_unbucketed"] == 0, (
+        f"tasks in no lens: {d['unbucketed']}")
+
+
+def test_a_task_that_splits_the_fleet_counts_as_hard():
+    from harness import report as rp
+    assert "floor-gate" in rp.HARD_FLAGS, (
+        "floor-gate means a wide top-to-bottom gap, which is exactly what a "
+        "reader means by hard; it used to belong to no lens")
+    assert "discriminator" in rp.HARD_FLAGS
+
+
+def test_the_spread_rule_is_reached_before_floor_gate():
+    from harness import config
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    i = src.index('flag = "dead"')
+    ladder = src[i:i + 700]
+    spread = ladder.index("sd >= 0.28")
+    gate = ladder.index("gap is not None and gap > 0.3")
+    assert spread < gate, (
+        "there are two ways to earn 'discriminator' and the spread test is the "
+        "second. Below floor-gate it never fired, because a task with real "
+        "spread almost always has a wide gap too — so the suite reported zero "
+        "hard tasks while ctx-012 (sd 0.48) sat in no bucket")
+
+
+def test_the_top_cohort_is_the_top_eight_not_a_third_of_the_fleet():
+    from harness import report as rp
+    assert rp.TOP_COHORT == 8
+    d = rp.discrimination_stats(rp.load_all_runs(), rp._task_defs())
+    assert d["cohort_k"] <= 8, (
+        "with 46 models a third of the fleet is 15, so 'the top struggles' was "
+        "being measured against models ranked tenth and worse")
+    assert len(d["top_models"]) == d["cohort_k"]
+
+
+def test_the_hardened_repeat_set_is_not_empty():
+    from harness import report as rp
+    tiers = rp.task_tiers()
+    ids = rp.hardened_ids(tiers)
+    assert len(ids) >= 10, (
+        f"hardened is hard u frontier and drives --tasks hardened; it held "
+        f"only the 2 frontier tasks while hard was unreachable, so the repeat "
+        f"set measured almost nothing. now {len(ids)}")
+    assert all(tiers[t] in rp.HARDENED_TIERS for t in ids)

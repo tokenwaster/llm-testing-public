@@ -203,6 +203,72 @@ def _cached_tasks(tasks_dir: Path | None = None) -> list:
 
 
 
+def forecast_accuracy(runs: list[dict] | None = None) -> dict:
+    runs = load_all_runs() if runs is None else runs
+    rows = []
+    for r in runs:
+        mani = r["manifest"] or {}
+        fc = mani.get("cost_forecast")
+        if not fc or not fc.get("billable"):
+            continue
+        cut_short = bool(mani.get("stopped_reason"))
+        billed = {}
+        source = {}
+        for res in r["results"]:
+            c = res.get("cost_usd")
+            if c is None:
+                continue
+            billed[res["model"]] = billed.get(res["model"], 0.0) + c
+            if res.get("cost_source") == "billed":
+                source[res["model"]] = True
+        per = []
+        for m in fc.get("models") or []:
+            act = billed.get(m["model"])
+            if act is None or not m.get("total"):
+                continue
+            per.append({
+                "model": m["model"], "basis": m.get("basis"),
+                "measured": m.get("priced"), "of": m.get("tasks"),
+                "estimate": m["total"], "actual": round(act, 6),
+                "err_pct": round((act - m["total"]) / m["total"] * 100, 1),
+                "receipted": bool(source.get(m["model"])),
+            })
+        if not per:
+            continue
+        est = sum(p["estimate"] for p in per)
+        act = sum(p["actual"] for p in per)
+        rows.append({
+            "run_id": r["run_id"],
+            "cut_short": cut_short,
+            "stopped_reason": mani.get("stopped_reason"),
+            "started": (r["manifest"] or {}).get("started", ""),
+            "estimate": round(est, 6), "actual": round(act, 6),
+            "err_pct": round((act - est) / est * 100, 1) if est else None,
+            "cap": fc.get("cap"),
+            "models": per,
+        })
+    rows.sort(key=lambda r: r["started"])
+    errs = [r["err_pct"] for r in rows
+            if r["err_pct"] is not None and not r["cut_short"]]
+    over = [e for e in errs if e < 0]
+    summary = None
+    if errs:
+        import statistics as _st
+        summary = {
+            "n_runs": len(errs),
+            "n_cut_short": sum(1 for r in rows if r["cut_short"]),
+            "median_err_pct": round(_st.median(errs), 1),
+            "worst_over_pct": round(min(errs), 1),
+            "worst_under_pct": round(max(errs), 1),
+            "conservative_share": round(len(over) / len(errs), 3),
+            "total_estimate": round(sum(r["estimate"] for r in rows
+                                       if not r["cut_short"]), 4),
+            "total_actual": round(sum(r["actual"] for r in rows
+                                     if not r["cut_short"]), 4),
+        }
+    return {"rows": rows, "summary": summary}
+
+
 def fmt_ms(ms) -> str:
     if ms is None:
         return "—"
@@ -1211,15 +1277,20 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   <button type="button" data-mx="frontier" title="only the tasks where even the top cohort struggles — the sharpest discrimination">◆◆ Frontier ({{ matrix.n_frontier }})</button>
   <button type="button" data-mx="easy">Easy ({{ matrix.n_easy }})</button>
 </div>
+<div class="seg" id="mxcoh" title="local and API/CLI models are different constraint classes — a combined mean is not comparable, so pick the one you can actually run. Rows re-rank and the fleet-average row recomputes for the cohort you choose.">
+  <button type="button" data-coh="all" class="on">All ({{ matrix.n_models }})</button>
+  <button type="button" data-coh="local">Local ⚡ ({{ matrix.n_local }})</button>
+  <button type="button" data-coh="remote">API / CLI ({{ matrix.n_remote }})</button>
+</div>
 <div class="mx-scroll"><div class="mx">
   <div class="mx-row head">
     <div class="mx-rail"><span class="rk"></span><span class="nm">Model</span><span class="sc">Score</span><span class="gp">Gap</span></div>
     <div class="mx-cells">{% for c in matrix.cats %}<div class="mx-grp" style="grid-template-columns:repeat({{ c.n }},15px);gap:3px"><span class="mx-clabel" title="{{ c.key }}" style="grid-column:1/-1">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div>
   </div>
   {% for r in matrix.rows %}
-  <div class="mx-row{% if r.lead %} lead{% endif %}{% if r.partial %} partial{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-frontier="{{ r.m_frontier }}" data-easy="{{ r.m_easy }}" data-nobias="{{ r.m_nobias }}"{% if r.partial %} title="only {{ r.cover }} tasks run — ranked below every fully-tested model, because the mean of a partial row is not comparable to a full one"{% endif %}>
+  <div class="mx-row{% if r.lead %} lead{% endif %}{% if r.partial %} partial{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-frontier="{{ r.m_frontier }}" data-easy="{{ r.m_easy }}" data-nobias="{{ r.m_nobias }}" data-kind="{{ r.kind }}"{% if r.partial %} title="only {{ r.cover }} tasks run — ranked below every fully-tested model, because the mean of a partial row is not comparable to a full one"{% endif %}>
     <div class="mx-rail"><span class="rk">{{ r.rank }}</span><span class="nm">{{ r.model }}{% if r.partial %} <span class="pcov">{{ r.cover }}</span>{% endif %}</span><span class="sc">{{ r.score }}{% if r.ci %}<span class="ci" title="95% confidence band across tasks (±1.96·SE)">{{ r.ci }}</span>{% endif %}</span><span class="gp">{% if r.tied %}<span class="tie" title="within the leader's 95% band — not statistically distinguishable on this task set">≈</span>{% endif %}{{ r.gap }}</span></div>
-    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
+    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.v %} data-v="{{ cell.v }}"{% endif %}{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
   {% endfor %}
   <div class="mx-row foot">
@@ -1229,23 +1300,53 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 </div></div>
 <script>
 (function(){
-  var seg=document.getElementById('mxseg'), mx=document.querySelector('.mx');
+  var seg=document.getElementById('mxseg'), coh=document.getElementById('mxcoh');
+  var mx=document.querySelector('.mx');
   if(!seg||!mx) return;
   var rows=[].slice.call(mx.querySelectorAll('.mx-row:not(.head):not(.foot)'));
   var head=mx.querySelector('.mx-row.head'), foot=mx.querySelector('.mx-row.foot');
+  var sub='all', cohort='all';
   function vis(g){ return [].slice.call(g.querySelectorAll('.mx-cell')).filter(function(c){ return c.style.display!=='none'; }).length; }
-  function apply(sub){
+  function inCohort(r){ return cohort==='all'||r.dataset.kind===cohort; }
+  function showCell(c){ return (sub==='all')||(sub==='frontier'?c.dataset.fr==='1':c.dataset.sub===sub); }
+  function refoot(live){
+    if(!foot) return;
+    var cells=[].slice.call(foot.querySelectorAll('.mx-cell'));
+    var cols=live.map(function(r){ return [].slice.call(r.querySelectorAll('.mx-cell')); });
+    cells.forEach(function(f,i){
+      var vals=[];
+      cols.forEach(function(cs){
+        var c=cs[i]; if(!c) return;
+        var v=parseFloat(c.dataset.v||'');
+        if(!isNaN(v)) vals.push(v);
+      });
+      var tid=(f.title||'').split(' · ')[0];
+      if(!vals.length){
+        f.className='mx-cell na'; f.style.removeProperty('--a');
+        f.title=tid+' · no data in this cohort';
+        return;
+      }
+      var mean=vals.reduce(function(a,b){ return a+b; },0)/vals.length;
+      f.className='mx-cell pass';
+      f.style.setProperty('--a', (0.10+0.90*Math.max(0,Math.min(1,mean))).toFixed(3));
+      f.title=tid+' · cohort avg '+mean.toFixed(2)+' ('+vals.length+' model'
+        +(vals.length===1?'':'s')+')';
+    });
+  }
+  function apply(){
+    rows.forEach(function(r){ r.style.display=inCohort(r)?'':'none'; });
+    var live=rows.filter(inCohort);
     rows.concat(foot?[foot]:[]).forEach(function(r){
       [].slice.call(r.querySelectorAll('.mx-cell')).forEach(function(c){
-        var show=(sub==='all')||(sub==='frontier'?c.dataset.fr==='1':c.dataset.sub===sub);
-        c.style.display=show?'':'none';
+        c.style.display=showCell(c)?'':'none';
       });
       [].slice.call(r.querySelectorAll('.mx-grp')).forEach(function(g){
         g.style.display=vis(g)?'':'none';
       });
     });
-    if(head&&rows.length){
-      var src=[].slice.call(rows[0].querySelectorAll('.mx-grp'));
+    refoot(live);
+    if(head&&live.length){
+      var src=[].slice.call(live[0].querySelectorAll('.mx-grp'));
       [].slice.call(head.querySelectorAll('.mx-grp')).forEach(function(hg,i){
         var n=src[i]?vis(src[i]):0;
         hg.style.display=n?'':'none';
@@ -1253,7 +1354,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
         var cn=hg.querySelector('.cn'); if(cn) cn.textContent=n;
       });
     }
-    var scored=rows.map(function(r){
+    var scored=live.map(function(r){
       return {r:r, v:parseFloat(r.dataset[sub]),
               p:r.classList.contains('partial')}; });
     scored.sort(function(a,b){
@@ -1262,6 +1363,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     var full=scored.filter(function(o){ return !o.p&&!isNaN(o.v); });
     var lead=full.length?full[0].v:NaN, parent=rows.length?rows[0].parentNode:null;
     var rk_n=0;
+    rows.forEach(function(r){ r.classList.remove('lead'); });
     scored.forEach(function(o,i){
       if(parent&&foot) parent.insertBefore(o.r,foot);
       var sc=o.r.querySelector('.sc'), rk=o.r.querySelector('.rk'), gp=o.r.querySelector('.gp');
@@ -1272,13 +1374,22 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
         :'+'+(lead-o.v).toFixed(3).replace(/^0/,'');
       o.r.classList.toggle('lead', !o.p&&rk_n===1&&!isNaN(o.v));
     });
+    var fl=foot&&foot.querySelector('.fl');
+    if(fl) fl.textContent=(cohort==='all'?'fleet':cohort==='local'?'local':'API/CLI')
+      +' avg / task →';
   }
-  [].slice.call(seg.querySelectorAll('button')).forEach(function(b){
-    b.addEventListener('click',function(){
-      [].slice.call(seg.querySelectorAll('button')).forEach(function(x){ x.classList.toggle('on',x===b); });
-      apply(b.dataset.mx);
+  function wire(box, key, set){
+    if(!box) return;
+    [].slice.call(box.querySelectorAll('button')).forEach(function(b){
+      b.addEventListener('click',function(){
+        [].slice.call(box.querySelectorAll('button')).forEach(function(x){ x.classList.toggle('on',x===b); });
+        set(b.dataset[key]); apply();
+      });
     });
-  });
+  }
+  wire(seg,'mx',function(v){ sub=v; });
+  wire(coh,'coh',function(v){ cohort=v; });
+  apply();
 })();
 </script>
 <div class="mxlegend">
@@ -3494,16 +3605,21 @@ def _mx_cell(entry, tdef, acfg, suspect, href):
     cat = _assess.classify(entry, tdef, acfg, suspect)["category"]
     sc = entry.get("score") or {}
     val = sc.get("score")
+    counted = (sc.get("status") == "scored" and val is not None)
+    v_attr = {"v": f"{val:.6f}"} if counted else {}
     if cat == "fell-for-trap":
-        return {"cls": "trap", "a": "0", "tip": f"{tid} · fell-for-trap", "href": href}
+        return {"cls": "trap", "a": "0", "tip": f"{tid} · fell-for-trap",
+                "href": href, **v_attr}
     if cat == "retrieval-miss":
-        return {"cls": "miss", "a": "0", "tip": f"{tid} · retrieval-miss", "href": href}
+        return {"cls": "miss", "a": "0", "tip": f"{tid} · retrieval-miss",
+                "href": href, **v_attr}
     if cat in ("rumination-spiral", "runaway", "incomplete-output",
                "agentic-max-turns", "infinite-loop"):
-        return {"cls": "dnf", "a": "0", "tip": f"{tid} · {cat}", "href": href}
-    if sc.get("status") == "scored" and val is not None:
+        return {"cls": "dnf", "a": "0", "tip": f"{tid} · {cat}", "href": href,
+                **v_attr}
+    if counted:
         v = max(0.0, min(1.0, val))
-        return {"cls": "pass", "a": f"{0.10 + 0.90 * v:.3f}",
+        return {"cls": "pass", "a": f"{0.10 + 0.90 * v:.3f}", "v": f"{val:.6f}",
                 "tip": f"{tid} · {val:.2f}", "href": href}
     return {"cls": "na", "a": "0", "tip": f"{tid} · {cat}", "href": href}
 
@@ -4211,7 +4327,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                     if summaries[m]["avg_score_val"] is not None), None)
     _lead_ci = summaries[_lead_m]["score_ci95"] if _lead_m else None
     _flag_of = {r["tid"]: r["flag"] for r in _dstats["rows"]}
-    _sub_of = {tid: ("hard" if _flag_of.get(tid) == "discriminator"
+    _sub_of = {tid: ("hard" if _flag_of.get(tid) in HARD_FLAGS
                      else "easy" if _flag_of.get(tid) in ("ceiling", "dead")
                      else "mid") for tid in task_data}
     _hard_ids = [t for t, s in _sub_of.items() if s == "hard"]
@@ -4267,6 +4383,7 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
             "m_easy": ("" if _me is None else f"{_me:.6f}"),
             "m_frontier": ("" if _mf is None else f"{_mf:.6f}"),
             "m_nobias": ("" if _mn is None else f"{_mn:.6f}"),
+            "kind": "local" if summaries[m]["local"] else "remote",
             "groups": groups})
 
     matrix_foot = []
@@ -4293,7 +4410,12 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
     matrix = ({"cats": [{"key": c, "code": _cat_code(_cat_tids[c]), "n": len(_cat_tids[c])} for c in _live_cats],
                "rows": matrix_rows, "foot": matrix_foot,
                "n_hard": len(_hard_ids), "n_easy": len(_easy_ids),
-               "n_frontier": len(_frontier_ids), "n_all": len(task_data)}
+               "n_frontier": len(_frontier_ids), "n_all": len(task_data),
+               "n_models": len(matrix_rows),
+               "n_local": sum(1 for r in matrix_rows
+                              if r["kind"] == "local"),
+               "n_remote": sum(1 for r in matrix_rows
+                               if r["kind"] == "remote")}
               if (matrix_rows and _live_cats) else None)
 
     mast_eyebrow = [
@@ -5454,6 +5576,11 @@ def _pearson(a: dict, b: dict) -> float | None:
     return num / den if den else None
 
 
+TOP_COHORT = 8
+
+HARD_FLAGS = ("discriminator", "floor-gate")
+
+
 def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
     import statistics as st
     from itertools import combinations
@@ -5469,7 +5596,7 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
     complete = {m: v for m, v in by_model.items() if len(v) >= n_suite}
     means = {m: sum(v) / len(v) for m, v in (complete or by_model).items()}
     ranked = sorted(means, key=lambda m: -means[m])
-    k = max(3, len(ranked) // 3)
+    k = min(TOP_COHORT, len(ranked)) if len(ranked) >= 3 else max(3, len(ranked))
     top, bot = set(ranked[:k]), set(ranked[-k:])
     top_spread = (means[ranked[0]] - means[ranked[k - 1]]) if len(ranked) >= k else 0.0
 
@@ -5498,12 +5625,12 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
             flag = "frontier"
         elif top_mean is not None and top_mean < 0.85:
             flag = "discriminator"
+        elif sd >= 0.28 and 0.2 <= mean <= 0.85:
+            flag = "discriminator"
         elif pct1 >= 0.7:
             flag = "ceiling"
         elif gap is not None and gap > 0.3:
             flag = "floor-gate"
-        elif sd >= 0.28 and 0.2 <= mean <= 0.85:
-            flag = "discriminator"
         else:
             flag = "mixed"
         rows.append({
@@ -5521,7 +5648,7 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
             clusters.append((round(c, 3), a, b))
     clusters.sort(reverse=True)
 
-    hard = [r["tid"] for r in rows if r["flag"] == "discriminator"]
+    hard = [r["tid"] for r in rows if r["flag"] in HARD_FLAGS]
     frontier = [r["tid"] for r in rows if r["flag"] == "frontier"]
     easy = [r["tid"] for r in rows if r["flag"] in ("ceiling", "dead")]
     grank = {m: r for m, r in zip(ranked, _competition_ranks(
@@ -5575,6 +5702,10 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
         "n_dead": sum(1 for r in rows if r["flag"] == "dead"),
         "n_ceiling": sum(1 for r in rows if r["flag"] == "ceiling"),
         "n_frontier": sum(1 for r in rows if r["flag"] == "frontier"),
+        "n_unbucketed": sum(1 for r in rows if r["flag"] not in
+                            HARD_FLAGS + ("frontier", "ceiling", "dead")),
+        "unbucketed": sorted(r["tid"] for r in rows if r["flag"] not in
+                             HARD_FLAGS + ("frontier", "ceiling", "dead")),
         "n_discriminator": sum(1 for r in rows
                                if r["flag"] in ("discriminator", "frontier")),
         "mean_sd": (sum(r["sd"] for r in rows) / len(rows)) if rows else 0.0,

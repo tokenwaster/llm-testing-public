@@ -11,7 +11,6 @@ LMSTUDIO_DEFAULT_URL = "http://localhost:1234/v1"
 LMSTUDIO_KEY_ENV = "LMSTUDIO_API_KEY"
 
 LMSTUDIO_TEMPLATE = """\
-# Auto-registered from LM Studio by `harness add lmstudio`
 name: {name}
 provider: openai
 base_url: {base_url}
@@ -19,8 +18,8 @@ model: {model_id}
 key_env: {key_env}
 local: true
 stream: true
-supports_tools: true          # set false if this model can't do tool calls (skips tier 2)
-max_tokens: 32768   # uniform thinking budget across all local models (fairness)
+supports_tools: true
+max_tokens: 32768
 temperature: 0.2
 pricing: {{ input_per_mtok: 0, output_per_mtok: 0 }}
 enabled: true

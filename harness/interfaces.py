@@ -40,7 +40,6 @@ PRESETS = {
 }
 
 API_MODEL_TEMPLATE = """\
-# Auto-registered from the {interface} interface via /backend
 name: {name}
 provider: {provider}
 base_url: {base_url}
@@ -48,27 +47,12 @@ model: {model_id}
 key_env: {key_env}
 local: false
 stream: {stream}
-supports_tools: true          # set false if this model can't do tool calls (skips tier 2)
-max_tokens: 32768   # uniform thinking budget across all models (fairness)
+supports_tools: true
+max_tokens: 32768
 temperature: 0.2
 pricing: {{ input_per_mtok: {in_price}, output_per_mtok: {out_price} }}
-pricing_asof: {asof}          # snapshot date — refresh with `harness prices`
+pricing_asof: {asof}
 enabled: {enabled}
-# OpenRouter routes to the cheapest upstream host by default — hosts differ in
-# quantization and price. Actual billed cost + serving host (with its quant)
-# are recorded per request automatically. Routing recipes (uncomment ONE):
-#
-# cheapest host at a fixed precision (recommended for benchmark runs):
-# extra:
-#   provider:
-#     quantizations: ["fp8", "bf16", "fp16"]   # accept only these precisions
-#     sort: "price"                            # cheapest among them
-#
-# pin one exact host:
-# extra:
-#   provider:
-#     only: ["DeepInfra"]        # exact host name(s) from the model's page
-#     allow_fallbacks: false
 """
 
 

@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Spreadsheet</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        .grid-wrapper {
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 40px repeat(10, 50px);
+            grid-template-rows: 30px repeat(10, 30px);
+            gap: 1px;
+            background-color: #ddd;
+            padding: 1px;
+        }
+        
+        .grid-header {
+            background-color: #e8e8e8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 12px;
+            border: 1px solid #999;
+        }
+        
+        .grid-row-header {
+            background-color: #e8e8e8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 12px;
+            border: 1px solid #999;
+        }
+        
+        .grid-cell {
+            background-color: white;
+            border: 1px solid #999;
+            padding: 0;
+            overflow: hidden;
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            height: 100%;
+            border: none;
+            padding: 2px 4px;
+            font-family: monospace;
+            font-size: 12px;
+            outline: none;
+        }
+        
+        .controls {
+            margin-bottom: 20px;
+        }
+        
+        button {
+            padding: 8px 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background-color: #45a049;
+        }
+        
+        textarea {
+            width: 100%;
+            height: 200px;
+            font-family: monospace;
+            font-size: 12px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="grid-wrapper">
+            <div class="grid" id="grid"></div>
+        </div>
+        
+        <div class="controls">
+            <button id="export">Export CSV</button>
+        </div>
+        
+        <textarea id="csv" placeholder="CSV export will appear here"></textarea>
+    </div>
+    
+    <script>
+        class Sheet {
+            constructor() {
+                this.raw = {};
+                this.display = {};
+                this.computed = {};
+                this.inCycle = new Set();
+                
+                this.initGrid();
+                this.setupExport();
+            }
+            
+            initGrid() {
+                const grid = document.getElementById('grid');
+                
+                const corner = document.createElement('div');
+                corner.className = 'grid-header';
+                grid.appendChild(corner);
+                
+                for (let col = 0; col < 10; col++) {
+                    const h = document.createElement('div');
+                    h.className = 'grid-header';
+                    h.textContent = String.fromCharCode(65 + col);
+                    grid.appendChild(h);
+                }
+                
+                for (let row = 1; row <= 10; row++) {
+                    const rh = document.createElement('div');
+                    rh.className = 'grid-row-header';
+                    rh.textContent = row;
+                    grid.appendChild(rh);
+                    
+                    for (let col = 0; col < 10; col++) {
+                        const cellId = String.fromCharCode(65 + col) + row;
+                        const cell = document.createElement('div');
+                        cell.className = 'grid-cell';
+                        
+                        const input = document.createElement('input');
+                        input.type = 'text';
+                        input.id = `cell-${cellId}`;
+                        
+                        this.raw[cellId] = '';
+                        this.display[cellId] = '';
+                        
+                        input.addEventListener('focus', () => {
+                            input.value = this.raw[cellId];
+                        });
+                        
+                        input.addEventListener('blur', () => {
+                            this.set(cellId, input.value);
+                        });
+                        
+                        input.addEventListener('keydown', (e) => {
+                            if (e.key === 'Enter') {
+                                e.preventDefault();
+                                this.set(cellId, input.value);
+                                input.blur();
+                            }
+                        });
+                        
+                        cell.appendChild(input);
+                        grid.appendChild(cell);
+                    }
+                }
+            }
+            
+            set(cellId, value) {
+                this.raw[cellId] = value;
+                this.computed = {};
+                this.inCycle.clear();
+                
+                for (let cid in this.raw) {
+                    this.eval(cid, new Set());
+                }
+                
+                for (let cid in this.raw) {
+                    this.updateDisplay(cid);
+                }
+            }
+            
+            eval(cellId, visiting) {
+                if (this.computed.hasOwnProperty(cellId)) {
+                    return this.computed[cellId];
+                }
+                
+                if (visiting.has(cellId)) {
+                    this.inCycle.add(cellId);
+                    return '#CYCLE';
+                }
+                
+                const raw = this.raw[cellId];
+                
+                if (!raw.startsWith('=')) {
+                    if (raw === '') {
+                        this.computed[cellId] = 0;
+                        return 0;
+                    }
+                    const n = parseFloat(raw);
+                    if (!isNaN(n)) {
+                        this.computed[cellId] = n;
+                        return n;
+                    }
+                    this.computed[cellId] = raw;
+                    return raw;
+                }
+                
+                const formula = raw.substring(1);
+                visiting.add(cellId);
+                
+                try {
+                    const tokens = this.tokenize(formula);
+                    if (!tokens) throw new Error();
+                    
+                    const result = this.parseExpr(tokens, 0, visiting);
+                    if (!result || result.pos !== tokens.length) throw new Error();
+                    
+                    visiting.delete(cellId);
+                    
+                    if (result.val === '#CYCLE' || result.val === '#ERR') {
+                        this.computed[cellId] = result.val;
+                        if (result.val === '#CYCLE') this.inCycle.add(cellId);
+                    } else {
+                        this.computed[cellId] = result.val;
+                    }
+                    
+                    return result.val;
+                } catch (e) {
+                    visiting.delete(cellId);
+                    this.computed[cellId] = '#ERR';
+                    return '#ERR';
+                }
+            }
+            
+            tokenize(formula) {
+                const tokens = [];
+                let i = 0;
+                
+                while (i < formula.length) {
+                    if (/\s/.test(formula[i])) {
+                        i++;
+                    } else if ('()'.includes(formula[i])) {
+                        tokens.push({t: formula[i]});
+                        i++;
+                    } else if ('+-*/'.includes(formula[i])) {
+                        tokens.push({t: formula[i]});
+                        i++;
+                    } else if (/\d/.test(formula[i])) {
+                        let num = '';
+                        while (i < formula.length && /[\d.]/.test(formula[i])) {
+                            num += formula[i++];
+                        }
+                        tokens.push({t: 'n', v: parseFloat(num)});
+                    } else if (/[A-J]/.test(formula[i])) {
+                        let cell = '';
+                        while (i < formula.length && /[A-J0-9]/.test(formula[i])) {
+                            cell += formula[i++];
+                        }
+                        if (!/^[A-J]\d+$/.test(cell)) return null;
+                        tokens.push({t: 'c', v: cell});
+                    } else {
+                        return null;
+                    }
+                }
+                
+                return tokens;
+            }
+            
+            parseExpr(tokens, pos, visiting) {
+                let left = this.parseTerm(tokens, pos, visiting);
+                if (!left) return null;
+                
+                while (left.pos < tokens.length && '+-'.includes(tokens[left.pos].t)) {
+                    const op = tokens[left.pos].t;
+                    const right = this.parseTerm(tokens, left.pos + 1, visiting);
+                    if (!right) return null;
+                    
+                    if (left.val === '#CYCLE' || left.val === '#ERR' || right.val === '#CYCLE' || right.val === '#ERR') {
+                        left.val = (left.val === '#CYCLE' || right.val === '#CYCLE') ? '#CYCLE' : '#ERR';
+                    } else {
+                        left.val = op === '+' ? left.val + right.val : left.val - right.val;
+                    }
+                    left.pos = right.pos;
+                }
+                
+                return left;
+            }
+            
+            parseTerm(tokens, pos, visiting) {
+                let left = this.parseFactor(tokens, pos, visiting);
+                if (!left) return null;
+                
+                while (left.pos < tokens.length && '*/'.includes(tokens[left.pos].t)) {
+                    const op = tokens[left.pos].t;
+                    const right = this.parseFactor(tokens, left.pos + 1, visiting);
+                    if (!right) return null;
+                    
+                    if (left.val === '#CYCLE' || left.val === '#ERR' || right.val === '#CYCLE' || right.val === '#ERR') {
+                        left.val = (left.val === '#CYCLE' || right.val === '#CYCLE') ? '#CYCLE' : '#ERR';
+                    } else {
+                        if (op === '*') {
+                            left.val = left.val * right.val;
+                        } else {
+                            if (right.val === 0) return {val: '#ERR', pos: right.pos};
+                            left.val = left.val / right.val;
+                        }
+                    }
+                    left.pos = right.pos;
+                }
+                
+                return left;
+            }
+            
+            parseFactor(tokens, pos, visiting) {
+                if (pos >= tokens.length) return null;
+                
+                const token = tokens[pos];
+                
+                if (token.t === 'n') {
+                    return {val: token.v, pos: pos + 1};
+                }
+                
+                if (token.t === 'c') {
+                    const cellId = token.v;
+                    if (!this.raw.hasOwnProperty(cellId)) {
+                        return {val: '#ERR', pos: pos + 1};
+                    }
+                    
+                    if (visiting.has(cellId)) {
+                        this.inCycle.add(cellId);
+                        return {val: '#CYCLE', pos: pos + 1};
+                    }
+                    
+                    const val = this.eval(cellId, visiting);
+                    return {val: val, pos: pos + 1};
+                }
+                
+                if (token.t === '(') {
+                    const inner = this.parseExpr(tokens, pos + 1, visiting);
+                    if (!inner || inner.pos >= tokens.length || tokens[inner.pos].t !== ')') {
+                        return null;
+                    }
+                    return {val: inner.val, pos: inner.pos + 1};
+                }
+                
+                return null;
+            }
+            
+            updateDisplay(cellId) {
+                const input = document.getElementById(`cell-${cellId}`);
+                const comp = this.computed[cellId];
+                
+                if (this.inCycle.has(cellId)) {
+                    this.display[cellId] = '#CYCLE';
+                } else if (comp === '#ERR') {
+                    this.display[cellId] = '#ERR';
+                } else {
+                    this.display[cellId] = String(comp);
+                }
+                
+                if (document.activeElement !== input) {
+                    input.value = this.display[cellId];
+                }
+            }
+            
+            get(cellId) {
+                return this.display[cellId];
+            }
+            
+            raw(cellId) {
+                return this.raw[cellId];
+            }
+            
+            setupExport() {
+                document.getElementById('export').addEventListener('click', () => {
+                    const lines = [];
+                    for (let row = 1; row <= 10; row++) {
+                        const cols = [];
+                        for (let col = 0; col < 10; col++) {
+                            const cellId = String.fromCharCode(65 + col) + row;
+                            cols.push(this.display[cellId]);
+                        }
+                        lines.push(cols.join(','));
+                    }
+                    document.getElementById('csv').value = lines.join('\n');
+                });
+            }
+        }
+        
+        window.sheet = new Sheet();
+    </script>
+</body>
+</html>

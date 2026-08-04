@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conway's Game of Life</title>
+<style>
+  :root{
+    --bg:#0b0d13;
+    --panel:#141826;
+    --edge:#232a3d;
+    --ink:#e6ebff;
+    --dim:#8b95b5;
+    --accent:#5ce1e6;
+    --accent2:#ff7bd5;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1000px 600px at 50% -10%, #1a2140 0%, transparent 60%),
+      var(--bg);
+    color:var(--ink);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Courier New",monospace;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    min-height:100%;
+    padding:18px;
+    gap:14px;
+  }
+  h1{
+    margin:0;
+    font-size:clamp(16px,3vw,24px);
+    letter-spacing:.22em;
+    text-transform:uppercase;
+    font-weight:600;
+    color:var(--ink);
+    text-shadow:0 0 18px rgba(92,225,230,.35);
+  }
+  .sub{margin:-8px 0 0;font-size:11px;color:var(--dim);letter-spacing:.16em}
+  .stage{
+    padding:10px;
+    border-radius:16px;
+    background:linear-gradient(180deg,#151a2b,#0e1220);
+    border:1px solid var(--edge);
+    box-shadow:0 20px 60px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.02);
+  }
+  canvas{
+    display:block;
+    width:520px;
+    height:520px;
+    max-width:88vmin;
+    max-height:88vmin;
+    border-radius:10px;
+    background:#080a11;
+    cursor:crosshair;
+    touch-action:none;
+  }
+  .controls{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:center;
+    justify-content:center;
+    background:var(--panel);
+    border:1px solid var(--edge);
+    padding:10px 12px;
+    border-radius:14px;
+    box-shadow:0 10px 30px rgba(0,0,0,.45);
+  }
+  button{
+    font:inherit;
+    font-size:13px;
+    letter-spacing:.08em;
+    color:var(--ink);
+    background:#1d2436;
+    border:1px solid #2e3855;
+    padding:9px 15px;
+    border-radius:10px;
+    cursor:pointer;
+    transition:transform .08s ease, background .15s ease, box-shadow .15s ease, color .15s ease;
+  }
+  button:hover{background:#273052;box-shadow:0 0 0 1px rgba(92,225,230,.35),0 6px 18px rgba(0,0,0,.4)}
+  button:active{transform:translateY(1px)}
+  #play.on{background:linear-gradient(180deg,#2a6f74,#1b4b52);border-color:#3ec9cf;color:#eafeff;box-shadow:0 0 22px rgba(92,225,230,.35)}
+  #random{border-color:#5a3a63}
+  #random:hover{box-shadow:0 0 0 1px rgba(255,123,213,.4),0 6px 18px rgba(0,0,0,.4)}
+  label{font-size:11px;color:var(--dim);letter-spacing:.12em;display:flex;align-items:center;gap:7px}
+  input[type=range]{width:110px;accent-color:var(--accent)}
+  .stats{
+    display:flex;gap:16px;font-size:11px;color:var(--dim);letter-spacing:.14em;
+  }
+  .stats b{color:var(--accent);font-weight:600}
+  .hint{font-size:10.5px;color:#5f6885;letter-spacing:.1em;text-align:center;max-width:520px}
+</style>
+</head>
+<body>
+
+<h1>Game of Life</h1>
+<p class="sub">B3 / S23 &nbsp;·&nbsp; dead edges</p>
+
+<div class="stage">
+  <canvas id="life" width="520" height="520"></canvas>
+</div>
+
+<div class="controls">
+  <button id="step">⏭ Step</button>
+  <button id="play">▶ Play</button>
+  <button id="random">🎲 Random</button>
+  <button id="clear">✖ Clear</button>
+  <button id="glider">🚀 Glider</button>
+  <label>speed <input id="speed" type="range" min="1" max="60" value="12"></label>
+</div>
+
+<div class="stats">
+  <span>gen <b id="gen">0</b></span>
+  <span>alive <b id="pop">0</b></span>
+  <span>grid <b id="dim">0</b></span>
+</div>
+
+<p class="hint">click or drag on the grid to paint life · painting on a live cell erases</p>
+
+<script>
+(function(){
+  "use strict";
+
+  var W = 52, H = 52;           // grid size in cells (>= 40)
+  var CELL = 10;                // logical pixels per cell
+  var cssSize = W * CELL;       // 520 CSS px (>= 400)
+
+  var canvas = document.getElementById('life');
+  var ctx = canvas.getContext('2d');
+
+  var grid = new Uint8Array(W * H);
+  var next = new Uint8Array(W * H);
+  var age  = new Uint16Array(W * H);   // purely cosmetic
+  var generation = 0;
+
+  /* ---------- rendering ---------- */
+
+  var dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  function fitCanvas(){
+    canvas.style.width = cssSize + 'px';
+    canvas.style.height = cssSize + 'px';
+    canvas.width = Math.round(cssSize * dpr);
+    canvas.height = Math.round(cssSize * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fitCanvas();
+
+  function draw(){
+    ctx.clearRect(0, 0, cssSize, cssSize);
+
+    // backdrop
+    ctx.fillStyle = '#080a11';
+    ctx.fillRect(0, 0, cssSize, cssSize);
+
+    // grid lines
+    ctx.strokeStyle = 'rgba(120,140,200,0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var i = 0; i <= W; i++){
+      var x = i * CELL + 0.5;
+      ctx.moveTo(x, 0); ctx.lineTo(x, H * CELL);
+    }
+    for (var j = 0; j <= H; j++){
+      var y = j * CELL + 0.5;
+      ctx.moveTo(0, y); ctx.lineTo(W * CELL, y);
+    }
+    ctx.stroke();
+
+    // cells
+    var alive = 0;
+    for (var yy = 0; yy < H; yy++){
+      for (var xx = 0; xx < W; xx++){
+        var idx = yy * W + xx;
+        if (!grid[idx]) continue;
+        alive++;
+        var a = age[idx];
+        var hue = 185 - Math.min(a, 40) * 3.2;     // cyan -> lime-ish with age
+        var px = xx * CELL, py = yy * CELL;
+
+        ctx.fillStyle = 'hsl(' + hue + ',95%,' + (a < 2 ? 78 : 62) + '%)';
+        ctx.shadowColor = 'hsla(' + hue + ',100%,60%,0.85)';
+        ctx.shadowBlur = a < 2 ? 12 : 7;
+        ctx.fillRect(px + 1, py + 1, CELL - 2, CELL - 2);
+      }
+    }
+    ctx.shadowBlur = 0;
+
+    document.getElementById('gen').textContent = generation;
+    document.getElementById('pop').textContent = alive;
+  }
+
+  /* ---------- simulation ---------- */
+
+  function get(x, y){
+    x = x | 0; y = y | 0;
+    if (x < 0 || y < 0 || x >= W || y >= H) return 0;
+    return grid[y * W + x] ? 1 : 0;
+  }
+
+  function set(x, y, v){
+    x = x | 0; y = y | 0;
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    var idx = y * W + x;
+    var nv = v ? 1 : 0;
+    if (grid[idx] !== nv) age[idx] = 0;
+    grid[idx] = nv;
+  }
+
+  function step(){
+    // simultaneous update: read only from `grid`, write to `next`
+    for (var y = 0; y < H; y++){
+      for (var x = 0; x < W; x++){
+        var n = 0;
+        for (var dy = -1; dy <= 1; dy++){
+          var ny = y + dy;
+          if (ny < 0 || ny >= H) continue;
+          for (var dx = -1; dx <= 1; dx++){
+            if (dx === 0 && dy === 0) continue;
+            var nx = x + dx;
+            if (nx < 0 || nx >= W) continue;
+            n += grid[ny * W + nx] ? 1 : 0;
+          }
+        }
+        var idx = y * W + x;
+        var cur = grid[idx] ? 1 : 0;
+        next[idx] = (cur ? (n === 2 || n === 3) : (n === 3)) ? 1 : 0;
+      }
+    }
+    // apply all at once
+    for (var i = 0; i < grid.length; i++){
+      if (next[i]){
+        age[i] = grid[i] ? Math.min(age[i] + 1, 65000) : 0;
+      } else {
+        age[i] = 0;
+      }
+      grid[i] = next[i];
+    }
+    generation++;
+    draw();
+  }
+
+  function clear(){
+    grid.fill(0);
+    next.fill(0);
+    age.fill(0);
+    generation = 0;
+    draw();
+  }
+
+  function randomize(density){
+    density = (typeof density === 'number') ? density : 0.28;
+    for (var i = 0; i < grid.length; i++){
+      grid[i] = Math.random() < density ? 1 : 0;
+      age[i] = 0;
+    }
+    generation = 0;
+    draw();
+  }
+
+  /* ---------- interaction ---------- */
+
+  var playing = false, timer = null, fps = 12;
+  var playBtn = document.getElementById('play');
+
+  function tick(){ step(); }
+
+  function restartTimer(){
+    if (timer) clearInterval(timer);
+    timer = null;
+    if (playing) timer = setInterval(tick, 1000 / fps);
+  }
+
+  function setPlaying(v){
+    playing = !!v;
+    playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
+    playBtn.classList.toggle('on', playing);
+    restartTimer();
+  }
+
+  document.getElementById('step').addEventListener('click', function(){
+    setPlaying(false);
+    step();
+  });
+  playBtn.addEventListener('click', function(){ setPlaying(!playing); });
+  document.getElementById('random').addEventListener('click', function(){ randomize(); });
+  document.getElementById('clear').addEventListener('click', function(){
+    setPlaying(false);
+    clear();
+  });
+  document.getElementById('glider').addEventListener('click', function(){
+    clear();
+    // a few gliders for fun
+    var gl = [[1,0],[2,1],[0,2],[1,2],[2,2]];
+    var spots = [[2,2],[14,4],[6,20],[24,10]];
+    for (var s = 0; s < spots.length; s++){
+      for (var k = 0; k < gl.length; k++){
+        set(spots[s][0] + gl[k][0], spots[s][1] + gl[k][1], 1);
+      }
+    }
+    draw();
+  });
+  document.getElementById('speed').addEventListener('input', function(e){
+    fps = Math.max(1, parseInt(e.target.value, 10) || 12);
+    restartTimer();
+  });
+
+  document.addEventListener('keydown', function(e){
+    if (e.key === ' '){ e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === 's' || e.key === 'S'){ setPlaying(false); step(); }
+    else if (e.key === 'c' || e.key === 'C'){ setPlaying(false); clear(); }
+    else if (e.key === 'r' || e.key === 'R'){ randomize(); }
+  });
+
+  // painting
+  var painting = false, paintVal = 1, lastKey = -1;
+
+  function cellFromEvent(e){
+    var r = canvas.getBoundingClientRect();
+    var x = Math.floor((e.clientX - r.left) / r.width * W);
+    var y = Math.floor((e.clientY - r.top) / r.height * H);
+    return [x, y];
+  }
+
+  canvas.addEventListener('pointerdown', function(e){
+    e.preventDefault();
+    if (canvas.setPointerCapture) { try { canvas.setPointerCapture(e.pointerId); } catch(_){} }
+    var c = cellFromEvent(e);
+    paintVal = get(c[0], c[1]) ? 0 : 1;
+    painting = true;
+    lastKey = c[1] * W + c[0];
+    set(c[0], c[1], paintVal);
+    draw();
+  });
+
+  canvas.addEventListener('pointermove', function(e){
+    if (!painting) return;
+    var c = cellFromEvent(e);
+    var key = c[1] * W + c[0];
+    if (key === lastKey) return;
+    lastKey = key;
+    set(c[0], c[1], paintVal);
+    draw();
+  });
+
+  function endPaint(){ painting = false; lastKey = -1; }
+  window.addEventListener('pointerup', endPaint);
+  window.addEventListener('pointercancel', endPaint);
+
+  /* ---------- public API ---------- */
+
+  window.life = {
+    w: W,
+    h: H,
+    get: get,
+    set: set,
+    step: step,
+    clear: clear,
+    draw: draw,
+    randomize: randomize,
+    get generation(){ return generation; },
+    get playing(){ return playing; },
+    play: function(){ setPlaying(true); },
+    pause: function(){ setPlaying(false); }
+  };
+
+  /* ---------- boot ---------- */
+
+  document.getElementById('dim').textContent = W + '×' + H;
+  randomize(0.22);
+  setPlaying(true);
+})();
+</script>
+</body>
+</html>

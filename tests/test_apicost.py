@@ -694,7 +694,6 @@ def test_a_cli_and_api_twin_never_share_an_aggregation_key():
 def test_an_api_twin_stays_out_of_rankings_until_the_suite_is_complete():
     from harness import report as rp
     runs = rp.load_all_runs()
-    tdefs = rp._task_defs()
     td = rp.collect_task_data(runs)
     cov = set(rp.covered_models(td))
     cells = {}
@@ -705,9 +704,30 @@ def test_an_api_twin_stays_out_of_rankings_until_the_suite_is_complete():
             "harness.registry", fromlist=["x"]).load_models()
             if m.name.startswith("claude-api-")]:
         have = cells.get(name, 0)
-        if have < len(tdefs):
+        if have < len(td):
             assert name not in cov, (
-                f"{name} has {have}/{len(tdefs)} tasks but is being ranked")
+                f"{name} has {have}/{len(td)} measured tasks but is being "
+                f"ranked")
+
+
+def test_the_two_coverage_denominators_are_known_to_differ():
+    from harness import report as rp
+    runs = rp.load_all_runs()
+    td = rp.collect_task_data(runs)
+    live = len(rp._task_defs())
+    if live == len(td):
+        return
+    cov = rp.covered_models(td)
+    ranked = [r for r in rp.leaderboard(runs) if not r.get("partial")]
+    assert cov and not ranked, (
+        f"a task with no data exists ({live} live, {len(td)} measured): "
+        f"covered_models counts only measured tasks so it still returns "
+        f"{len(cov)} models, while the leaderboard counts the live set and "
+        f"ranks {len(ranked)}. Both readings are defensible — a task nobody "
+        f"has run carries no comparative information, but 'a partial model "
+        f"earns no inferred outcome anywhere' argues for the strict one. "
+        f"This test exists so the disagreement is recorded rather than "
+        f"discovered when a new task lands")
 
 
 def test_saving_a_review_does_not_block_on_a_full_rebuild():
@@ -1050,3 +1070,105 @@ def test_an_unmeasured_pair_is_priced_at_its_own_rate_not_a_peer_average():
         "opus and haiku are not close in price; projecting an unmeasured opus "
         "cell from the dollar average of its provider's peers would lowball "
         "the number the operator is about to approve")
+
+
+def _fake_run(run_id, forecast_total, actual, model="m-api", basis="own",
+              source="billed"):
+    return {
+        "run_id": run_id,
+        "manifest": {
+            "started": f"2026-08-04T00:00:00+00:00",
+            "cost_forecast": {
+                "billable": forecast_total, "known": forecast_total,
+                "projected": 0.0, "cap": None, "problems": [],
+                "balance_at_start": {}, "repeat": 1, "cycles": 1,
+                "models": [{"model": model, "basis": basis, "priced": 55,
+                            "tasks": 55, "missing": 0, "modelled": 0,
+                            "blind": 0, "known": forecast_total,
+                            "projected": 0.0, "total": forecast_total}],
+            },
+        },
+        "results": [{"model": model, "task": "t1", "cost_usd": actual,
+                     "cost_source": source}],
+    }
+
+
+def test_forecast_accuracy_pairs_the_estimate_with_the_receipt():
+    from harness import report as rp
+    a = rp.forecast_accuracy([_fake_run("r1", 0.1402, 0.1197)])
+    assert len(a["rows"]) == 1
+    row = a["rows"][0]
+    assert row["estimate"] == 0.1402 and row["actual"] == 0.1197
+    assert row["err_pct"] == -14.6, (
+        "this is the deepseek-v4-flash figure the comparison was done by hand; "
+        "the point of persisting the forecast is that it happens automatically")
+    assert row["models"][0]["receipted"] is True
+
+
+def test_a_run_with_no_persisted_forecast_is_skipped_not_guessed():
+    from harness import report as rp
+    r = _fake_run("r2", 0.1, 0.2)
+    r["manifest"].pop("cost_forecast")
+    assert rp.forecast_accuracy([r])["rows"] == [], (
+        "every run before this change threw its forecast away; inventing one "
+        "after the fact is impossible because the data it came from moved")
+
+
+def test_the_forecast_summary_says_which_way_it_erred():
+    from harness import report as rp
+    runs = [_fake_run("a", 1.0, 0.8), _fake_run("b", 1.0, 0.9),
+            _fake_run("c", 1.0, 1.5)]
+    s = rp.forecast_accuracy(runs)["summary"]
+    assert s["n_runs"] == 3
+    assert s["median_err_pct"] == -10.0
+    assert s["worst_over_pct"] == -20.0 and s["worst_under_pct"] == 50.0
+    assert s["conservative_share"] == round(2 / 3, 3), (
+        "erring high is the safe direction and the operator should be able to "
+        "see how often it happens")
+
+
+def test_an_unbilled_avenue_is_marked_as_having_no_receipt():
+    from harness import report as rp
+    a = rp.forecast_accuracy([_fake_run("r3", 0.5, 0.4, source="list")])
+    assert a["rows"][0]["models"][0]["receipted"] is False, (
+        "a cost we computed from a price table is not a receipt, and the "
+        "comparison is only meaningful against what a provider actually "
+        "charged")
+
+
+def test_the_run_manifest_carries_the_forecast():
+    from harness import config
+    src = (config.ROOT / "harness" / "runner.py").read_text(encoding="utf-8")
+    assert "def _forecast_record(" in src
+    assert '"cost_forecast": forecast,' in src
+    i = src.index("def _forecast_record(")
+    seg = src[i:i + 1400]
+    for field in ("basis", "blind", "balance_at_start", "cap", "problems"):
+        assert field in seg, field
+
+
+def test_an_interrupted_run_is_shown_but_kept_out_of_the_average():
+    from harness import report as rp
+    full = _fake_run("done", 1.0, 0.9)
+    cut = _fake_run("stopped", 1.0, 0.2)
+    cut["manifest"]["stopped_reason"] = "usage_limit"
+    a = rp.forecast_accuracy([full, cut])
+    ids = {r["run_id"]: r for r in a["rows"]}
+    assert set(ids) == {"done", "stopped"}, "both runs stay visible"
+    assert ids["stopped"]["cut_short"] is True
+    assert a["summary"]["n_runs"] == 1, (
+        "a run that stopped early spent a fraction of what was forecast for "
+        "the whole thing; averaging that in manufactures a flattering error")
+    assert a["summary"]["n_cut_short"] == 1
+    assert a["summary"]["median_err_pct"] == -10.0
+    assert a["summary"]["total_actual"] == 0.9
+
+
+def test_a_subscription_only_run_has_no_forecast_to_check():
+    from harness import report as rp
+    r = _fake_run("cli", 0.0, 0.0)
+    r["manifest"]["cost_forecast"]["billable"] = 0
+    r["manifest"]["cost_forecast"]["models"] = []
+    assert rp.forecast_accuracy([r])["rows"] == [], (
+        "claude-cli models bill nothing, so there is no estimate to be right "
+        "or wrong about")

@@ -8,7 +8,6 @@ class _Task:
             self.scoring["tolerance"] = tolerance
 
 
-
 def test_extract_strips_cohere_end_of_turn():
     assert scoring.extract_answer("ANSWER: 84041<|END_OF_TURN_TOKEN|>") == "84041"
 
@@ -21,7 +20,6 @@ def test_extract_strips_common_token_families():
         ("ANSWER: 42<|im_end|>", "42"),
     ]:
         assert scoring.extract_answer(raw) == want, raw
-
 
 
 def test_numeric_answer_with_token_scores_one():
@@ -40,7 +38,6 @@ def test_exact_answer_with_token_and_case_scores_one():
     rec = scoring.score_answer(_Task("tea", "exact"),
                                "ANSWER: TEA<|END_OF_TURN_TOKEN|>")
     assert rec["score"] == 1.0
-
 
 
 def test_format_miss_flags_unknown_token_family():
@@ -283,3 +280,82 @@ def test_a_100_percent_model_says_so_plainly():
                              "avail_pct": 100.0})
     assert "100%" in row["v"] and "116" in row["v"]
     assert _availability_row({"avail": {"attempts": 0}}) is None
+
+
+def test_the_shared_answer_verifier_does_not_bluff_on_a_regex_task():
+    from harness import config
+    src = (config.ROOT / "tasks-refs" / "_verify.py").read_text(
+        encoding="utf-8")
+    i = src.index('if mt == "regex":')
+    seg = src[i:i + 700]
+    assert "no correct response can be derived" in seg, (
+        "it used to build the 'correct' case by pasting the answer field into "
+        "an ANSWER line, which for a regex key is a pattern — it reported a "
+        "sound task as FAILED")
+    assert "verify.py" in seg
+
+
+def _ledger():
+    import sys
+    from harness import config
+    p = config.ROOT / "tasks-refs" / "rs-014-ledger-amend-chain"
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+    import generate
+    return generate
+
+
+def test_the_ledger_key_survives_a_second_independent_resolver():
+    import sys
+    from harness import config
+    g = _ledger()
+    p = str(config.ROOT / "tasks-refs" / "rs-014-ledger-amend-chain")
+    if p not in sys.path:
+        sys.path.insert(0, p)
+    import verify as v
+    for seed in (14, 46, 78, 110):
+        d = g.build(seed)
+        assert v.from_text(g.render(d), d["target"]) == d["answer"], (
+            f"seed {seed}: re-reading the rendered log disagrees with the "
+            f"generator, so the key rests on one implementation — the mistake "
+            f"that shipped two dead tasks before this one")
+
+
+def test_every_shortcut_lands_on_a_different_wrong_number():
+    g = _ledger()
+    for seed in (14, 46, 78, 110, 142):
+        d = g.build(seed)
+        vals = d["traps"]
+        assert d["answer"] not in vals.values(), (
+            f"seed {seed}: a shortcut reaches the right answer, so the task "
+            f"rewards not reading carefully")
+        assert len(set(vals.values())) >= 3, f"seed {seed}: {vals}"
+
+
+def test_the_ledger_answer_is_not_guessable():
+    g = _ledger()
+    keys = [g.build(s)["answer"] for s in range(1, 31)]
+    assert len(set(keys)) == len(keys), "a key repeats across seeds"
+    assert max(abs(k) for k in keys) > 500, "the range is too narrow to matter"
+
+
+def test_missing_one_entry_changes_the_total():
+    g = _ledger()
+    d = g.build(14)
+    mine = {op["tid"] for op in d["lines"]
+            if op["op"] == "post" and op["account"] == d["target"]}
+    counting = []
+    for tid in mine:
+        gate = [op["op"] for op in d["lines"]
+                if op["tid"] == tid and op["op"] in ("void", "restore")]
+        if not (gate and gate[-1] == "void"):
+            counting.append(tid)
+    assert len(counting) >= 10, (
+        f"only {len(counting)} entries count towards the answer; the "
+        f"mechanism this task is built on is exhaustive aggregation, which "
+        f"needs enough items that missing one is likely")
+    for tid in counting[:5]:
+        without = [op for op in d["lines"] if op["tid"] != tid]
+        assert g.resolve(without, d["target"]) != d["answer"], (
+            f"dropping {tid} leaves the total unchanged, so it is not load "
+            f"bearing")

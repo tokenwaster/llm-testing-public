@@ -11,19 +11,19 @@ def _block(start: str, length: int = 1400) -> str:
 
 
 def test_the_matrix_lens_sort_puts_partial_rows_last():
-    js = _block("var scored=rows.map(function(r){")
+    js = _block("var scored=live.map(function(r){")
     assert "p:r.classList.contains('partial')" in js
     assert "if(a.p!==b.p) return a.p?1:-1;" in js
 
 
 def test_the_matrix_gap_is_measured_from_a_complete_row():
-    js = _block("var scored=rows.map(function(r){")
+    js = _block("var scored=live.map(function(r){")
     assert "var full=scored.filter(function(o){ return !o.p&&!isNaN(o.v); });" in js
     assert "var lead=full.length?full[0].v:NaN" in js
 
 
 def test_the_matrix_never_ranks_or_leads_a_partial_row():
-    js = _block("var scored=rows.map(function(r){")
+    js = _block("var scored=live.map(function(r){")
     assert "rk.textContent=o.p?'—':String(rk_n)" in js
     assert "o.r.classList.toggle('lead', !o.p&&rk_n===1&&!isNaN(o.v))" in js
 
@@ -84,3 +84,15 @@ def test_the_rendered_overview_has_no_ranked_partial_row():
         if gp:
             assert "+-" not in gp.group(1), \
                 f"partial row gap renders a negative as positive: {gp.group(1)!r}"
+
+
+def test_the_matrix_ranks_within_the_chosen_cohort():
+    js = _block("var scored=live.map(function(r){")
+    assert "live.map" in js, (
+        "ranking must run over the cohort-filtered rows; ranking all 43 and "
+        "then hiding some leaves gaps in # and a leader that is not shown")
+    clear = _block("rows.forEach(function(r){ r.classList.remove('lead'); });",
+                   200)
+    assert "remove('lead')" in clear, (
+        "the previous cohort's leader keeps its highlight otherwise, so two "
+        "rows read as first")
