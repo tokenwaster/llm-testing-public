@@ -24,6 +24,22 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
+## 0.7.8 — the evidence links actually work
+
+### The site links its evidence to GitHub, and now points at the right tree
+Report pages carry 10,262 links to the raw transcripts, rewritten from the
+operator's `/data/` routes to `github.com/tokenwaster/llm-testing-public`. The
+rewrite hardcoded `runs/<id>`, but a run id lives in one of seven published
+trees — `runs/` (55), `special/` (144) or `archive/v0.2..v0.6/runs/` (133). On a
+400-link sample, **185 of 400 pointed at a path that does not exist**: every
+archived and every probe run.
+
+Links now resolve the run id against a built index of all 332 published runs.
+Checked exhaustively rather than sampled: all 10,262 resolve. The export prints
+a warning if any link names a run in no published tree, so this cannot rot
+silently. An empty `/data/` link means the evidence root and is no longer
+counted as a miss.
+
 ## 0.7.7 — the site is its own deploy root
 
 ### reports/ is a self-contained deploy root
