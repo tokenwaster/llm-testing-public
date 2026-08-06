@@ -2121,11 +2121,11 @@ _COST_NOTE: str | None = None
 _COST_NOTE_SCOPE: str = ""
 
 
-def cost_note() -> str:
+def cost_note(up: str = "") -> str:
     global _COST_NOTE, _COST_NOTE_SCOPE
     scope = f"{config.SPECIAL_DIR}|{config.RUNS_DIR}"
     if _COST_NOTE is not None and _COST_NOTE_SCOPE == scope:
-        return _COST_NOTE
+        return _COST_NOTE.replace("{up}", up)
     _COST_NOTE_SCOPE = scope
     from . import apicost
     acc = apicost.accuracy()
@@ -2139,21 +2139,21 @@ def cost_note() -> str:
             "any number would be invented. Every other row is what the provider "
             "billed, or list pricing on real token counts. Claude cost lands "
             "here when the full suite has been run through the API, not before. "
-            "<a href=\"info.html#costbasis\">The method</a>.")
-        return _COST_NOTE
+            "<a href=\"{up}info.html#costbasis\">The method</a>.")
+        return _COST_NOTE.replace("{up}", up)
     _COST_NOTE = (
         "<b>Claude has no cost figure here, on purpose.</b> Every Claude model is "
         "measured through the Claude Code CLI, which runs on a <b>subscription</b> "
         "— there is no per-token price to report, so any number would be invented. "
         "Every other row is what the provider billed, or list pricing on real "
         "token counts. We tried publishing a derived API-equivalent and "
-        "<a href=\"info.html#costbasis\">measurement refuted it twice</a>: the CLI "
+        "<a href=\"{up}info.html#costbasis\">measurement refuted it twice</a>: the CLI "
         "sends its own instructions, reads its own files and carries its own "
         "conversation, so it consumed <b>16× more input per turn</b> than the same "
         "model doing the same task through an API — a different agent, not a "
         "fixed overhead, and nothing you can subtract. Claude cost lands here when "
         "the full suite has been run through the API, not before.")
-    return _COST_NOTE
+    return _COST_NOTE.replace("{up}", up)
 
 
 _EQUIV_MODELS: dict | None = None
@@ -3140,7 +3140,7 @@ def build_task_report(task_id: str, info: dict, tdef,
     } for e in reversed(info["history"])]
 
     return _compiled(TASK_TEMPLATE).render(
-        cost_note=cost_note(),
+        cost_note=cost_note("../"),
         nav=_nav("../"), brand=_brand("../"),
         sort_js=_SORT_JS, focus_js=_FOCUS_JS,
         files_col=(_RUNS_BASE == config.RUNS_DIR),
@@ -3230,7 +3230,7 @@ def build_run_report(run: dict, tdefs: dict | None = None) -> str:
         "recovered": ar["retries"]["recovered"], "fatal": ar["retries"]["fatal"],
     }
     return _compiled(RUN_TEMPLATE).render(
-        cost_note=cost_note(),
+        cost_note=cost_note("../"),
         nav=_nav("../"), brand=_brand("../"),
         sort_js=_SORT_JS,
         css=BASE_CSS, run_id=run["run_id"], manifest=run["manifest"],
@@ -3891,7 +3891,7 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
             import json as _json
             verscmp = _json.dumps(payload).replace("</", "<\\/")
     return _compiled(MODEL_TEMPLATE).render(
-        cost_note=cost_note(),
+        cost_note=cost_note("../"),
         nav=_nav("../"), brand=_brand("../"),
         sort_js=_SORT_JS, verscmp=verscmp, verscmp_js=_VERSCMP_JS,
         css=BASE_CSS, model=html.escape(model), slug_q=quote(model),

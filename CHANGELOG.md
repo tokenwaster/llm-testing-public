@@ -24,6 +24,36 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
+## 0.7.7 — the site is its own deploy root
+
+### reports/ is a self-contained deploy root
+The site is 606 files and 88 MB; the rest of the repo is 54,000 files of
+evidence. Cloudflare Pages caps a deployment at 20,000 files, so a repo-root
+deploy is rejected — but `_headers`, `_redirects`, `robots.txt`,
+`sitemap.xml`, `llms.txt`, `favicon.svg` and `og.png` all sat at the repo root
+and assumed exactly that deploy.
+
+They now land in `reports/` beside `index.html`, and every URL drops its
+`/reports/` prefix. Point a Pages or Netlify project at the `reports`
+directory and it serves: 606 files, headers applied, pretty URLs working.
+`/reports/* -> /:splat` keeps the URLs 0.7.6 published resolving.
+
+Two traps came with the move. `NO_CRAWL` disallowed `/runs/`, `/models/`,
+`/special/` and `/tasks-refs/` to keep crawlers out of the raw evidence — but
+with `reports/` as the root those paths are the run, model and probe *report*
+pages, so the list would have deindexed most of the site. It is empty now,
+because nothing outside `reports/` is served at all. Same for the `_headers`
+`X-Robots-Tag: noindex` rules on `/runs/*` and `/archive/*`.
+
+### The cost-basis link 404'd on 583 published pages
+`cost_note()` emitted `href="info.html#costbasis"` with no depth prefix, so it
+resolved correctly only from `reports/*.html`. Every model, task, run and
+dataset page — 583 of them, live on the site since 0.7.5 — pointed at a file
+beside itself that does not exist. It now takes a prefix, nested builders pass
+`../`, and the memoised note keeps a placeholder so one cached string still
+serves both depths. A test reads the AST and asserts each builder passes the
+prefix its output depth requires.
+
 ## 0.7.6 — hard tasks exist again
 
 ### Hard was unreachable, and 17 tasks belonged to no lens

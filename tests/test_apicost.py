@@ -526,7 +526,40 @@ def test_every_cost_bearing_page_shows_the_basis_note():
     for tpl in ("INDEX_TEMPLATE", "MODEL_TEMPLATE", "COMPARE_TEMPLATE",
                 "TASK_TEMPLATE", "RUN_TEMPLATE", "INFO_TEMPLATE"):
         i = src.index(f"    return _compiled({tpl}).render(")
-        assert "cost_note=cost_note()" in src[i:i + 200], tpl
+        assert "cost_note=cost_note(" in src[i:i + 200], tpl
+
+
+def test_the_basis_note_link_matches_the_depth_of_its_page():
+    from harness import report as rp
+    assert 'href="info.html#costbasis"' in rp.cost_note()
+    assert 'href="../info.html#costbasis"' in rp.cost_note("../")
+    assert "{up}" not in rp.cost_note() and "{up}" not in rp.cost_note("../")
+
+
+def test_a_nested_page_passes_the_prefix():
+    import ast
+
+    from harness import config
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    nested = {"build_model_report", "build_task_report", "build_run_report"}
+    flat = {"build_index", "build_info_page", "build_compare_page"}
+    seen = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name not in nested | flat:
+            continue
+        for call in ast.walk(node):
+            if (isinstance(call, ast.Call)
+                    and getattr(call.func, "id", "") == "cost_note"):
+                seen[node.name] = [ast.literal_eval(a) for a in call.args]
+    for fn in nested:
+        assert seen.get(fn) == ["../"], (
+            f"{fn} writes into a subdirectory, so a bare info.html link 404s "
+            f"there. 583 published pages carried exactly that: {seen.get(fn)}")
+    for fn in flat:
+        assert seen.get(fn) in ([], [""]), f"{fn}: {seen.get(fn)}"
 
 
 def test_the_info_page_records_what_refuted_the_estimate():
