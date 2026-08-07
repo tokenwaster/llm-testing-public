@@ -24,6 +24,31 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
+## 0.7.9 — hard is now visible on the page it describes
+
+### Task and model pages show the measured difficulty
+The lens counts (Hard 23, Frontier 2, Easy 31) were correct everywhere they
+were shown, but that was only index.html and discriminate.html. MODEL_TEMPLATE
+mentioned hard, frontier and discriminator zero times, and a task page showed
+only its agentic tier out of meta.yaml — nothing about measured difficulty.
+
+Task pages now carry a badge beside the category that states its own evidence
+rather than asserting a label: ctx-012-aggregate-reversals-32k reads
+"hard — spread 0.48 across 46 models, top-8 mean 1.00, top-to-bottom gap
++1.00. Classified discriminator." All 56 pages are labelled, reconciling with
+the lens counts.
+
+Model pages gain a score split by lens, because one mean hides where a model
+loses it. minicpm5-1b's headline is 0.234; split by lens it is easy 0.368,
+hard 0.017, frontier 0.000 — a model that has essentially no capability
+past the easy third of the suite, which the single figure does not say.
+gpt-5.6-sol reads 1.000 / 0.999 / 0.948 by contrast.
+
+Both read from one discrimination_stats pass shared across all task and model
+pages, keyed off the same per-model cell index the lenses are built from, so
+the two surfaces cannot disagree about what "hard" means. A model with no
+cells in a subset gets no figure rather than an invented 0.000.
+
 ## 0.7.8 — the evidence links actually work
 
 ### The site links its evidence to GitHub, and now points at the right tree

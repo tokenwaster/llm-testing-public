@@ -642,6 +642,12 @@ h1 { font-size:21px; font-weight:650; letter-spacing:-.01em; margin:0; }
   border:1px solid var(--border); font-size:11.5px; text-decoration:none; white-space:nowrap; }
 .reflink:hover { border-color:var(--accent); color:var(--accent); }
 __HEADER_CSS__
+.tag.lens-hard { background:transparent; color:var(--warn);
+  border:1px solid var(--warn); }
+.tag.lens-frontier { background:transparent; color:var(--crit);
+  border:1px solid var(--crit); }
+.tag.lens-easy, .tag.lens-mid { background:transparent; color:var(--muted);
+  border:1px solid var(--hair); }
 .tag { display:inline-block; background:var(--accent-soft); color:var(--accent);
   border-radius:20px; padding:2px 11px; font-size:11.5px; font-weight:600;
   margin-left:10px; vertical-align:2px; }
@@ -1151,7 +1157,7 @@ generation time (excludes time-to-first-token).</div>
 TASK_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ task_id }} · LLM Testing</title><style>{{ css }}</style></head><body>
-<div class="topbar">{{ brand }}<div class="ttl"><h1>{{ title }}<span class="tag">{{ category }} · tier {{ tier }}</span></h1></div>
+<div class="topbar">{{ brand }}<div class="ttl"><h1>{{ title }}<span class="tag">{{ category }} · tier {{ tier }}</span>{% if lens %}<span class="tag lens-{{ lens.key }}" title="{{ lens.why }}">{{ lens.label }}</span>{% endif %}</h1></div>
 <div class="nav">{{ nav }}</div></div>
 <div class="pagebar"><div class="sub">{{ task_id }} · scoring: {{ scoring_type }} ·
    task version {{ task_hash }}</div></div>
@@ -3067,8 +3073,32 @@ def _rank_key(entry: dict):
             -(entry.get("gen_tokens_per_sec") or 0))
 
 
+LENS_LABEL = {"frontier": "◆◆ frontier", "hard": "◆ hard",
+              "easy": "easy", "mid": "unclassified"}
+
+
+def lens_badge(tid: str, dstats: dict | None = None) -> dict | None:
+    d = dstats or discrimination_stats(load_all_runs(), _task_defs())
+    row = next((r for r in d["rows"] if r["tid"] == tid), None)
+    if row is None:
+        return None
+    flag = row["flag"]
+    key = ("frontier" if flag == "frontier"
+           else "hard" if flag in HARD_FLAGS
+           else "easy" if flag in ("ceiling", "dead") else "mid")
+    top = row.get("top_mean")
+    gap = row.get("gap")
+    why = (f"{LENS_LABEL[key]} — spread {row['sd']:.2f} across "
+           f"{row['n']} models, top-{d['cohort_k']} mean "
+           f"{'—' if top is None else f'{top:.2f}'}"
+           + ("" if gap is None else f", top-to-bottom gap {gap:+.2f}")
+           + f". Classified {flag}.")
+    return {"key": key, "label": LENS_LABEL[key], "why": why, "flag": flag}
+
+
 def build_task_report(task_id: str, info: dict, tdef,
-                      acfg: dict | None = None, suspect: dict | None = None) -> str:
+                      acfg: dict | None = None, suspect: dict | None = None,
+                      dstats: dict | None = None) -> str:
     results = sorted(info["agg"].values(), key=_rank_key)
     rows = []
     tout_max = max((e["tokens_out"] or 0) for e in results) or 1
@@ -3147,6 +3177,7 @@ def build_task_report(task_id: str, info: dict, tdef,
         css=BASE_CSS, task_id=task_id,
         title=html.escape(tdef.title) if tdef else task_id,
         category=info["category"], tier=info["tier"],
+        lens=lens_badge(task_id, dstats),
         scoring_type=(tdef.scoring_type if tdef else "?"),
         task_hash=(tdef.content_hash if tdef else info["history"][-1]["task_hash"]),
         prompt=html.escape(tdef.prompt) if tdef else "",
@@ -3673,6 +3704,44 @@ def _confirmed_row(entry: dict | None) -> dict | None:
             "can be checked this way — a gateway keeps no log we can read.</div>"}
 
 
+def _lens_row(model: str, dstats: dict | None = None) -> dict | None:
+    d = dstats
+    if d is None:
+        return None
+    subs = (("frontier", d.get("frontier_subset") or [], "#d03b3b"),
+            ("hard", d.get("hard_subset") or [], "#fab219"),
+            ("easy", d.get("easy_subset") or [], "#0ca30c"))
+    td = {tid: r for tid, r in
+          ((row["tid"], row) for row in d.get("rows") or [])}
+    cells = d.get("per_model_scores") or {}
+    parts, missing = [], []
+    for name, ids, col in subs:
+        vals = [cells[(model, tid)] for tid in ids
+                if (model, tid) in cells]
+        if not vals:
+            missing.append(name)
+            continue
+        mean = sum(vals) / len(vals)
+        parts.append(f'<b style="color:{col}">{name} {mean:.3f}</b>'
+                     f'<span class="note" style="font-size:11px"> '
+                     f'({len(vals)}/{len(ids)})</span>')
+    if not parts:
+        return None
+    return {"k": "Score by difficulty lens",
+            "v": (" · ".join(parts)
+                  + '<div class="note" style="font-size:11.5px;margin-top:2px">'
+                    'The same runs, split by how much each task separates the '
+                    'fleet. A single mean hides where a model actually loses: '
+                    'easy tasks are the ones nearly everything passes, hard '
+                    'ones split the fleet, frontier ones the top cohort still '
+                    'fails. '
+                    '<a href="../discriminate.html">How each task is '
+                    'classified</a>.'
+                  + (f' No data yet on: {", ".join(missing)}.' if missing
+                     else "")
+                  + '</div>')}
+
+
 def _availability_row(s: dict) -> dict | None:
     a = s.get("avail") or {}
     if not a.get("attempts"):
@@ -3709,7 +3778,8 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
                        dataset_label: str = "",
                        versions: list[tuple] | None = None,
                        mirror_row: dict | None = None,
-                       confirmed_row: dict | None = None) -> str:
+                       confirmed_row: dict | None = None,
+                       dstats: dict | None = None) -> str:
     task_data = {tid: info for tid, info in collect_task_data(runs).items()
                  if tid in tdefs}
     mine = [(tid, info["agg"][model]) for tid, info in task_data.items()
@@ -3786,6 +3856,9 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
                       "k": f"VRAM @{VRAM_REF_CTX // 1024}k · "
                            f"{fp['weights_gb']:.0f}GB wt + KV · {fp['quant']}"})
     detail_rows = _model_detail_rows(mo, meta_info, fp, hosts, s)
+    _lens = _lens_row(model, dstats)
+    if _lens:
+        detail_rows.append(_lens)
     _av = _availability_row(s)
     if _av:
         detail_rows.append(_av)
@@ -5648,6 +5721,9 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
             clusters.append((round(c, 3), a, b))
     clusters.sort(reverse=True)
 
+    per_model_scores = {(m, tid): sc
+                        for tid, sc in tvecs.items()
+                        for m, sc in ((m, v) for m, v in sc.items())}
     hard = [r["tid"] for r in rows if r["flag"] in HARD_FLAGS]
     frontier = [r["tid"] for r in rows if r["flag"] == "frontier"]
     easy = [r["tid"] for r in rows if r["flag"] in ("ceiling", "dead")]
@@ -5694,6 +5770,7 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
         "frontier_rank": frontier_rank,
         "easy_subset": easy,
         "easy_rank": easy_rank,
+        "per_model_scores": per_model_scores,
         "top_spread": top_spread,
         "cohort_k": k,
         "top_models": ranked[:k],
@@ -7218,11 +7295,13 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
         _acfg = assess.load_cfg()
         _tdata = collect_task_data(runs)
         _suspect = assess.suspect_answers(_tdata, tdefs, _acfg)
+        _dstats = discrimination_stats(runs, tdefs)
         for tid, info in _tdata.items():
             if tid not in tdefs:
                 continue
             _w(out_tasks / f"{tid}.html",
-               build_task_report(tid, info, tdefs.get(tid), _acfg, _suspect))
+               build_task_report(tid, info, tdefs.get(tid), _acfg, _suspect,
+                                 _dstats))
         out_models = out_dir / "models"
         out_models.mkdir(parents=True, exist_ok=True)
         for stale in out_models.glob("*.html"):
@@ -7250,7 +7329,7 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
             _w(out_models / f"{_slug_name(m)}.html",
                build_model_report(m, runs, tdefs, dataset_label, versions,
                                   _mirror_detail_row(mirror_by_model.get(m)),
-                                  _confirmed_row(confirmed.get(m))))
+                                  _confirmed_row(confirmed.get(m)), _dstats))
         _w(out_dir / "info.html",
            build_info_page(runs, tdefs, dataset_label, dataset_key))
         _w(out_dir / "discriminate.html",

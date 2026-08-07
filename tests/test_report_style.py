@@ -522,3 +522,68 @@ def test_the_hardened_repeat_set_is_not_empty():
         f"only the 2 frontier tasks while hard was unreachable, so the repeat "
         f"set measured almost nothing. now {len(ids)}")
     assert all(tiers[t] in rp.HARDENED_TIERS for t in ids)
+
+
+def test_every_task_page_states_its_measured_difficulty():
+    import re
+    from pathlib import Path
+    from harness import config
+    pages = list((config.REPORTS_DIR / "tasks").glob("*.html"))
+    if not pages:
+        import pytest
+        pytest.skip("reports not generated")
+    seen = {}
+    for p in pages:
+        m = re.search(r'class="tag lens-(\w+)"', p.read_text(encoding="utf-8"))
+        seen[p.stem] = m.group(1) if m else None
+    missing = [k for k, v in seen.items() if v is None]
+    assert not missing, (
+        f"a task page showed only its agentic tier from meta.yaml, never the "
+        f"measured difficulty the whole suite is classified by: {missing[:5]}")
+    assert set(seen.values()) <= {"hard", "frontier", "easy", "mid"}
+
+
+def test_the_task_badge_carries_the_evidence_for_its_own_label():
+    from harness import report as rp
+    b = rp.lens_badge("ctx-012-aggregate-reversals-32k")
+    assert b["key"] == "hard"
+    for frag in ("spread", "top-8 mean", "Classified"):
+        assert frag in b["why"], (
+            f"a badge that just says 'hard' is an assertion; it has to show "
+            f"the numbers that put it there. missing {frag}")
+
+
+def test_every_model_page_splits_its_score_by_lens():
+    from pathlib import Path
+    from harness import config
+    pages = list((config.REPORTS_DIR / "models").glob("*.html"))
+    if not pages:
+        import pytest
+        pytest.skip("reports not generated")
+    bad = [p.stem for p in pages
+           if "Score by difficulty lens" not in p.read_text(encoding="utf-8")]
+    assert not bad, (
+        f"one mean hides where a model loses — minicpm5-1b reads 0.368 easy "
+        f"but 0.017 hard. missing on: {bad[:5]}")
+
+
+def test_the_lens_breakdown_uses_the_same_cells_as_the_lenses():
+    from harness import report as rp
+    d = rp.discrimination_stats(rp.load_all_runs(), rp._task_defs())
+    assert d["per_model_scores"], "no per-model cell index"
+    row = rp._lens_row("gpt-5.6-sol", d)
+    assert row is not None
+    for name, ids in (("hard", d["hard_subset"]),
+                      ("easy", d["easy_subset"])):
+        assert f"({len(ids)}/{len(ids)})" in row["v"] or f"/{len(ids)})" in \
+            row["v"], (
+            f"the {name} count on a model page must match the {name} lens, or "
+            f"the two surfaces disagree about what hard means")
+
+
+def test_a_model_with_no_data_for_a_lens_says_so():
+    from harness import report as rp
+    d = rp.discrimination_stats(rp.load_all_runs(), rp._task_defs())
+    assert rp._lens_row("a-model-that-never-ran", d) is None, (
+        "inventing a 0.000 for a model that never ran the subset would read "
+        "as a measurement")
