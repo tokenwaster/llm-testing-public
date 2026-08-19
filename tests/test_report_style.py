@@ -358,6 +358,26 @@ def test_the_special_page_prose_link_is_not_offered_on_an_archived_dataset():
     assert "{% else %}the Special page{% endif %}" in seg
 
 
+def test_the_caveats_special_link_is_also_stripped_on_an_archived_dataset():
+    from harness import report
+    live = report.build_info_page(report.load_all_runs(), report._task_defs(),
+                                  dataset_key="live")
+    arch = report.build_info_page(report.load_all_runs(), report._task_defs(),
+                                  dataset_key="0.2")
+    needle = 'href="special.html">Special</a> page can re-run'
+    assert needle in live, (
+        "the token-budget caveat entry links special.html on the live "
+        "dataset — a second, separate occurrence from the prose fix above, "
+        "living in the CAVEATS list rather than INFO_TEMPLATE itself")
+    assert needle not in arch, (
+        "this exact link 404'd on every archived dataset's info page — "
+        "found only by rendering both and diffing, not by reading the "
+        "template source, because CAVEATS is a plain Python list substituted "
+        "in wholesale and grep on report.py only ever shows one of the two "
+        "places special.html gets mentioned")
+    assert "the Special page can re-run" in arch
+
+
 def test_no_css_or_js_comments_survive_inside_page_strings():
     import io
     import re

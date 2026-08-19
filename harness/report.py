@@ -5622,7 +5622,9 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         lanes=LANE_BLURBS,
         metrics=METRIC_GLOSSARY,
         statuses=STATUS_GLOSSARY,
-        caveats=CAVEATS,
+        caveats=(CAVEATS if dataset_key == "live" else
+                [(t, b.replace('<a href="special.html">Special</a>',
+                               "Special")) for t, b in CAVEATS]),
         charts=CHART_GUIDE,
         envs=envs,
         failures=[(name, who, desc)
