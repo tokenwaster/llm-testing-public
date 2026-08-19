@@ -1221,7 +1221,7 @@ truncated for display — full text lives in runs/…/transcript.jsonl.</div>
 INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LLM Testing · Overview</title>
-<link rel="alternate" type="application/atom+xml" title="LLM Testing — models tested" href="feed.xml">
+{% if dataset_key == "live" %}<link rel="alternate" type="application/atom+xml" title="LLM Testing — models tested" href="feed.xml">{% endif %}
 <style>{{ css }}
 .mast { border-bottom:2px solid var(--ink); padding-bottom:16px; margin:18px 0 4px; }
 .mast .eyebrow { font-family:var(--mono); font-size:11px; letter-spacing:.2em;
@@ -1245,7 +1245,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     border-radius:7px;padding:4px 8px;font:inherit;font-size:12.5px"></select>
   <div class="sub">{% if dataset_label %}{{ dataset_label }} · {% endif %}one
   suite version per dataset · suite v{{ suite_version }}{% if data_asof %} ·
-  <strong>data as of {{ data_asof }}</strong> · <a href="feed.xml">feed</a>{% endif %}</div></div>
+  <strong>data as of {{ data_asof }}</strong>{% if dataset_key == "live" %} · <a href="feed.xml">feed</a>{% endif %}{% endif %}</div></div>
 {% if dataset_caveat %}
 <div class="card" style="border-left:3px solid var(--warn,#c90);background:var(--surface);
   margin:10px 0;padding:10px 14px;font-size:13px">⚠ {{ dataset_caveat }}</div>
@@ -3770,7 +3770,7 @@ def _availability_row(s: dict) -> dict | None:
                   'its score, because a model you cannot get an answer out of is '
                   'a worse model to buy — this row says whose fault it was. '
                   f'Affected: {cells}{more}. '
-                  '<a href="info.html#availability">How this is counted</a>.'
+                  '<a href="../info.html#availability">How this is counted</a>.'
                   '</div>')}
 
 
@@ -5469,8 +5469,8 @@ the measured <code>lms load</code> cold-start time.</p>
 it, so you can delete <code>reports/</code> and regenerate at any time — and you
 can audit any number on this site down to the raw exchange that produced it.</p>
 <p><strong>Experimental probes are kept separate and count toward nothing.</strong>
-One-off experiments — like the spiral-window study on <a href="special.html">the
-Special page</a>, measuring how long each model takes to <em>start</em> answering —
+One-off experiments — like the spiral-window study on {% if dataset_key == "live" %}<a href="special.html">the
+Special page</a>{% else %}the Special page{% endif %}, measuring how long each model takes to <em>start</em> answering —
 run outside the dataset entirely. They never touch the leaderboard, discrimination,
 or any model's score; they are a scratchpad, shown read-only for transparency.</p>
 <table><thead><tr><th>Path</th><th>What's in it</th></tr></thead><tbody>

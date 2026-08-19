@@ -332,6 +332,32 @@ def test_live_only_pages_match_what_generate_all_actually_writes():
             f"{page} is in _LIVE_ONLY but not written in the live-only block")
 
 
+def test_the_feed_link_is_not_offered_on_an_archived_dataset():
+    from harness import report
+    tpl = report.INDEX_TEMPLATE
+    assert 'dataset_key == "live" %}<link rel="alternate"' in tpl, (
+        "an unconditional feed link 404s on every archived dataset, which "
+        "never gets its own feed.xml written — confirmed live: v0.2 through "
+        "v0.6 all linked one that does not exist")
+    assert 'dataset_key == "live" %} · <a href="feed.xml">' in tpl, (
+        "the pagebar's visible feed link needs the same gate as the atom "
+        "<link> tag in <head>")
+
+
+def test_the_special_page_prose_link_is_not_offered_on_an_archived_dataset():
+    from harness import report
+    tpl = report.INFO_TEMPLATE
+    i = tpl.index("spiral-window study on")
+    seg = tpl[max(0, i - 40):i + 160]
+    assert 'href="special.html"' not in seg.replace(
+        '{% if dataset_key == "live" %}<a href="special.html">', ""), (
+        "special.html is only written for the live dataset, so mentioning "
+        "it as an unconditional link in this prose 404s on every archived "
+        "dataset's info page — confirmed live on v0.2 through v0.6")
+    assert '{% if dataset_key == "live" %}<a href="special.html">' in seg
+    assert "{% else %}the Special page{% endif %}" in seg
+
+
 def test_no_css_or_js_comments_survive_inside_page_strings():
     import io
     import re

@@ -270,7 +270,10 @@ def test_the_uptime_column_and_row_are_on_the_pages():
     assert "{{ r.avail }}" in src and "{{ r.avail_why }}" in src
     assert "def _availability_row" in src
     assert 'id="availability"' in src, "the split needs an info-page anchor"
-    assert 'href="info.html#availability"' in src
+    assert 'href="../info.html#availability"' in src, (
+        "the availability row renders on model pages, which live one "
+        "directory below info.html — a bare href without ../ 404s from "
+        "there, which shipped live on every model page until this was fixed")
 
 
 def test_a_100_percent_model_says_so_plainly():
