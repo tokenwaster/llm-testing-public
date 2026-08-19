@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Billiards</title>
+<style>
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  body {
+    background: #111418;
+    color: #f0f0f0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 16px;
+  }
+  header {
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    max-width: 900px;
+  }
+  h1 {
+    font-size: 24px;
+    letter-spacing: 1px;
+    color: #e0d0a0;
+    font-weight: 700;
+  }
+  .controls {
+    display: flex;
+    gap: 10px;
+  }
+  button {
+    background: #2a3b2e;
+    color: #d8eedc;
+    border: 1px solid #4a6b52;
+    padding: 8px 18px;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  button:hover {
+    background: #39523f;
+    border-color: #6da278;
+    color: #fff;
+  }
+  button:active {
+    transform: scale(0.97);
+  }
+  #game-container {
+    position: relative;
+    background: #3e2712;
+    padding: 24px;
+    border-radius: 18px;
+    box-shadow: 0 16px 40px rgba(0,0,0,0.7), inset 0 2px 4px rgba(255,255,255,0.15), inset 0 -4px 8px rgba(0,0,0,0.5);
+    border: 4px solid #231407;
+  }
+  canvas {
+    display: block;
+    border-radius: 6px;
+    cursor: crosshair;
+    box-shadow: inset 0 0 20px rgba(0,0,0,0.6);
+  }
+  .instructions {
+    margin-top: 14px;
+    text-align: center;
+    font-size: 14px;
+    color: #a0b0a8;
+    max-width: 900px;
+    line-height: 1.5;
+  }
+  .instructions strong {
+    color: #ffd166;
+  }
+  .instructions span.badge {
+    background: rgba(255,255,255,0.08);
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.15);
+    color: #fff;
+    margin: 0 3px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>BILLIARDS 8-BALL</h1>
+  <div class="controls">
+    <button id="btn-rack" onclick="rackBalls()">Rack / Reset</button>
+  </div>
+</header>
+
+<div id="game-container">
+  <canvas id="tableCanvas"></canvas>
+</div>
+
+<div class="instructions">
+  <strong>How to Shoot:</strong> Click &amp; hold on the <span class="badge">White Cue Ball</span>, drag <strong>backwards</strong> to aim &amp; adjust power, then release to strike.
+  <br>Longer drag = harder shot. Click <span class="badge">Rack / Reset</span> to start a new game anytime.
+</div>
+
+<script>
+(function () {
+  const W = 800;
+  const H = 400;
+  const R = 14;
+  const CUSHION = 36;
+  const POCKET_RADIUS = 26;
+  const FRICTION = 110; // px/sec^2 deceleration
+
+  const canvas = document.getElementById('tableCanvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = W + CUSHION * 2;
+  canvas.height = H + CUSHION * 2;
+
+  const pockets = [
+    { x: 0, y: 0 },
+    { x: W / 2, y: -2 },
+    { x: W, y: 0 },
+    { x: 0, y: H },
+    { x: W / 2, y: H + 2 },
+    { x: W, y: H }
+  ];
+
+  const BALL_COLORS = [
+    { name: 'cue', color: '#ffffff', stripe: false, num: 0 },
+    { name: '1', color: '#ffd000', stripe: false, num: 1 },
+    { name: '2', color: '#0055d4', stripe: false, num: 2 },
+    { name: '3', color: '#e62222', stripe: false, num: 3 },
+    { name: '4', color: '#5b1e8a', stripe: false, num: 4 },
+    { name: '5', color: '#f56b00', stripe: false, num: 5 },
+    { name: '6', color: '#138237', stripe: false, num: 6 },
+    { name: '7', color: '#7a1b24', stripe: false, num: 7 },
+    { name: '8', color: '#111111', stripe: false, num: 8 },
+    { name: '9', color: '#ffd000', stripe: true, num: 9 },
+    { name: '10', color: '#0055d4', stripe: true, num: 10 },
+    { name: '11', color: '#e62222', stripe: true, num: 11 },
+    { name: '12', color: '#5b1e8a', stripe: true, num: 12 },
+    { name: '13', color: '#f56b00', stripe: true, num: 13 },
+    { name: '14', color: '#138237', stripe: true, num: 14 },
+    { name: '15', color: '#7a1b24', stripe: true, num: 15 }
+  ];
+
+  let balls = [];
+  let isRunning = true;
+  let animId = null;
+  let lastTime = null;
+
+  // Mouse interaction
+  let isDragging = false;
+  let dragStart = { x: 0, y: 0 };
+  let dragCurrent = { x: 0, y: 0 };
+
+  // Physics sub-step
+  function doSubStep(dt) {
+    if (dt <= 0) return;
+
+    // 1. Move & apply friction
+    for (let i = 0; i < balls.length; i++) {
+      const b = balls[i];
+      if (b.potted) continue;
+
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      const speed = Math.hypot(b.vx, b.vy);
+      if (speed > 0) {
+        const newSpeed = Math.max(0, speed - FRICTION * dt);
+        if (newSpeed === 0) {
+          b.vx = 0;
+          b.vy = 0;
+        } else {
+          const factor = newSpeed / speed;
+          b.vx *= factor;
+          b.vy *= factor;
+        }
+      }
+    }
+
+    // 2. Pocket collisions
+    for (let i = 0; i < balls.length; i++) {
+      const b = balls[i];
+      if (b.potted) continue;
+
+      for (let p = 0; p < pockets.length; p++) {
+        const pocket = pockets[p];
+        const dist = Math.hypot(b.x - pocket.x, b.y - pocket.y);
+        if (dist <= POCKET_RADIUS) {
+          b.potted = true;
+          b.vx = 0;
+          b.vy = 0;
+          break;
+        }
+      }
+    }
+
+    // 3. Cushion collisions
+    for (let i = 0; i < balls.length; i++) {
+      const b = balls[i];
+      if (b.potted) continue;
+
+      if (b.x < R) {
+        b.x = R;
+        b.vx = Math.abs(b.vx);
+      } else if (b.x > W - R) {
+        b.x = W - R;
+        b.vx = -Math.abs(b.vx);
+      }
+
+      if (b.y < R) {
+        b.y = R;
+        b.vy = Math.abs(b.vy);
+      } else if (b.y > H - R) {
+        b.y = H - R;
+        b.vy = -Math.abs(b.vy);
+      }
+    }
+
+    // 4. Ball-to-ball collisions (near-elastic, equal mass)
+    const minDist = 2 * R;
+    const minDistSq = minDist * minDist;
+
+    for (let i = 0; i < balls.length; i++) {
+      const b1 = balls[i];
+      if (b1.potted) continue;
+
+      for (let j = i + 1; j < balls.length; j++) {
+        const b2 = balls[j];
+        if (b2.potted) continue;
+
+        const dx = b2.x - b1.x;
+        const dy = b2.y - b1.y;
+        const distSq = dx * dx + dy * dy;
+
+        if (distSq < minDistSq && distSq > 0.000001) {
+          const dist = Math.sqrt(distSq);
+          const nx = dx / dist;
+          const ny = dy / dist;
+
+          // Positional overlap resolution
+          const overlap = minDist - dist;
+          b1.x -= nx * overlap * 0.5;
+          b1.y -= ny * overlap * 0.5;
+          b2.x += nx * overlap * 0.5;
+          b2.y += ny * overlap * 0.5;
+
+          // Velocity resolution along normal
+          const dvx = b2.vx - b1.vx;
+          const dvy = b2.vy - b1.vy;
+          const vn = dvx * nx + dvy * ny;
+
+          if (vn < 0) {
+            // Elastic collision between equal mass bodies: swap normal velocity components
+            b1.vx += vn * nx;
+            b1.vy += vn * ny;
+            b2.vx -= vn * nx;
+            b2.vy -= vn * ny;
+          }
+        }
+      }
+    }
+  }
+
+  function step(dt) {
+    if (dt <= 0) {
+      draw();
+      return;
+    }
+    const maxSub = 0.001;
+    let remaining = dt;
+    while (remaining > 0) {
+      const h = Math.min(remaining, maxSub);
+      doSubStep(h);
+      remaining -= h;
+    }
+    draw();
+  }
+
+  function draw() {
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 1. Draw outer wood rails & cushions
+    const railGrad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    railGrad.addColorStop(0, '#5a3416');
+    railGrad.addColorStop(0.5, '#40210b');
+    railGrad.addColorStop(1, '#2c1404');
+    ctx.fillStyle = railGrad;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Sights / Diamonds on rail
+    ctx.fillStyle = '#eedaa2';
+    const sightDist = CUSHION / 2;
+    // Long rails
+    for (let i = 1; i <= 7; i++) {
+      if (i === 4) continue; // skip center pocket
+      const sx = CUSHION + (W / 8) * i;
+      ctx.beginPath();
+      ctx.arc(sx, sightDist, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(sx, canvas.height - sightDist, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Short rails
+    for (let i = 1; i <= 3; i++) {
+      if (i === 2) continue; // skip center
+      const sy = CUSHION + (H / 4) * i;
+      ctx.beginPath();
+      ctx.arc(sightDist, sy, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(canvas.width - sightDist, sy, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 2. Felt (Playfield)
+    ctx.translate(CUSHION, CUSHION);
+
+    const feltGrad = ctx.createRadialGradient(W / 2, H / 2, 80, W / 2, H / 2, 500);
+    feltGrad.addColorStop(0, '#157a3e');
+    feltGrad.addColorStop(0.7, '#0d592b');
+    feltGrad.addColorStop(1, '#083d1c');
+    ctx.fillStyle = feltGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Subtle table markings (Head string line & spot)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W * 0.25, 0);
+    ctx.lineTo(W * 0.25, H);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(W * 0.25, H * 0.5, 3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(W * 0.72, H * 0.5, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 3. Pockets
+    for (let i = 0; i < pockets.length; i++) {
+      const p = pockets[i];
+      // Outer metal ring
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, POCKET_RADIUS + 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#222';
+      ctx.fill();
+
+      // Pocket hole
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, POCKET_RADIUS, 0, Math.PI * 2);
+      const pocketGrad = ctx.createRadialGradient(p.x, p.y, 4, p.x, p.y, POCKET_RADIUS);
+      pocketGrad.addColorStop(0, '#000000');
+      pocketGrad.addColorStop(1, '#111111');
+      ctx.fillStyle = pocketGrad;
+      ctx.fill();
+    }
+
+    // 4. Balls
+    for (let i = 0; i < balls.length; i++) {
+      const b = balls[i];
+      if (b.potted) continue;
+
+      // Ball shadow
+      ctx.beginPath();
+      ctx.arc(b.x + 2, b.y + 3, R, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fill();
+
+      // Ball base
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+      ctx.fillStyle = b.cue ? '#ffffff' : (b.color || '#e62222');
+      ctx.fill();
+
+      // Stripe rendering
+      if (b.stripe) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(b.x - R, b.y - R * 0.45, R * 2, R * 0.9);
+        ctx.restore();
+      }
+
+      // Ball number circle
+      if (!b.cue && b.num) {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, R * 0.45, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+
+        ctx.fillStyle = '#111111';
+        ctx.font = `bold ${Math.round(R * 0.55)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(b.num.toString(), b.x, b.y + 0.5);
+      }
+
+      // 3D Specular highlight
+      const grad = ctx.createRadialGradient(b.x - R * 0.35, b.y - R * 0.35, 1, b.x, b.y, R);
+      grad.addColorStop(0, 'rgba(255,255,255,0.7)');
+      grad.addColorStop(0.3, 'rgba(255,255,255,0.15)');
+      grad.addColorStop(0.8, 'rgba(0,0,0,0)');
+      grad.addColorStop(1, 'rgba(0,0,0,0.4)');
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+
+    // 5. Drag / Aiming line and cue stick
+    const cueBall = balls.find(b => b.cue && !b.potted);
+    if (isDragging && cueBall) {
+      const dx = cueBall.x - dragCurrent.x;
+      const dy = cueBall.y - dragCurrent.y;
+      const dragDist = Math.hypot(dx, dy);
+
+      if (dragDist > 3) {
+        const angle = Math.atan2(dy, dx);
+        const power = Math.min(dragDist * 7, 1800);
+
+        // Aim line forward
+        const aimLength = Math.min(600, dragDist * 4 + 100);
+        const aimEndX = cueBall.x + Math.cos(angle) * aimLength;
+        const aimEndY = cueBall.y + Math.sin(angle) * aimLength;
+
+        ctx.save();
+        ctx.setLineDash([6, 6]);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cueBall.x, cueBall.y);
+        ctx.lineTo(aimEndX, aimEndY);
+        ctx.stroke();
+
+        // Ghost target ball at impact
+        ctx.beginPath();
+        ctx.arc(aimEndX, aimEndY, R, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.stroke();
+        ctx.restore();
+
+        // Cue stick behind cue ball
+        ctx.save();
+        ctx.translate(cueBall.x, cueBall.y);
+        ctx.rotate(angle + Math.PI);
+
+        const stickDist = R + 8 + Math.min(dragDist * 0.5, 70);
+        const stickLength = 160;
+
+        // Stick body
+        const stickGrad = ctx.createLinearGradient(stickDist, 0, stickDist + stickLength, 0);
+        stickGrad.addColorStop(0, '#f0d9b5');
+        stickGrad.addColorStop(0.4, '#c89a58');
+        stickGrad.addColorStop(1, '#3b200c');
+        ctx.fillStyle = stickGrad;
+        ctx.beginPath();
+        ctx.moveTo(stickDist, -2.5);
+        ctx.lineTo(stickDist + stickLength, -5.5);
+        ctx.lineTo(stickDist + stickLength, 5.5);
+        ctx.lineTo(stickDist, 2.5);
+        ctx.closePath();
+        ctx.fill();
+
+        // Tip
+        ctx.fillStyle = '#0088cc';
+        ctx.fillRect(stickDist - 4, -2.5, 4, 5);
+
+        ctx.restore();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function loop(now) {
+    if (isRunning) {
+      if (lastTime !== null) {
+        let dt = (now - lastTime) / 1000;
+        if (dt > 0.1) dt = 0.1;
+        if (dt > 0) step(dt);
+      } else {
+        draw();
+      }
+      lastTime = now;
+      animId = requestAnimationFrame(loop);
+    }
+  }
+
+  // Mouse Input Handling
+  function getMousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX - CUSHION,
+      y: (e.clientY - rect.top) * scaleY - CUSHION
+    };
+  }
+
+  function areBallsMoving() {
+    return balls.some(b => !b.potted && (Math.abs(b.vx) > 0.5 || Math.abs(b.vy) > 0.5));
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    const pos = getMousePos(e);
+    let cueBall = balls.find(b => b.cue && !b.potted);
+
+    // If cue ball was potted (scratch), click to place it on head line
+    if (!cueBall) {
+      cueBall = balls.find(b => b.cue);
+      if (cueBall) {
+        cueBall.potted = false;
+        cueBall.x = Math.max(R, Math.min(W * 0.3, pos.x));
+        cueBall.y = Math.max(R, Math.min(H - R, pos.y));
+        cueBall.vx = 0;
+        cueBall.vy = 0;
+        draw();
+        return;
+      }
+    }
+
+    if (!cueBall) return;
+    const dist = Math.hypot(pos.x - cueBall.x, pos.y - cueBall.y);
+    // Allow clicking on/near cue ball
+    if (dist <= R * 3 || dist < 45) {
+      isDragging = true;
+      dragStart = { x: cueBall.x, y: cueBall.y };
+      dragCurrent = pos;
+    }
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    dragCurrent = getMousePos(e);
+    if (!isRunning) draw();
+  });
+
+  window.addEventListener('mouseup', (e) => {
+    if (!isDragging) return;
+    isDragging = false;
+    const cueBall = balls.find(b => b.cue && !b.potted);
+    if (cueBall) {
+      const pos = getMousePos(e);
+      const dx = cueBall.x - pos.x;
+      const dy = cueBall.y - pos.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 5) {
+        // Drag multiplier
+        const speed = Math.min(dist * 7, 1800);
+        const vx = (dx / dist) * speed;
+        const vy = (dy / dist) * speed;
+        cueBall.vx = vx;
+        cueBall.vy = vy;
+      }
+    }
+    if (!isRunning) draw();
+  });
+
+  // Global window.sim Contract
+  window.sim = {
+    W: W,
+    H: H,
+    R: R,
+    reset: function (newBalls) {
+      balls = newBalls.map((b, idx) => {
+        const colorData = BALL_COLORS[idx % BALL_COLORS.length];
+        return {
+          x: Number(b.x),
+          y: Number(b.y),
+          vx: Number(b.vx || 0),
+          vy: Number(b.vy || 0),
+          cue: Boolean(b.cue),
+          potted: false,
+          color: colorData.color,
+          stripe: colorData.stripe,
+          num: colorData.num
+        };
+      });
+      draw();
+    },
+    step: function (dt) {
+      step(dt);
+    },
+    state: function () {
+      return balls.map(b => ({
+        x: b.x,
+        y: b.y,
+        vx: b.vx,
+        vy: b.vy,
+        potted: Boolean(b.potted),
+        cue: Boolean(b.cue)
+      }));
+    },
+    shoot: function (vx, vy) {
+      const cueBall = balls.find(b => b.cue && !b.potted);
+      if (cueBall) {
+        cueBall.vx = Number(vx);
+        cueBall.vy = Number(vy);
+      }
+    },
+    pause: function () {
+      isRunning = false;
+      if (animId) {
+        cancelAnimationFrame(animId);
+        animId = null;
+      }
+      lastTime = null;
+    },
+    resume: function () {
+      if (!isRunning) {
+        isRunning = true;
+        lastTime = null;
+        animId = requestAnimationFrame(loop);
+      }
+    }
+  };
+
+  // Standard 15-Ball Rack Setup
+  window.rackBalls = function () {
+    const list = [];
+    // Cue ball
+    list.push({ x: W * 0.25, y: H * 0.5, vx: 0, vy: 0, cue: true });
+
+    // 15-ball pyramid
+    const apexX = W * 0.72;
+    const apexY = H * 0.5;
+    const spacing = R * 2 + 0.5;
+    const rowDist = spacing * Math.sin(Math.PI / 3);
+
+    // Order of balls for realistic 8-ball rack
+    const rackOrder = [
+      1,
+      10, 2,
+      3, 8, 14,
+      9, 7, 12, 5,
+      11, 4, 13, 6, 15
+    ];
+
+    let ballIdx = 0;
+    for (let row = 0; row < 5; row++) {
+      const startY = apexY - (row * spacing) / 2;
+      for (let col = 0; col <= row; col++) {
+        const num = rackOrder[ballIdx++];
+        list.push({
+          x: apexX + row * rowDist,
+          y: startY + col * spacing,
+          vx: 0,
+          vy: 0,
+          cue: false
+        });
+      }
+    }
+
+    window.sim.reset(list);
+  };
+
+  // Initialize game
+  window.rackBalls();
+  window.sim.resume();
+})();
+</script>
+
+</body>
+</html>
