@@ -359,9 +359,10 @@ and another fails if either caller prints its own promise again.
 A redundant function-local `from . import report` inside the `hardened` branch
 made `report` local to all of `cmd_run`, so `report.generate_all()` raised
 `UnboundLocalError` for every `--tasks` value except `hardened`. Run data was
-always saved; only the report step died. The web `/run` page goes through
-`jobs.py` and was never affected, which is why it survived unnoticed. An AST test
-now fails on any function-local import of a module-level name in that file.
+always saved; only the report step died. Runs started from the web control panel
+go through a different code path and were never affected, which is why it
+survived unnoticed. An AST test now fails on any function-local import of a
+module-level name in that file.
 
 ### One definition of the hardened predicate
 `("hard", "frontier")` appeared in four places: `hardened_ids`, a set-comprehension
@@ -495,9 +496,9 @@ content-hashed, so editing one changes the task's identity and invalidates every
 result recorded against it.
 
 `requirements-studio.txt` is deleted. Stripped of comments it was empty: it
-declared no packages and nothing referenced it. Its one real fact — studio adds
-no Python dependencies, Playwright is already a harness dep, ffmpeg is an external
-binary — is in `docs/CONTENT-PLAN.md`.
+declared no packages and nothing referenced it — studio adds no Python
+dependencies, Playwright is already a harness dependency, and ffmpeg is an
+external binary.
 
 ## 0.7.2 — social rail, tie disclosure, cohort filters
 
