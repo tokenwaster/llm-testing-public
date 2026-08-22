@@ -24,6 +24,40 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
+## 0.7.13 — web-003-sand stops flipping a coin
+
+### An orphaned checker, a clean re-measure, and three racy tests
+A post-release process check found a `pytest test_checker.py` whose venv
+launcher shim had died at 07:46 while the real interpreter kept spinning —
+the "fan that won't stop" orphan from the gotchas list — 175 minutes at 100%
+of one core (10,487 CPU-seconds), spanning the entire 0.7.11 rescore. Rule 2
+says timing-scored tasks never share the CPU, so after killing it the
+timing-sensitive tasks were rescored on a clean machine: ag-006, web-002-maze,
+web-003-sand, web-009-physics — 238 cells. **ag-006 and web-009 did not move
+at all**, so the orphan had not corrupted them. web-003-sand flipped six cells
+±0.1 again, in both directions, including cells flipping straight back —
+randomness in the tests, not the CPU.
+
+Running two saved sand apps six times each named the tests: three were
+sampling the spec's own randomness once.
+- **acid**: the spec says acid *moves like water*, so acid placed on an open
+  wall slid sideways off it before it dissolved anything — a coin flip
+  against a correct app. The acid is now pocketed (wall below and on both
+  sides) so eroding is the only thing it can do; best of three 200-tick
+  trials, any wall gone.
+- **water spread**: best of five trials with a longer settle instead of one.
+- **liquid elevator**: the eruption is intermittent in a buggy app, so one
+  trial caught it ~40% of the time; now the *worst* of five trials — a bug
+  that shows up in any trial fails the test.
+
+Reference: 6/6 at 1.0. opus-5's app: 6/6 at 1.0 (was 4/5 to 1/6 depending
+on the day). haiku-4-5's app still reads 0.7–0.9 across runs — its elevator
+bug fires at random and its water barely spreads; that is the app, and the
+mean-over-runs aggregation is the suite's answer to it. All 56 sand cells
+rescored under the final checker: 9 moved — 6 up (acid-on-open-wall victims:
+opus-5, glm-5.2, opus-4-8, sonnet-4-6 ×2, laguna-xs-2.1, agents-a1), 3 down
+(elevator now caught: haiku-4-5, api-sonnet-4-6, qwen3-32b).
+
 ## 0.7.12 — a hung app fails its own test, not the lane
 
 ### Bounded Playwright calls in every webapp checker

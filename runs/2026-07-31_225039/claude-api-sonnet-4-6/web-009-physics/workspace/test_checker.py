@@ -16,13 +16,57 @@ def _launch(p):
         return p.chromium.launch(channel="chromium")
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def page():
     assert APP.exists(), "app.html missing"
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         b = _launch(p); pg = b.new_page(); pg.goto(APP.as_uri()); pg.wait_for_timeout(400)
-        yield pg; b.close()
+        yield _Page(pg); b.close()
 
 
 def test_layout(page):
@@ -33,7 +77,7 @@ def test_layout(page):
 
 
 def test_api_shape(page):
-    s = page.evaluate("""() => ({
+    s = _ev(page, """() => ({
         ok: typeof window.sim === 'object' && !!window.sim,
         w: window.sim && window.sim.w, h: window.sim && window.sim.h,
         fns: window.sim && ['balls','clear','addBall','step'].every(
@@ -44,12 +88,12 @@ def test_api_shape(page):
 
 
 def test_clear_removes_balls(page):
-    n = page.evaluate("() => { sim.addBall(100,100,0,0); sim.clear(); return sim.balls().length; }")
+    n = _ev(page, "() => { sim.addBall(100,100,0,0); sim.clear(); return sim.balls().length; }")
     assert n == 0, f"clear() left {n} balls"
 
 
 def test_gravity_pulls_down(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         sim.clear(); sim.addBall(240, 40, 0, 0);
         for (let i=0;i<10;i++) sim.step(1);
         const b = sim.balls()[0];
@@ -60,7 +104,7 @@ def test_gravity_pulls_down(page):
 
 
 def test_floor_bounces(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         sim.clear(); sim.addBall(240, 40, 0, 0);
         let bounced = false, maxY = 0;
         for (let i=0;i<400;i++){ sim.step(1); const b = sim.balls()[0];
@@ -74,7 +118,7 @@ def test_floor_bounces(page):
 
 
 def test_wall_bounces(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         sim.clear(); sim.addBall(sim.w - 30, sim.h/2, 12, 0);  // moving right into wall
         let reversed = false;
         for (let i=0;i<60;i++){ sim.step(1); if (sim.balls()[0].vx < 0) reversed = true; }
@@ -85,7 +129,7 @@ def test_wall_bounces(page):
 
 
 def test_stays_in_bounds(page):
-    escaped = page.evaluate("""() => {
+    escaped = _ev(page, """() => {
         sim.clear();
         sim.addBall(60, 60, 9, -4); sim.addBall(400, 200, -7, 3);
         let bad = false;
@@ -98,7 +142,7 @@ def test_stays_in_bounds(page):
 
 
 def test_canvas_drawn(page):
-    lit = page.evaluate("""() => {
+    lit = _ev(page, """() => {
         sim.clear(); sim.addBall(240,240,0,0); sim.step(1);
         const c = document.querySelector('#sim');
         if (!c || c.tagName !== 'CANVAS') return c.querySelectorAll('*').length >= 1 ? 1 : 0;

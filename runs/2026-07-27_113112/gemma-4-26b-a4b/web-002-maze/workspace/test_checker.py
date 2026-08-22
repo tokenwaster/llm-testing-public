@@ -20,6 +20,50 @@ def _launch(p):
         return p.chromium.launch(channel="chromium")
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def page():
     assert APP.exists(), "app.html missing"
@@ -29,15 +73,15 @@ def page():
         pg = browser.new_page()
         pg.goto(APP.as_uri())
         pg.wait_for_timeout(400)
-        yield pg
+        yield _Page(pg)
         browser.close()
 
 
 @pytest.fixture(scope="module")
 def world(page):
-    page.evaluate("() => window.game.reset()")
-    page.evaluate("() => window.game.tick(20000)")
-    return page.evaluate("""() => {
+    _ev(page, "() => window.game.reset()")
+    _ev(page, "() => window.game.tick(20000)")
+    return _ev(page, """() => {
         const g = window.game;
         const walls = [];
         for (let r = 0; r < g.size.rows; r++) {
@@ -84,7 +128,7 @@ def test_layout_and_size(page):
 
 
 def test_api_shape(page):
-    ok = page.evaluate("""() => {
+    ok = _ev(page, """() => {
         const g = window.game;
         return g && typeof g.tick === 'function'
             && typeof g.reset === 'function'
@@ -96,7 +140,7 @@ def test_api_shape(page):
                                  && 'finishTick' in b);
     }""")
     assert ok, "window.game API incomplete (see spec)"
-    size = page.evaluate("() => window.game.size")
+    size = _ev(page, "() => window.game.size")
     assert size["rows"] >= 15 and size["cols"] >= 15, "maze must be >=15x15"
 
 
@@ -107,7 +151,7 @@ def test_all_bots_finish_and_timer_freezes(page, world):
     last = max(b["finishTick"] for b in world["bots"])
     assert world["elapsed"] == last, \
         f"elapsed ({world['elapsed']}) must freeze at last arrival ({last})"
-    frozen = page.evaluate("""() => {
+    frozen = _ev(page, """() => {
         const before = window.game.elapsed;
         const t = document.querySelector('#timer').textContent;
         window.game.tick(50);
@@ -185,12 +229,12 @@ def test_dead_end_memory(world):
 
 
 def test_determinism(page):
-    a = page.evaluate("""() => {
+    a = _ev(page, """() => {
         window.game.reset(42);
         window.game.tick(120);
         return window.game.bots.map(b => JSON.stringify(b.path.slice(-1)));
     }""")
-    b = page.evaluate("""() => {
+    b = _ev(page, """() => {
         window.game.reset(42);
         for (let i = 0; i < 120; i++) window.game.tick(1);
         return window.game.bots.map(b => JSON.stringify(b.path.slice(-1)));
@@ -199,8 +243,8 @@ def test_determinism(page):
 
 
 def test_maze_visibly_drawn(page):
-    page.evaluate("() => window.game.reset()")
-    info = page.evaluate("""() => {
+    _ev(page, "() => window.game.reset()")
+    info = _ev(page, """() => {
         const root = document.querySelector('#maze');
         const c = root && (root.tagName === 'CANVAS' ? root
                            : root.querySelector('canvas'));
@@ -220,10 +264,10 @@ def test_maze_visibly_drawn(page):
 def test_runs_on_its_own(page):
     page.reload()
     page.wait_for_timeout(300)
-    before = page.evaluate("() => { window.game.reset(); "
+    before = _ev(page, "() => { window.game.reset(); "
                            "return window.game.elapsed; }")
     page.wait_for_timeout(1600)
-    after = page.evaluate("""() => ({
+    after = _ev(page, """() => ({
         elapsed: window.game.elapsed,
         moved: window.game.bots.filter(b => b.path.length > 1).length,
     })""")

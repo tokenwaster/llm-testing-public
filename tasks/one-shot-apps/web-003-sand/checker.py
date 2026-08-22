@@ -154,17 +154,21 @@ def test_walls_are_static_and_support_sand(page):
 
 def test_water_spreads_horizontally(page):
     spread = _ev(page, """() => {
-        window.sim.clear();
-        const x = Math.floor(window.sim.w / 2);
-        for (let i = 0; i < 6; i++) window.sim.set(x, i, 'water');
-        window.sim.tick(window.sim.h * 3);
-        // count distinct columns holding water in the bottom three rows —
-        // spreading water must occupy several columns, wherever it wandered
-        const cols = new Set();
-        for (let cx = 0; cx < window.sim.w; cx++)
-            for (let cy = window.sim.h - 3; cy < window.sim.h; cy++)
-                if (window.sim.get(cx, cy) === 'water') cols.add(cx);
-        return cols.size;
+        // the spec randomises the spread direction, so one trial is a coin
+        // flip against a correct app: best of three independent trials
+        let best = 0;
+        for (let trial = 0; trial < 5 && best < 3; trial++) {
+            window.sim.clear();
+            const x = Math.floor(window.sim.w / 2);
+            for (let i = 0; i < 6; i++) window.sim.set(x, i, 'water');
+            window.sim.tick(window.sim.h * 6);
+            const cols = new Set();
+            for (let cx = 0; cx < window.sim.w; cx++)
+                for (let cy = window.sim.h - 3; cy < window.sim.h; cy++)
+                    if (window.sim.get(cx, cy) === 'water') cols.add(cx);
+            best = Math.max(best, cols.size);
+        }
+        return best;
     }""")
     assert spread >= 3, \
         f"water occupies only {spread} column(s) near the floor — it must spread"
@@ -172,14 +176,23 @@ def test_water_spreads_horizontally(page):
 
 def test_acid_dissolves_walls(page):
     got = _ev(page, """() => {
-        window.sim.clear();
-        const x = Math.floor(window.sim.w / 2), wy = window.sim.h - 5;
-        window.sim.set(x, wy, 'wall');
-        window.sim.set(x, wy - 1, 'acid');
-        window.sim.tick(80);
-        return window.sim.get(x, wy);
+        // acid moves like water, so on an open wall it may slide off before
+        // it dissolves anything; pocket it (wall below and on both sides) so
+        // the only thing it can do is erode. Dissolution may be random per
+        // the spec: best of three trials, any of the three walls gone.
+        let eroded = false;
+        for (let trial = 0; trial < 3 && !eroded; trial++) {
+            window.sim.clear();
+            const x = Math.floor(window.sim.w / 2), wy = window.sim.h - 5;
+            const walls = [[x, wy], [x - 1, wy - 1], [x + 1, wy - 1]];
+            for (const [wx, wy2] of walls) window.sim.set(wx, wy2, 'wall');
+            window.sim.set(x, wy - 1, 'acid');
+            window.sim.tick(200);
+            eroded = walls.some(([wx, wy2]) => window.sim.get(wx, wy2) !== 'wall');
+        }
+        return eroded ? 'eroded' : 'wall';
     }""")
-    assert got != "wall", "acid sat on a wall for 80 ticks without eroding it"
+    assert got != "wall",         "acid pocketed by three walls eroded none of them in 200 ticks (three trials)"
 
 
 def test_canvas_visibly_drawn(page):
@@ -211,6 +224,9 @@ def test_canvas_visibly_drawn(page):
 def test_no_liquid_elevator(page):
     rise = _ev(page, """() => {
         const W = sim.w, H = sim.h;
+        // the eruption is intermittent in a buggy app: worst of five trials
+        let worst = null;
+        for (let trial = 0; trial < 5; trial++) {
         sim.clear();
         const X = Math.floor(W / 2);
         const surface = H - 6;
@@ -239,7 +255,10 @@ def test_no_liquid_elevator(page):
             sim.tick(1);
             if (f % 5 === 0) highest = Math.min(highest, scanHighest());
         }
-        return {surface, highest, rise: surface - highest};
+        const r = {surface, highest, rise: surface - highest};
+        if (worst === null || r.rise > worst.rise) worst = r;
+        }
+        return worst;
     }""")
     assert rise["rise"] <= 8,         (f"liquid climbed {rise['rise']} rows above its pool surface while "
          "sand poured through it — liquid must be displaced around the "
