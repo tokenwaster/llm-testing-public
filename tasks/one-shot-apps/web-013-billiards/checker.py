@@ -19,6 +19,50 @@ def _launch(p):
         return p.chromium.launch(channel="chromium")
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def page():
     assert APP.exists(), "app.html missing"
@@ -29,15 +73,15 @@ def page():
         pg.goto(APP.as_uri())
         pg.wait_for_timeout(500)
         try:
-            pg.evaluate("() => window.sim && window.sim.pause && window.sim.pause()")
+            _ev(pg, "() => window.sim && window.sim.pause && window.sim.pause()")
         except Exception:
             pass
-        yield pg
+        yield _Page(pg)
         browser.close()
 
 
 def _has_api(page) -> bool:
-    return page.evaluate("""() => {
+    return _ev(page, """() => {
         const s = window.sim;
         return !!(s && typeof s.reset==='function' && typeof s.step==='function'
                   && typeof s.state==='function'
@@ -47,7 +91,7 @@ def _has_api(page) -> bool:
 
 
 def _run(page, balls, dt, n):
-    return page.evaluate(
+    return _ev(page, 
         """({balls, dt, n}) => { window.sim.reset(balls);
             for (let i=0;i<n;i++) window.sim.step(dt); return window.sim.state(); }""",
         {"balls": balls, "dt": dt, "n": n})
@@ -81,7 +125,7 @@ def test_friction_brings_to_rest(page):
 def test_friction_is_monotonic(page):
     if not _has_api(page):
         pytest.skip("no api")
-    speeds = page.evaluate(
+    speeds = _ev(page, 
         """({dt}) => { window.sim.reset([{x:200,y:150,vx:150,vy:40}]); const o=[];
             for(let i=0;i<40;i++){window.sim.step(dt);const b=window.sim.state()[0];
             o.push(Math.hypot(b.vx,b.vy));} return o; }""", {"dt": 1 / 120})
@@ -92,7 +136,7 @@ def test_friction_is_monotonic(page):
 def test_reflects_off_right_wall(page):
     if not _has_api(page):
         pytest.skip("no api")
-    W = page.evaluate("() => window.sim.W")
+    W = _ev(page, "() => window.sim.W")
     s = _run(page, [{"x": W - 60, "y": 150, "vx": 300, "vy": 0}], 1 / 240, 90)
     assert s[0]["vx"] < 0
 
@@ -107,8 +151,8 @@ def test_reflects_off_top_wall(page):
 def test_stays_in_bounds(page):
     if not _has_api(page):
         pytest.skip("no api")
-    W = page.evaluate("() => window.sim.W")
-    H = page.evaluate("() => window.sim.H")
+    W = _ev(page, "() => window.sim.W")
+    H = _ev(page, "() => window.sim.H")
     s = _run(page, [{"x": 300, "y": 150, "vx": 420, "vy": 260}], 1 / 240, 240)
     b = s[0]
     if b["potted"]:
@@ -137,7 +181,7 @@ def test_collision_conserves_momentum(page):
 def test_collision_does_not_create_energy(page):
     if not _has_api(page):
         pytest.skip("no api")
-    s = page.evaluate(
+    s = _ev(page, 
         """() => { const dt=1/960;
             window.sim.reset([{x:150,y:150,vx:240,vy:0},{x:200,y:166,vx:0,vy:0}]);
             const ke=v=>v.reduce((s,b)=>s+b.vx*b.vx+b.vy*b.vy,0);
@@ -150,8 +194,8 @@ def test_collision_does_not_create_energy(page):
 def test_ball_is_potted_in_corner(page):
     if not _has_api(page):
         pytest.skip("no api")
-    W = page.evaluate("() => window.sim.W")
-    H = page.evaluate("() => window.sim.H")
+    W = _ev(page, "() => window.sim.W")
+    H = _ev(page, "() => window.sim.H")
     s = _run(page, [{"x": W - 120, "y": H - 120, "vx": 300, "vy": 300}], 1 / 240, 240)
     assert s[0]["potted"] is True
 
@@ -168,7 +212,7 @@ def test_deterministic(page):
 
 
 def _cue_viewport(page):
-    return page.evaluate("""() => {
+    return _ev(page, """() => {
         // put the cue ball at a known REST position first, so the only thing
         // that can move it is the drag under test (not leftover velocity)
         if (window.sim.rack) window.sim.rack();
@@ -188,14 +232,14 @@ def _cue_viewport(page):
 def test_playable_can_shoot(page):
     if not _has_api(page):
         pytest.skip("no api")
-    page.evaluate("() => window.sim.resume && window.sim.resume()")
+    _ev(page, "() => window.sim.resume && window.sim.resume()")
     info = _cue_viewport(page)
     page.mouse.move(info["vx"], info["vy"])
     page.mouse.down()
     page.mouse.move(info["vx"] + 55 * info["sx"], info["vy"] + 40 * info["sy"], steps=6)
     page.mouse.up()
-    page.evaluate("() => window.sim.pause && window.sim.pause()")
-    moved = page.evaluate("""() => {
+    _ev(page, "() => window.sim.pause && window.sim.pause()")
+    moved = _ev(page, """() => {
         const before = (window.sim.state().find(b=>b.cue)||window.sim.state()[0]);
         for (let i=0;i<40;i++) window.sim.step(1/240);
         const after = (window.sim.state().find(b=>b.cue)||window.sim.state()[0]);
@@ -207,7 +251,7 @@ def test_playable_can_shoot(page):
 def test_has_reset_control(page):
     if not _has_api(page):
         pytest.skip("no api")
-    clicked = page.evaluate("""() => {
+    clicked = _ev(page, """() => {
         const btns = [...document.querySelectorAll('button,[role=button],a,input[type=button]')];
         const b = btns.find(e => /reset|rack|new game|break|re-?rack/i.test(e.textContent||e.value||''));
         if (!b) return false;
@@ -223,5 +267,5 @@ def test_has_reset_control(page):
 def test_shows_instructions(page):
     if not _has_api(page):
         pytest.skip("no api")
-    txt = page.evaluate("() => (document.body.innerText || '').toLowerCase()")
+    txt = _ev(page, "() => (document.body.innerText || '').toLowerCase()")
     assert "drag" in txt, "on-screen instructions must tell the player to drag"

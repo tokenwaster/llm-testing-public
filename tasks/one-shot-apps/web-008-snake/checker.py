@@ -19,6 +19,50 @@ def _launch(p):
         return p.chromium.launch(channel="chromium")
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def page():
     assert APP.exists(), "app.html missing"
@@ -28,7 +72,7 @@ def page():
         pg = browser.new_page()
         pg.goto(APP.as_uri())
         pg.wait_for_timeout(400)
-        yield pg
+        yield _Page(pg)
         browser.close()
 
 
@@ -41,7 +85,7 @@ def test_layout_elements(page):
 
 
 def test_api_shape(page):
-    shape = page.evaluate("""() => ({
+    shape = _ev(page, """() => ({
         ok: typeof window.game === 'object' && !!window.game,
         w: window.game && window.game.w, h: window.game && window.game.h,
         fns: window.game && ['reset','tick','setDir','setFood','snake','food',
@@ -53,7 +97,7 @@ def test_api_shape(page):
 
 
 def test_reset_state(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const g = window.game; g.reset();
         return { len: g.snake().length, alive: g.alive(), score: g.score() };
     }""")
@@ -62,7 +106,7 @@ def test_reset_state(page):
 
 
 def test_moves_in_direction(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const g = window.game; g.reset();
         const h0 = g.snake()[0];
         g.setDir('right'); g.tick();
@@ -74,7 +118,7 @@ def test_moves_in_direction(page):
 
 
 def test_eating_grows_and_scores(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const g = window.game; g.reset();
         const head = g.snake()[0], len0 = g.snake().length;
         g.setDir('right');
@@ -87,7 +131,7 @@ def test_eating_grows_and_scores(page):
 
 
 def test_no_reverse(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const g = window.game; g.reset();       // moving right
         const h0 = g.snake()[0];
         g.setDir('left');                        // 180° reversal — must be ignored
@@ -100,7 +144,7 @@ def test_no_reverse(page):
 
 
 def test_wall_collision_kills(page):
-    dead = page.evaluate("""() => {
+    dead = _ev(page, """() => {
         const g = window.game; g.reset(); g.setDir('right');
         for (let i = 0; i < g.w + 5 && g.alive(); i++) { g.setFood(-1,-1); g.tick(); }
         return g.alive();
@@ -109,7 +153,7 @@ def test_wall_collision_kills(page):
 
 
 def test_self_collision_kills(page):
-    dead = page.evaluate("""() => {
+    dead = _ev(page, """() => {
         const g = window.game; g.reset();        // head (10,12), moving right, len3
         g.setDir('right');
         // grow to length 6 by eating straight ahead
@@ -127,7 +171,7 @@ def test_self_collision_kills(page):
 
 
 def test_canvas_drawn(page):
-    ok = page.evaluate("""() => {
+    ok = _ev(page, """() => {
         const g = window.game; g.reset();
         const c = document.querySelector('#snake');
         if (!c || c.tagName !== 'CANVAS')

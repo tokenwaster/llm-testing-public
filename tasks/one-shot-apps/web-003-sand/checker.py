@@ -19,6 +19,50 @@ def _launch(p):
         return p.chromium.launch(channel="chromium")
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def page():
     assert APP.exists(), "app.html missing"
@@ -28,7 +72,7 @@ def page():
         pg = browser.new_page()
         pg.goto(APP.as_uri())
         pg.wait_for_timeout(400)
-        yield pg
+        yield _Page(pg)
         browser.close()
 
 
@@ -42,7 +86,7 @@ def test_layout_elements(page):
 
 
 def test_api_shape(page):
-    shape = page.evaluate("""() => ({
+    shape = _ev(page, """() => ({
         ok: typeof window.sim === 'object' && !!window.sim,
         w: window.sim && window.sim.w, h: window.sim && window.sim.h,
         fns: window.sim && ['tick','get','set','clear'].every(
@@ -54,7 +98,7 @@ def test_api_shape(page):
 
 
 def test_clear_empties_grid(page):
-    empties = page.evaluate("""() => {
+    empties = _ev(page, """() => {
         window.sim.clear();
         let n = 0;
         for (let x = 0; x < window.sim.w; x += 7)
@@ -66,7 +110,7 @@ def test_clear_empties_grid(page):
 
 
 def test_sand_falls_one_cell_per_step(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         window.sim.clear();
         const x = Math.floor(window.sim.w / 2);
         window.sim.set(x, 0, 'sand');
@@ -81,7 +125,7 @@ def test_sand_falls_one_cell_per_step(page):
 
 
 def test_sand_lands_on_bottom(page):
-    landed = page.evaluate("""() => {
+    landed = _ev(page, """() => {
         window.sim.clear();
         const x = Math.floor(window.sim.w / 2);
         window.sim.set(x, 0, 'sand');
@@ -92,7 +136,7 @@ def test_sand_lands_on_bottom(page):
 
 
 def test_walls_are_static_and_support_sand(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         window.sim.clear();
         const x = Math.floor(window.sim.w / 2), wy = window.sim.h - 10;
         for (let dx = -2; dx <= 2; dx++) window.sim.set(x + dx, wy, 'wall');
@@ -109,7 +153,7 @@ def test_walls_are_static_and_support_sand(page):
 
 
 def test_water_spreads_horizontally(page):
-    spread = page.evaluate("""() => {
+    spread = _ev(page, """() => {
         window.sim.clear();
         const x = Math.floor(window.sim.w / 2);
         for (let i = 0; i < 6; i++) window.sim.set(x, i, 'water');
@@ -127,7 +171,7 @@ def test_water_spreads_horizontally(page):
 
 
 def test_acid_dissolves_walls(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         window.sim.clear();
         const x = Math.floor(window.sim.w / 2), wy = window.sim.h - 5;
         window.sim.set(x, wy, 'wall');
@@ -139,7 +183,7 @@ def test_acid_dissolves_walls(page):
 
 
 def test_canvas_visibly_drawn(page):
-    colors = page.evaluate("""() => {
+    colors = _ev(page, """() => {
         window.sim.clear();
         const midx = Math.floor(window.sim.w / 2);
         for (let i = 0; i < 12; i++) {
@@ -159,13 +203,13 @@ def test_canvas_visibly_drawn(page):
     assert colors >= 3 or colors == -1, \
         f"canvas shows {colors} distinct colors — materials must be visible"
     if colors == -1:
-        n = page.evaluate("() => document.querySelector('#sand').querySelectorAll('*').length")
+        n = _ev(page, "() => document.querySelector('#sand').querySelectorAll('*').length")
         assert n >= 100, f"#sand is not a canvas and has only {n} elements"
 
 
 
 def test_no_liquid_elevator(page):
-    rise = page.evaluate("""() => {
+    rise = _ev(page, """() => {
         const W = sim.w, H = sim.h;
         sim.clear();
         const X = Math.floor(W / 2);

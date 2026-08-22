@@ -16,13 +16,57 @@ def _launch(p):
         return p.chromium.launch(channel="chromium")
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def page():
     assert APP.exists(), "app.html missing"
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         b = _launch(p); pg = b.new_page(); pg.goto(APP.as_uri()); pg.wait_for_timeout(400)
-        yield pg; b.close()
+        yield _Page(pg); b.close()
 
 
 INPUT = [7, 2, 11, 5, 0, 9, 3, 10, 1, 8, 4, 6]
@@ -34,7 +78,7 @@ def _drive(page):
     if "r" in _DRIVE:
         return _DRIVE["r"]
     try:
-        got = page.evaluate("""(input) => {
+        got = _ev(page, """(input) => {
             const v = window.viz;
             v.setArray(input);
             const sortedCopy = input.slice().sort((a,b)=>a-b);
@@ -86,7 +130,7 @@ def test_layout(page):
 
 def test_api_shape(page):
     _core_contract(page)
-    s = page.evaluate("""() => ({
+    s = _ev(page, """() => ({
         ok: typeof window.viz === 'object' && !!window.viz,
         fns: window.viz && ['array','setArray','sortStep','sorted'].every(
             f => typeof window.viz[f] === 'function'),
@@ -96,13 +140,13 @@ def test_api_shape(page):
 
 def test_setarray_roundtrip(page):
     _core_contract(page)
-    got = page.evaluate("() => { window.viz.setArray([4,1,3,2]); return window.viz.array(); }")
+    got = _ev(page, "() => { window.viz.setArray([4,1,3,2]); return window.viz.array(); }")
     assert got == [4, 1, 3, 2], f"setArray/array roundtrip failed: {got}"
 
 
 def test_sorted_flag(page):
     _core_contract(page)
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const v = window.viz;
         v.setArray([3,1,2]); const a = v.sorted();
         v.setArray([1,2,3]); const b = v.sorted();
@@ -126,7 +170,7 @@ def test_sortstep_is_one_step(page):
 
 def test_bars_rendered(page):
     _core_contract(page)
-    n = page.evaluate("""() => {
+    n = _ev(page, """() => {
         window.viz.setArray([1,2,3,4,5,6,7,8]);
         return document.querySelectorAll('#bars .bar').length;
     }""")

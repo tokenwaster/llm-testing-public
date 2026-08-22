@@ -44,6 +44,50 @@ def _launch(p):
         return p.chromium.launch(channel="chromium", args=args)
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def ctx():
     assert APP.exists(), "app.html missing"
@@ -60,11 +104,11 @@ def ctx():
         page.goto(APP.as_uri())
         page.wait_for_timeout(600)
         try:
-            page.evaluate(
+            _ev(page, 
                 "() => window.demo && window.demo.pause && window.demo.pause()")
         except Exception:
             pass
-        state = {"page": page, "errors": errors, "requests": requests,
+        state = {"page": _Page(page), "errors": errors, "requests": requests,
                  "Image": Image, "frames": None}
         yield state
         browser.close()
@@ -73,7 +117,7 @@ def ctx():
 
 def _shot(state, t):
     page, Image = state["page"], state["Image"]
-    page.evaluate("t => window.demo.setTime(t)", t)
+    _ev(page, "t => window.demo.setTime(t)", t)
     raw = page.locator("#coin-hero").screenshot()
     return Image.open(io.BytesIO(raw)).convert("RGB")
 
@@ -99,7 +143,7 @@ def _analyse(state):
     if state["frames"] is not None:
         return state["frames"]
     Image = state["Image"]
-    state["page"].evaluate("() => window.demo.pause()")
+    _ev(state["page"], "() => window.demo.pause()")
     out = []
     for i in range(N):
         t = i / N
@@ -151,7 +195,7 @@ def _live(state):
 
 
 def _built(state):
-    ok = state["page"].evaluate("""() => {
+    ok = _ev(state["page"], """() => {
         const c = document.getElementById('coin-hero');
         const d = window.demo;
         return !!c && c.tagName === 'CANVAS'
@@ -190,7 +234,7 @@ def test_no_console_errors(ctx):
 
 
 def test_demo_api(ctx):
-    shape = ctx["page"].evaluate("""() => {
+    shape = _ev(ctx["page"], """() => {
         const d = window.demo;
         const c = document.getElementById('coin-hero');
         return {

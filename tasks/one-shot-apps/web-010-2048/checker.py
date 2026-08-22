@@ -16,13 +16,57 @@ def _launch(p):
         return p.chromium.launch(channel="chromium")
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def page():
     assert APP.exists(), "app.html missing"
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         b = _launch(p); pg = b.new_page(); pg.goto(APP.as_uri()); pg.wait_for_timeout(400)
-        yield pg; b.close()
+        yield _Page(pg); b.close()
 
 
 def test_layout(page):
@@ -33,7 +77,7 @@ def test_layout(page):
 
 
 def test_api_shape(page):
-    s = page.evaluate("""() => ({
+    s = _ev(page, """() => ({
         ok: typeof window.game === 'object' && !!window.game,
         size: window.game && window.game.size,
         fns: window.game && ['reset','move','board','setBoard','score'].every(
@@ -44,7 +88,7 @@ def test_api_shape(page):
 
 
 def test_reset_two_tiles(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const g = window.game; g.reset();
         let n = 0; for (const row of g.board()) for (const v of row) if (v) n++;
         return { tiles: n, score: g.score() };
@@ -54,7 +98,7 @@ def test_reset_two_tiles(page):
 
 
 def test_merge_left(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const g = window.game;
         g.setBoard([[2,2,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]]);
         const s0 = g.score();
@@ -66,7 +110,7 @@ def test_merge_left(page):
 
 
 def test_slide_without_merge(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const g = window.game;
         g.setBoard([[2,0,4,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]]);
         g.move('left');
@@ -76,7 +120,7 @@ def test_slide_without_merge(page):
 
 
 def test_no_double_merge(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const g = window.game;
         g.setBoard([[2,2,2,2],[0,0,0,0],[0,0,0,0],[0,0,0,0]]);
         g.move('left');
@@ -87,7 +131,7 @@ def test_no_double_merge(page):
 
 
 def test_no_move_returns_false(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const g = window.game;
         g.setBoard([[2,4,8,16],[0,0,0,0],[0,0,0,0],[0,0,0,0]]);
         return g.move('left');   // already packed, no merge -> nothing moves
@@ -96,7 +140,7 @@ def test_no_move_returns_false(page):
 
 
 def test_tiles_rendered(page):
-    ok = page.evaluate("""() => {
+    ok = _ev(page, """() => {
         const g = window.game;
         g.setBoard([[2,4,8,16],[32,64,0,0],[0,0,0,0],[0,0,0,0]]);
         return document.querySelector('#board').textContent.replace(/\\s/g,'');

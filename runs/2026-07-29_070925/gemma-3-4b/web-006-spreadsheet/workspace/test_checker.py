@@ -19,6 +19,50 @@ def _launch(p):
         return p.chromium.launch(channel="chromium")
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def page():
     assert APP.exists(), "app.html missing"
@@ -28,20 +72,20 @@ def page():
         pg = browser.new_page()
         pg.goto(APP.as_uri())
         pg.wait_for_timeout(400)
-        yield pg
+        yield _Page(pg)
         browser.close()
 
 
 def _set(page, cell, text):
-    page.evaluate(f"() => window.sheet.set('{cell}', {text!r})")
+    _ev(page, f"() => window.sheet.set('{cell}', {text!r})")
 
 
 def _get(page, cell):
-    return str(page.evaluate(f"() => window.sheet.get('{cell}')"))
+    return str(_ev(page, f"() => window.sheet.get('{cell}')"))
 
 
 def test_no_dead_buttons(page):
-    dead = page.evaluate("""() => {
+    dead = _ev(page, """() => {
         const sig = () => document.body.innerHTML.length + '|' +
             JSON.stringify(Object.entries(localStorage)) + '|' +
             [...document.querySelectorAll('input,textarea')]
@@ -76,7 +120,7 @@ def test_layout(page):
 
 
 def test_api_shape(page):
-    ok = page.evaluate("""() => window.sheet
+    ok = _ev(page, """() => window.sheet
         && typeof sheet.set === 'function'
         && typeof sheet.get === 'function'
         && typeof sheet.raw === 'function'""")
@@ -88,7 +132,7 @@ def test_values_and_formulas(page):
     assert _get(page, "A1") == "5"
     _set(page, "B1", "=A1*2")
     assert _get(page, "B1") == "10"
-    assert page.evaluate("() => window.sheet.raw('B1')") == "=A1*2"
+    assert _ev(page, "() => window.sheet.raw('B1')") == "=A1*2"
 
 
 def test_precedence(page):

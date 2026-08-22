@@ -19,6 +19,50 @@ def _launch(p):
         return p.chromium.launch(channel="chromium")
 
 
+EV_MS = 15000
+
+
+class _Page:
+    """A hung page is closed and reopened, so one spinning evaluate fails its
+    own test instead of every test after it."""
+
+    def __init__(self, pg):
+        self._pg = pg
+        pg.set_default_timeout(EV_MS)
+
+    def __getattr__(self, name):
+        return getattr(self._pg, name)
+
+    def _revive(self):
+        browser = self._pg.context.browser
+        viewport = self._pg.viewport_size
+        try:
+            self._pg.close()
+        except Exception:
+            pass
+        self._pg = browser.new_page(viewport=viewport)
+        self._pg.set_default_timeout(EV_MS)
+        self._pg.goto(APP.as_uri())
+        self._pg.wait_for_timeout(400)
+
+
+def _ev(page, expr, arg=None):
+    from playwright.sync_api import TimeoutError as _Timeout
+    pg = page._pg if isinstance(page, _Page) else page
+    wrapped = ("async (a) => { const f = (" + expr + "); "
+               "const r = (typeof f === 'function') ? await f(a) : await f; "
+               "return {v: r}; }")
+    try:
+        return pg.wait_for_function(wrapped, arg=arg,
+                                    timeout=EV_MS).json_value().get("v")
+    except _Timeout:
+        if isinstance(page, _Page):
+            page._revive()
+        raise AssertionError(
+            f"the app did not respond within {EV_MS // 1000}s: "
+            f"{expr.strip()[:80]}")
+
+
 @pytest.fixture(scope="module")
 def page():
     assert APP.exists(), "app.html missing"
@@ -28,7 +72,7 @@ def page():
         pg = browser.new_page()
         pg.goto(APP.as_uri())
         pg.wait_for_timeout(400)
-        yield pg
+        yield _Page(pg)
         browser.close()
 
 
@@ -41,7 +85,7 @@ def test_layout_elements(page):
 
 
 def test_api_shape(page):
-    shape = page.evaluate("""() => ({
+    shape = _ev(page, """() => ({
         ok: typeof window.life === 'object' && !!window.life,
         w: window.life && window.life.w, h: window.life && window.life.h,
         fns: window.life && ['step','get','set','clear'].every(
@@ -53,7 +97,7 @@ def test_api_shape(page):
 
 
 def test_clear_empties(page):
-    live = page.evaluate("""() => {
+    live = _ev(page, """() => {
         const L = window.life; L.set(5,5,1); L.set(6,6,1); L.clear();
         let n = 0;
         for (let x = 0; x < L.w; x++) for (let y = 0; y < L.h; y++) n += L.get(x,y);
@@ -63,7 +107,7 @@ def test_clear_empties(page):
 
 
 def test_block_is_still_life(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const L = window.life; L.clear();
         // 2x2 block at (10,10) is stable under B3/S23
         for (const [x,y] of [[10,10],[11,10],[10,11],[11,11]]) L.set(x,y,1);
@@ -74,7 +118,7 @@ def test_block_is_still_life(page):
 
 
 def test_lone_cell_dies(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const L = window.life; L.clear(); L.set(20,20,1); L.step();
         return L.get(20,20);
     }""")
@@ -82,7 +126,7 @@ def test_lone_cell_dies(page):
 
 
 def test_blinker_oscillates(page):
-    got = page.evaluate("""() => {
+    got = _ev(page, """() => {
         const L = window.life; L.clear();
         // horizontal blinker at row 15, cols 14-16
         L.set(14,15,1); L.set(15,15,1); L.set(16,15,1);
@@ -102,7 +146,7 @@ def test_blinker_oscillates(page):
 
 
 def test_glider_travels(page):
-    moved = page.evaluate("""() => {
+    moved = _ev(page, """() => {
         const L = window.life; L.clear();
         // standard glider, top-left at (5,5)
         const g = [[6,5],[7,6],[5,7],[6,7],[7,7]];
@@ -120,7 +164,7 @@ def test_glider_travels(page):
 
 
 def test_canvas_visibly_drawn(page):
-    ok = page.evaluate("""() => {
+    ok = _ev(page, """() => {
         const L = window.life; L.clear();
         // several 2x2 blocks (still-lifes) then step() — the spec guarantees
         // step() redraws, and blocks persist, so live cells must be on screen

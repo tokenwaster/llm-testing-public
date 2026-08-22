@@ -24,6 +24,43 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
+## 0.7.12 — a hung app fails its own test, not the lane
+
+### Bounded Playwright calls in every webapp checker
+0.7.11 left one item on the table: a model app whose JS spins forever inside a
+function the checker calls hung `page.evaluate` (Playwright puts no timeout on
+it), the whole pytest was tree-killed at the lane cap, and the cell was
+recorded 0 with empty detail — including the tests that had already passed.
+`pytest-timeout` cannot help on Windows (its only mechanism aborts the process
+with `os._exit`, the same outcome), so the bound lives on the Playwright side.
+
+All 13 `web-*` checkers now share a small preamble: `_ev(page, expr, arg)`
+replaces every `page.evaluate` (85 call sites) with `page.wait_for_function`
+under a 15 s driver-side deadline — measured: a `while(true){}` in the page
+raises `TimeoutError` after exactly 15 s, because the Node driver enforces it
+regardless of the renderer's state. On a hang the page is closed (a
+target-level command that works on a stuck renderer) and reopened fresh, so
+later tests are judged on a reload rather than failing by inheritance. The
+page proxy also sets `set_default_timeout(15000)`, so `click`/`fill`/locator
+waits are bounded the same way instead of Playwright's 30 s default.
+
+Verified: all 13 references still score their machine max (web-001…011 at 1.0,
+web-012/013 at their 0.8 cap). A web-008 reference with `game.reset()`
+replaced by an infinite loop now scores 2/9 in 109 s with a readable detail
+("the app did not respond within 15s: …") — it was a lane timeout and a 0.
+No non-hanging submission changes: the wrapper evaluates the same expression
+once, and no checker measures Python-side wall time around it.
+
+**The six cells recorded as "checker timed out" were all `web-006-spreadsheet`**
+and none was an evaluate hang: two `locator.click()` calls waiting the default
+30 s for a cell the broken app never rendered summed to exactly the 60 s lane
+cap. Rescored in place under the bounded checker they read 0/11 to 2/11
+(qwen3.5-9b 0, gemma-4-26b-a4b 0.091, gemma-3-4b 0, minicpm5-1b 0.091,
+claude-api-haiku-4-5 0.182, agents-a1 0.182) — honest partial scores with
+detail instead of an opaque zero. `web-006` and the other 60 s webapp lane move
+to `checker_timeout_s: 240` like the rest, so 11 hung tests at 15 s each
+cannot hit the cap either.
+
 ## 0.7.11 — the floors are gone, and the tally is the tally
 
 ### Scoring fixes, rescored in place
