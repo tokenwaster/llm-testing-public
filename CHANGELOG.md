@@ -24,6 +24,109 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
+## 0.7.10 — a harness fault is not a model result
+
+### Hardening pass (no task or scoring change)
+A five-lens review of the harness, the server, the reports and the studio.
+Everything below is run-engine / server / presentation — a patch, not a
+dataset change; the scoring-methodology items it surfaced are listed at the
+end as *not applied* because they would change scores and belong to the next
+minor bump.
+
+**Runner.** A harness exception inside a task used to be written as a *scored*
+`0.0` ("harness exception: …"), so a runner bug lowered the model's public mean
+while the info page promised the opposite. It is now `status: crash` with no
+`score.json`, recorded in `run.json` `dropped_unscored` like every other
+unscored drop. `SpendExceeded` was caught by that same catch-all, so the spend
+ceiling could never stop a run — and the task that crossed it was overwritten
+with a 0 after it had scored; it now propagates. A crash *outside* the per-task
+loop (load failure, GPU probe, warm-up) left `run.json` with `finished: null`,
+which made `active_run()` refuse every future run until the directory was
+deleted by hand; the manifest is now finalised in a `finally` and carries
+`stopped_reason: crash`. Workspace reset uses `robust_rmtree` (a locked file on
+Windows was another path into the catch-all). `run.json` read-modify-writes are
+serialised under a lock and `write_json` uses a per-writer temp name, so
+parallel-mode threads cannot lose `dropped_unscored` entries. A 429 now waits
+the provider's `retry_after` before the next task instead of burning the
+three-strike streak in seconds. The machine hostname is no longer recorded in
+the env fingerprint (runs/ is published; the GPU/OS/Python are the
+comparability axes).
+
+**Adapters.** The Anthropic stream had no total-duration deadline (httpx's
+timeout is per-read, so a steadily streaming 64k answer ran ~35 min against a
+180 s budget), no repetition guard and no degenerate check — it now has the
+same three as the OpenAI stream. Anthropic's `max_tokens` stop reason is
+normalised to `length` so runaway detection and the budget matrix see it.
+Non-JSON 200s and odd block shapes raise `AdapterError` instead of escaping the
+retry loop. The non-streaming OpenAI path now records `reasoning_tokens`
+(agentic cells never had it). A 429 or 5xx whose body mentions "billing" is no
+longer promoted to a non-retryable infra failure that drops the model. A
+provider error mid-stream no longer matches the "streaming unsupported"
+fallback that silently re-sent the whole request.
+
+**Server (`/`, :8765).** Every route now refuses cross-site requests (Host /
+Origin / Sec-Fetch-Site must be this machine) — the server binds loopback, but
+any open tab could POST to `/api/delete-run`, `/api/interface-key` or
+`/api/run` without a preflight. `do_POST` requires `application/json`, caps
+the body at 1 MB, and turns bad input into a 400 instead of a dropped
+connection. Path containment uses `is_relative_to`, not a string prefix, on
+every file route, and the `/private-data` and `/data` directory listings escape
+names (a crafted URL reflected script). `/api/unload`, the delete routes and
+`/api/delete-model` now also respect a run started from the CLI. Family names,
+colours, `sampling_source` and `.env` key values are validated before they are
+spliced into yaml / `.env` (a newline used to inject lines). `/api/review`
+applies the same identifier rule as the delete routes. `report.generate_all`
+runs under a lock (three thread classes called it concurrently and fought over
+module globals).
+
+**Mirror.** The build log printed `seed A -> B` for every variant, which is the
+offset — and the `/mirror` page rendered that log. It now prints neither seed,
+a refused variant's reason no longer quotes the private answer, and the client
+can no longer supply a `seed_offset`. `settings.local.json` is never minted
+over: if the file exists but cannot be parsed, `mirror_seed_offset()` and
+`save_setting()` refuse rather than replace it (the old behaviour would have
+lost the offset that reconstructs the held-out set).
+
+**Reports.** Model reply text reached the flagged-task table unescaped
+(`answered '<img onerror=…>'` → script on the public model page); OpenRouter
+host/quant strings likewise. Both escaped. The run-delete button and its script
+no longer ship in the public export. A cell whose newest run crashed but whose
+older runs scored reports the status of a scored run, so the assessor stops
+classifying it as infra and excluding it. `apicost.api_equivalent` returns
+`None` for an unpriced model instead of pricing it at $0, and the CLI-overhead
+cache is no longer overwritten by a partial-row call.
+
+**Elsewhere.** `discover.resolve_claude_alias` used `subprocess.run(timeout=)`
+on `claude -p` (the banned orphan pattern) — now `run_capped`. `gguf.read_meta`
+bounds string/array lengths against the file size. `tools._resolve`,
+`rescore`, and the studio guard use path containment and the shared
+`runner.active_run()` (the copies only watched `runs/`). The export guard also
+refuses `private/`, `settings.local.json`, `*.local.json` and `mirror.json`.
+`studio publish-auth` writes the YouTube credentials straight into the
+gitignored secrets file instead of printing the refresh token; the YouTube
+adapter fails when the upload returns no id; the Instagram adapter no longer
+publishes after its status poll times out; `studio.ps1` propagates the exit
+code; `rename_model` refuses when a target already exists instead of skipping
+half the rename.
+
+**Found, NOT applied — these change scores and wait for the next minor bump:**
+`scoring._first_int` parses the *first* "N passed" in pytest output (a failing
+assertion message containing "100 passed" scores 0.99); the pytest lane loads a
+model-written `conftest.py`/`pytest.ini` from the workspace (a hookwrapper can
+flip every test to passed — add `--noconftest -p no:cacheprovider` and strip
+ini files); ag-004 scores 0.6 for an empty `output.json`; the "forbidden
+library" tests in py-003/004/005/007/008 are free credit on a refusal stub
+(0.2–0.33); blanket `NOT STATED` earns 0.43 on hl-002 / 0.25 on hl-001; ag-006's
+four 45 s per-test caps exceed the 60 s lane timeout so partial credit is
+wiped; web-011 cannot detect the forbidden one-shot `Array.sort()`;
+`extract_code_block` rejects ```` ```Python ```` / ```` ```python3 ```` and
+prefers the last fence; `ANSWER:` is case-sensitive with no FORMAT-MISS flag
+for `Answer:`; `CONTROL_TOKEN_RE` misses Gemma `<end_of_turn>` and DeepSeek's
+fullwidth-pipe terminator; a hanging `page.evaluate` zeros a whole webapp lane
+(needs a per-test timeout).
+
+---
+
 ## 0.7.9 — hard is now visible on the page it describes
 
 ### Task and model pages show the measured difficulty

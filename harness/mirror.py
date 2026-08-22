@@ -44,8 +44,8 @@ def verify_variant(task) -> str:
             return "answer-lane variant with no answer in its meta.yaml"
         good = scoring.score_answer(task, f"Working it out.\nANSWER: {key}")
         if (good.get("score") or 0) < 1.0:
-            return (f"the correct answer ({key!r}) scores "
-                    f"{good.get('score')} against its own variant, not 1.0")
+            return (f"the correct answer scores {good.get('score')} "
+                    f"against its own variant, not 1.0")
         if (scoring.score_answer(task, "").get("score") or 0) != 0.0:
             return "an empty submission scores above zero"
         return ""
@@ -175,8 +175,8 @@ def build_mirror(task_ids=None, seed_offset: int | None = None,
                        "public_seed": info["seed"], "private_seed": new_seed,
                        "regenerated": sorted(regenerated)}
         built.append(tid)
-        progress(f"  + {tid}  (seed {info['seed']} -> {new_seed}, "
-                 f"re-keyed {', '.join(sorted(regenerated))}, verified)")
+        progress(f"  + {tid}  (re-seeded, re-keyed "
+                 f"{', '.join(sorted(regenerated))}, verified)")
     prev = _load_report().get("tasks") or {}
     prev.update(report)
     config.PRIVATE_DIR.mkdir(parents=True, exist_ok=True)

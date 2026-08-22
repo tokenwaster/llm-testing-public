@@ -1,5 +1,6 @@
 
 import shutil
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -285,8 +286,7 @@ def new_run_ids(n: int, base: Path | None = None) -> list[str]:
 def env_snapshot() -> dict:
     import platform
     import subprocess
-    env = {"os": platform.platform(), "python": platform.python_version(),
-           "host": platform.node()}
+    env = {"os": platform.platform(), "python": platform.python_version()}
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
@@ -443,8 +443,9 @@ class TaskRunner:
         self.adapter.task_category = task.category
         task_dir = self._task_dir(task)
         workspace = task_dir / "workspace"
-        if workspace.exists():
-            shutil.rmtree(workspace)
+        from .util import robust_rmtree
+        if not robust_rmtree(workspace):
+            raise RuntimeError(f"workspace locked, cannot reset: {workspace}")
         workspace.mkdir(parents=True)
         if task.setup_dir:
             shutil.copytree(task.setup_dir, workspace, dirs_exist_ok=True)
@@ -713,7 +714,7 @@ def _gpu_vram_mb():
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, encoding="utf-8", timeout=10)
         if r.returncode == 0 and r.stdout.strip():
             val = int(r.stdout.strip().splitlines()[0].strip())
     except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
@@ -763,26 +764,31 @@ def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
                      spend=spend)
 
 
+_MANIFEST_LOCK = threading.Lock()
+
+
 def _stop_all(run_dirs, model_name: str, reason: str,
               extra: dict | None = None) -> None:
     from .util import read_json
-    for rd in run_dirs:
-        mani_path = rd / "run.json"
-        mani = read_json(mani_path, {})
-        if not mani:
-            continue
-        mani["stopped_reason"] = reason
-        for k, v in (extra or {}).items():
-            mani[k] = v
-        mani.setdefault("stopped_models", [])
-        if model_name not in mani["stopped_models"]:
-            mani["stopped_models"].append(model_name)
-        write_json(mani_path, mani)
+    with _MANIFEST_LOCK:
+        for rd in run_dirs:
+            mani_path = rd / "run.json"
+            mani = read_json(mani_path, {})
+            if not mani:
+                continue
+            mani["stopped_reason"] = reason
+            for k, v in (extra or {}).items():
+                mani[k] = v
+            mani.setdefault("stopped_models", [])
+            if model_name not in mani["stopped_models"]:
+                mani["stopped_models"].append(model_name)
+            write_json(mani_path, mani)
 
 
 def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
                      progress=print, manage_memory: bool = True,
                      cancel=None, spend=None) -> None:
+    from . import budget
     from .util import read_json
     adapter = make_adapter(model)
     runners = [TaskRunner(rd, model, adapter, cancel=cancel) for rd in run_dirs]
@@ -910,6 +916,15 @@ def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
                                  f"(429) - dropped UNSCORED, not zeroed. Re-run to fill "
                                  f"it in.")
                         if rl_streak < RATE_LIMIT_STREAK:
+                            wait = min(float(getattr(rl, "retry_after", None)
+                                             or 30), 120)
+                            progress(f"[{model.name}] waiting {wait:.0f}s for "
+                                     f"the rate-limit window before the next task")
+                            deadline = time.monotonic() + wait
+                            while time.monotonic() < deadline:
+                                if cancel is not None and cancel.is_set():
+                                    break
+                                time.sleep(1)
                             continue
                         done = sum(1 for t in tasks
                                    if (run_dir / model.name / t.id / "score.json").exists())
@@ -940,9 +955,12 @@ def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
                                   {"reset_at": ul.reset_at,
                                    "reset_hint": ul.reset_hint})
                         return
+                    except budget.SpendExceeded:
+                        raise
                     except Exception as e:
                         progress(f"[{model.name}] !! {task.id} crashed the runner: "
-                                 f"{type(e).__name__}: {e} — recorded as error, "
+                                 f"{type(e).__name__}: {e} — dropped UNSCORED "
+                                 "(a harness fault is not a model result), "
                                  "continuing with the next task")
                         task_dir = run_dir / model.name / task.id
                         task_dir.mkdir(parents=True, exist_ok=True)
@@ -950,19 +968,18 @@ def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
                              "task": task.id, "task_hash": task.content_hash,
                              "category": task.category, "tier": task.tier,
                              "started": now_iso(), "finished": now_iso(),
-                             "status": "error", "wall_ms": 0, "turns": 0,
+                             "status": "crash", "wall_ms": 0, "turns": 0,
                              "attempts": [], "n_attempts": 0, "n_retries": 0,
                              "tokens_in": None, "tokens_out": None, "cost_usd": None,
                              "gen_tokens_per_sec": None,
                              "prefill_tokens_per_sec": None,
                              "crash": f"{type(e).__name__}: {e}"}
                         write_json(task_dir / "metrics.json", m)
-                        write_json(task_dir / "score.json", {
-                            "status": "scored", "score": 0.0, "scored_by": "harness",
-                            "summary": f"harness exception: {type(e).__name__}: {e}",
-                            "timestamp": now_iso()})
+                        (task_dir / "score.json").unlink(missing_ok=True)
+                        _record_dropped(run_dir, model.name, task.id, "crash")
                     s = read_json(run_dir / model.name / task.id / "score.json", {})
                     score_str = ("pending review" if s.get("status") == "pending"
+                                 else "unscored" if not s
                                  else f"score {s.get('score', 0):.2f}")
                     progress(f"[{model.name}] {task.id}: {m['status']}, {score_str}, "
                              f"{m['wall_ms'] / 1000:.1f}s, "
@@ -994,13 +1011,14 @@ def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
 def _record_dropped(run_dir: Path, model: str, task: str, reason: str) -> None:
     from .util import read_json, write_json
     try:
-        mani_path = run_dir / "run.json"
-        mani = read_json(mani_path, {})
-        lst = mani.setdefault("dropped_unscored", [])
-        entry = {"model": model, "task": task, "reason": reason}
-        if entry not in lst:
-            lst.append(entry)
-        write_json(mani_path, mani)
+        with _MANIFEST_LOCK:
+            mani_path = run_dir / "run.json"
+            mani = read_json(mani_path, {})
+            lst = mani.setdefault("dropped_unscored", [])
+            entry = {"model": model, "task": task, "reason": reason}
+            if entry not in lst:
+                lst.append(entry)
+            write_json(mani_path, mani)
     except OSError:
         pass
 
@@ -1087,15 +1105,21 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
         log(f"!! {e}")
         for rd in run_dirs:
             _stop_all([rd], "*", "spend_ceiling")
-
-    for rd, manifest in zip(run_dirs, manifests):
-        disk = read_json(rd / "run.json", {})
-        for k in ("stopped_reason", "reset_at", "reset_hint", "stopped_models",
-                  "dropped_unscored"):
-            if k in disk:
-                manifest[k] = disk[k]
-        manifest["finished"] = now_iso()
-        write_json(rd / "run.json", manifest)
+    except BaseException as e:
+        log(f"!! run crashed outside the task loop: {type(e).__name__}: {e}")
+        for rd in run_dirs:
+            _stop_all([rd], "*", "crash",
+                      {"crash": f"{type(e).__name__}: {e}"})
+        raise
+    finally:
+        for rd, manifest in zip(run_dirs, manifests):
+            disk = read_json(rd / "run.json", {})
+            for k in ("stopped_reason", "reset_at", "reset_hint",
+                      "stopped_models", "dropped_unscored", "crash"):
+                if k in disk:
+                    manifest[k] = disk[k]
+            manifest["finished"] = now_iso()
+            write_json(rd / "run.json", manifest)
     return run_dir
 
 

@@ -86,6 +86,11 @@ def set_env_key(key_env: str, value: str) -> None:
     if any(tok in value for tok in MASKED):
         raise ValueError(f"that looks like a masked display value, not a key — "
                          f"{key_env} left unchanged")
+    if any(c.isspace() for c in value) or "=" in key_env \
+            or any(c.isspace() for c in key_env):
+        raise ValueError(f"{key_env}: a key value cannot contain whitespace "
+                         f"and the variable name cannot contain '=' — "
+                         f"left unchanged")
     env_file = config.ROOT / ".env"
     raw = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
     crlf = "\r\n" in raw

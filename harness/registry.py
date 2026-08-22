@@ -197,9 +197,12 @@ def set_model_family(name: str, family: str,
 
 def set_model_color(name: str, color: str,
                     models_dir: Path = config.MODELS_DIR) -> None:
+    import re
     f = _model_yaml(name, models_dir)
     if not f:
         raise KeyError(f"model '{name}' not found in {models_dir}")
+    if color and not re.fullmatch(r"#[0-9A-Fa-f]{3,8}|[A-Za-z]{1,32}", color):
+        raise ValueError(f"{color!r} is not a CSS colour (#hex or a name)")
     set_yaml_key(f, "color", f"'{color}'" if color else "")
 
 
@@ -259,6 +262,11 @@ def load_models(models_dir: Path = config.MODELS_DIR,
 
 def set_yaml_key(path: Path, key: str, value: str) -> None:
     import re
+    if "\n" in value or "\r" in value or "\n" in key or "\r" in key:
+        raise ValueError(f"{key}: a yaml value written by the editor must be "
+                         f"a single line")
+    if not re.fullmatch(r"[A-Za-z_][\w\-]*", key):
+        raise ValueError(f"{key!r} is not a valid yaml key")
     text = path.read_text(encoding="utf-8")
     if value == "":
         text = re.sub(rf"^{re.escape(key)}:.*(?:\r?\n)?", "", text,

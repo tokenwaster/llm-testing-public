@@ -295,7 +295,8 @@ _OH_CACHE: dict | None = None
 
 def overhead_per_request(rows: list[dict] | None = None) -> dict:
     global _OH_CACHE
-    if rows is None and _OH_CACHE is not None:
+    want_cache = rows is None
+    if want_cache and _OH_CACHE is not None:
         return _OH_CACHE
     rows = results() if rows is None else rows
     per: dict[str, list] = {}
@@ -306,7 +307,7 @@ def overhead_per_request(rows: list[dict] | None = None) -> dict:
         per.setdefault(r["compare_key"], []).append(c["in"] - a["in"])
     out = {k: {"tokens": sum(v) / len(v), "n": len(v),
                "spread": max(v) - min(v)} for k, v in per.items() if v}
-    if rows is not None:
+    if want_cache:
         _OH_CACHE = out
     return out
 
@@ -327,8 +328,11 @@ def api_equivalent(metrics: dict, model) -> dict | None:
     oh = cli_overhead_for(model)
     if oh is None:
         return None
-    rate_in = float((model.pricing or {}).get("input_per_mtok") or 0)
-    rate_out = float((model.pricing or {}).get("output_per_mtok") or 0)
+    pr = model.pricing or {}
+    if pr.get("input_per_mtok") is None or pr.get("output_per_mtok") is None:
+        return None
+    rate_in = float(pr["input_per_mtok"])
+    rate_out = float(pr["output_per_mtok"])
     tin = metrics.get("tokens_in") or 0
     tout = metrics.get("tokens_out") or 0
     n = requests_in(metrics)

@@ -40,8 +40,9 @@ TOOL_DEFS = [
 
 
 def _resolve(workspace: Path, rel: str) -> Path:
-    p = (workspace / rel).resolve()
-    if not str(p).startswith(str(workspace.resolve())):
+    ws = workspace.resolve()
+    p = (ws / rel).resolve()
+    if p != ws and not p.is_relative_to(ws):
         raise ValueError(f"path escapes workspace: {rel}")
     return p
 

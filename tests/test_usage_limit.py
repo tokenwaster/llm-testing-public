@@ -145,9 +145,11 @@ def test_run_model_drops_task_preserves_completed_and_annotates(tmp_path, monkey
     from harness import runner as R
     from harness.util import write_json, read_json
 
+    from harness.registry import Model
+
     run_dir = tmp_path / "run1"
-    model = SimpleNamespace(name="claude-x", local=False, provider="claude-cli",
-                            supports_tools=False, base_url="")
+    model = Model(name="claude-x", provider="claude-cli", model="claude-x",
+                  local=False, supports_tools=False, base_url="")
 
     def mk_task(tid):
         return SimpleNamespace(id=tid, tier=1, category="reasoning",

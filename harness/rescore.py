@@ -32,11 +32,8 @@ class RunInProgress(Exception):
 
 
 def _active_run() -> str | None:
-    for run_dir in sorted(p for p in config.RUNS_DIR.iterdir() if p.is_dir()):
-        manifest = read_json(run_dir / "run.json", {})
-        if manifest and not manifest.get("finished"):
-            return run_dir.name
-    return None
+    from .runner import active_run
+    return active_run()
 
 
 def _rescore(selector, progress=print, force: bool = False) -> int:

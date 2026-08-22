@@ -174,15 +174,18 @@ def resolve_claude_alias(alias: str, timeout_s: int = 90) -> str | None:
     exe = _sh.which("claude")
     if not exe:
         return None
+    from .util import run_capped
     try:
-        proc = _sp.run(
+        proc = run_capped(
             [exe, "-p", "--output-format", "json", "--max-turns", "1",
              "--model", alias, "--disallowedTools",
              "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,Task"],
-            input="hi", capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout_s)
+            timeout=timeout_s, stdin=_sp.PIPE,
+            encoding="utf-8", errors="replace")
+        if proc.timed_out:
+            return None
         data = _json.loads(proc.stdout or "{}")
-    except (_sp.TimeoutExpired, _json.JSONDecodeError, OSError, ValueError):
+    except (_json.JSONDecodeError, OSError, ValueError):
         return None
     from .adapters import _resolve_served_model
     return _resolve_served_model(data.get("modelUsage"), alias)

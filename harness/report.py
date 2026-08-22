@@ -1,4 +1,6 @@
 
+import html as _html
+import threading
 import colorsys
 import html
 import re
@@ -1687,8 +1689,8 @@ classification updates on the next report regeneration.</div>
 <td class="small">{{ r.manifest.models|join(", ") }}</td>
 <td class="num">{{ r.manifest.tasks|length }}</td>
 <td class="small"><a href="/data/{{ r.run_id }}/">browse →</a></td>
-<td><button class="delrun" data-run="{{ r.run_id }}"
-  title="delete this run's data permanently">✕</button></td></tr>
+{% if not public_nav %}<td><button class="delrun" data-run="{{ r.run_id }}"
+  title="delete this run's data permanently">✕</button></td>{% endif %}</tr>
 {% endfor %}</table></div>
 <script>
 document.querySelectorAll('.delrun').forEach(b => b.addEventListener('click', async () => {
@@ -2360,7 +2362,8 @@ def _summarize(rs: list[dict]) -> dict:
         "energy_cost": _energy_cost(gpu.get("energy_wh")),
         "energy_wh_val": gpu.get("energy_wh"),
         "hosts": [
-            (f"{h} ({gq[h]})" if gq.get(h) and gq[h] != "unknown" else h)
+            _html.escape(f"{h} ({gq[h]})" if gq.get(h) and gq[h] != "unknown"
+                         else str(h))
             for h in sorted({h for r in rs
                              for h in (r.get("served_by") or [])})],
         "billed": any(r.get("cost_source") == "billed" for r in rs),
@@ -2500,6 +2503,9 @@ def _aggregate(entries: list[dict]) -> dict:
                        if e["score"]["score"] == min(vals))
         agg["score"] = {**src["score"], "score": statistics.fmean(vals)}
         agg["score_sigma"] = statistics.pstdev(vals) if len(vals) > 1 else 0.0
+        for k in ("status", "failure_mode", "stop_reason"):
+            if k in src:
+                agg[k] = src[k]
     for k in _MEAN_FIELDS:
         nums = [e[k] for e in entries if e.get(k) is not None]
         if nums:
@@ -3813,6 +3819,8 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
                        for a, n in sorted(am["by_attribution"].items(),
                                           key=lambda kv: -kv[1])],
         "flagged": [{**f, "cls": f["attribution"],
+                     "detail": _html.escape(str(f.get("detail") or "")),
+                     "summary": _html.escape(str(f.get("summary") or "")),
                      "score": (f"{f['score']:.3f}" if f["score"] is not None
                                else "—")}
                     for f in am["flagged"]],
@@ -5441,11 +5449,11 @@ costs across dates. If you need a real number, go to the provider.</p>
 on the <strong>same rig</strong>. Every run stores its own fingerprint, so this
 is checkable rather than assumed.</p>
 {% if envs %}
-<table><thead><tr><th>GPU</th><th>OS</th><th>Python</th><th>Host</th>
+<table><thead><tr><th>GPU</th><th>OS</th><th>Python</th>
 <th>Runs</th></tr></thead><tbody>
 {% for e in envs %}
 <tr><td>{{ e.gpu }}</td><td class="small">{{ e.os }}</td>
-<td class="small">{{ e.python }}</td><td class="small">{{ e.host }}</td>
+<td class="small">{{ e.python }}</td>
 <td class="small">{{ e.n }}</td></tr>
 {% endfor %}
 </tbody></table>
@@ -5573,12 +5581,13 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         e = (r.get("manifest") or {}).get("env") or {}
         if not e:
             continue
-        key = (e.get("gpu") or "—", e.get("os") or "—",
-               e.get("python") or "—", e.get("host") or "—")
+        key = (_html.escape(str(e.get("gpu") or "—")),
+               _html.escape(str(e.get("os") or "—")),
+               _html.escape(str(e.get("python") or "—")))
         env_counts[key] = env_counts.get(key, 0) + 1
-    envs = [{"gpu": g, "os": o, "python": p, "host": h, "n": n}
-            for (g, o, p, h), n in sorted(env_counts.items(),
-                                          key=lambda kv: -kv[1])]
+    envs = [{"gpu": g, "os": o, "python": p, "n": n}
+            for (g, o, p), n in sorted(env_counts.items(),
+                                       key=lambda kv: -kv[1])]
 
     n_billed = n_list = 0
     hosts: dict[str, int] = {}
@@ -5591,7 +5600,8 @@ def build_info_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
             for h in (res.get("served_by") or []):
                 hosts[h] = hosts.get(h, 0) + 1
     n_cost = n_billed + n_list or 1
-    host_list = [h for h, _ in sorted(hosts.items(), key=lambda kv: -kv[1])]
+    host_list = [_html.escape(str(h))
+                 for h, _ in sorted(hosts.items(), key=lambda kv: -kv[1])]
 
     mirror_ctx = None
     if dataset_key == "live":
@@ -7256,6 +7266,20 @@ def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         dataset_label=dataset_label, dataset_key=dataset_key)
 
 
+_GEN_LOCK = threading.RLock()
+
+
+def _one_render_at_a_time(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def inner(*a, **k):
+        with _GEN_LOCK:
+            return fn(*a, **k)
+    return inner
+
+
+@_one_render_at_a_time
 def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
                  dataset_label: str = "", dataset_key: str = "live",
                  tasks_dir: Path | None = None, public_nav: bool = False) -> Path:

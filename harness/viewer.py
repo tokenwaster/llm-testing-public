@@ -39,9 +39,9 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _send_file(self, rel: str):
-        target = (config.REPORTS_DIR / rel).resolve()
-        if not str(target).startswith(str(config.REPORTS_DIR.resolve())) \
-                or not target.is_file():
+        root = config.REPORTS_DIR.resolve()
+        target = (root / rel).resolve()
+        if not target.is_relative_to(root) or not target.is_file():
             self._send(404, b"not found")
             return
         self._send(200, target.read_bytes())
@@ -65,15 +65,16 @@ class Handler(BaseHTTPRequestHandler):
         base, rel = resolved
         root = base.resolve()
         target = (base / rel).resolve() if rel else root
-        if not str(target).startswith(str(root)):
+        if target != root and not target.is_relative_to(root):
             self._send(404, b"not found")
             return
         if target.is_dir():
+            import html as _html
             rows = []
             for p in sorted(target.iterdir(), key=lambda x: (x.is_file(), x.name)):
                 href = "/data/" + quote(str(p.relative_to(root)).replace("\\", "/"))
                 rows.append(f'<li><a href="{href}{"/" if p.is_dir() else ""}">'
-                            f'{p.name}{"/" if p.is_dir() else ""}</a>'
+                            f'{_html.escape(p.name)}{"/" if p.is_dir() else ""}</a>'
                             + ("" if p.is_dir() else
                                f' <small>({p.stat().st_size:,} B)</small>') + "</li>")
             up = "/data/" + quote(str(target.parent.relative_to(root)).replace("\\", "/")) \
@@ -81,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
             page = ("<!doctype html><meta charset='utf-8'>"
                     "<body style='background:#0d0d0d;color:#c3c2b7;"
                     "font:14px system-ui;padding:24px'>"
-                    f"<h3 style='color:#fff'>runs/{rel}</h3>"
+                    f"<h3 style='color:#fff'>runs/{_html.escape(rel)}</h3>"
                     + (f'<p><a style="color:#3987e5" href="{up}/">⬆ up</a></p>' if up else "")
                     + f"<ul>{''.join(rows) or '(empty)'}</ul>"
                     "<style>a{color:#3987e5;text-decoration:none}</style></body>")

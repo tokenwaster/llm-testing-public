@@ -1,4 +1,5 @@
 
+import os
 import struct
 from pathlib import Path
 
@@ -56,8 +57,12 @@ def read_meta(path: Path) -> dict:
                 return out
             _ver, _nt, n_kv = struct.unpack("<IQQ", f.read(20))
 
+            remaining = os.fstat(f.fileno()).st_size
+
             def rstr():
                 (n,) = struct.unpack("<Q", f.read(8))
+                if n > remaining - f.tell():
+                    raise ValueError(f"gguf string length {n} past EOF")
                 return f.read(n).decode("utf-8", "replace")
 
             def rval(t):
@@ -73,6 +78,8 @@ def read_meta(path: Path) -> dict:
                             f.seek(_T_FMT[et][1] * cnt, 1)
                             return None
                         return [rval(et) for _ in range(cnt)]
+                    if cnt > 4096:
+                        raise ValueError(f"gguf array of {cnt} strings")
                     return [rval(et) for _ in range(cnt)]
                 raise ValueError(f"gguf type {t}")
 
@@ -82,7 +89,7 @@ def read_meta(path: Path) -> dict:
                     break
                 (t,) = struct.unpack("<I", f.read(4))
                 out[k] = rval(t)
-    except (OSError, struct.error, ValueError):
+    except (OSError, struct.error, ValueError, OverflowError, MemoryError):
         return {}
     _meta_cache[key] = out
     return out
@@ -202,7 +209,7 @@ def advise(model_id: str, yaml_cap: int = 0, max_tokens: int = 32768,
         shrink = {"Q8_0": ("Q4_K_M", 0.55), "Q6_K": ("Q4_K_M", 0.72),
                   "Q5_K_M": ("Q4_K_M", 0.85), "Q5_K_L": ("Q4_K_M", 0.83),
                   "Q4_K_M": ("IQ3_XS", 0.75), "Q4_K_S": ("IQ3_XS", 0.78)}
-        if warnings and quant in shrink and not sliding:
+        if warnings and quant in shrink and not sliding and per_tok > 0:
             new_q, f = shrink[quant]
             new_max = int((BUDGET_BYTES - weights * f - fixed) / per_tok)
             new_fails = [t for t in

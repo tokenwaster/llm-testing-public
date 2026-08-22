@@ -27,10 +27,28 @@ def load_settings() -> dict:
         return {}
 
 
+def settings_unreadable() -> bool:
+    """True when the settings file EXISTS but cannot be parsed — the one
+    state in which a default must not silently replace its contents."""
+    if not SETTINGS_FILE.exists():
+        return False
+    try:
+        json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        return False
+    except (OSError, ValueError):
+        return True
+
+
 def save_setting(key: str, value) -> None:
+    if settings_unreadable():
+        raise RuntimeError(
+            f"{SETTINGS_FILE.name} exists but cannot be parsed — refusing to "
+            f"overwrite it (fix the JSON by hand, then retry)")
     s = load_settings()
     s[key] = value
-    SETTINGS_FILE.write_text(json.dumps(s, indent=2) + "\n", encoding="utf-8")
+    tmp = SETTINGS_FILE.with_name(f"{SETTINGS_FILE.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(s, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, SETTINGS_FILE)
 
 
 def serve_port() -> int:
@@ -80,6 +98,10 @@ def mirror_seed_offset() -> int:
                 return int(raw)
         except (TypeError, ValueError):
             pass
+    if settings_unreadable():
+        raise RuntimeError(
+            f"{SETTINGS_FILE.name} is unreadable — refusing to mint a new "
+            f"mirror seed offset over one that may already exist")
     import secrets
     minted = 1000 + secrets.randbelow(9_000_000)
     save_setting("mirror_seed_offset", minted)
@@ -90,6 +112,8 @@ REPORTS_DIR = ROOT / "reports"
 def resolve_run_data(rel: str):
     rel = (rel or "").strip("/")
     first = rel.split("/", 1)[0] if rel else ""
+    if first in (".", "..") or ".." in rel.replace("\\", "/").split("/"):
+        return None
     if not first or (RUNS_DIR / first).exists():
         return RUNS_DIR, rel
     if (SPECIAL_DIR / first).exists():

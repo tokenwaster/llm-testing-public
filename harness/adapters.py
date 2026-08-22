@@ -124,7 +124,7 @@ def _is_infra_failure(text: str) -> bool:
 
 
 def _classify_http(status: int, body: str, headers=None) -> AdapterError:
-    if _is_infra_failure(body):
+    if status != 429 and status < 500 and _is_infra_failure(body):
         return AdapterError(f"HTTP {status}: {body[:300]}", kind="infra",
                             retryable=False)
     if status in (401, 403):
@@ -252,10 +252,15 @@ class OpenAICompatAdapter(BaseAdapter):
         choice = data["choices"][0]
         msg = choice.get("message") or {}
         usage = data.get("usage") or {}
+        rt = (usage.get("completion_tokens_details") or {}).get(
+            "reasoning_tokens")
+        rt = rt if rt is not None else usage.get("reasoning_tokens")
         tool_calls = [
-            ToolCall(id=tc["id"], name=tc["function"]["name"],
-                     args=_safe_json(tc["function"].get("arguments") or "{}"))
-            for tc in (msg.get("tool_calls") or [])
+            ToolCall(id=tc.get("id") or f"call_{i}",
+                     name=(tc.get("function") or {}).get("name") or "",
+                     args=_safe_json((tc.get("function") or {}).get("arguments")
+                                     or "{}"))
+            for i, tc in enumerate(msg.get("tool_calls") or [])
         ]
         result = ChatResult(
             text=msg.get("content") or "",
@@ -264,6 +269,7 @@ class OpenAICompatAdapter(BaseAdapter):
             tokens_in=usage.get("prompt_tokens"),
             tokens_out=usage.get("completion_tokens"),
             stop_reason=choice.get("finish_reason"),
+            reasoning_tokens=rt,
             tool_calls=tool_calls,
             cost_usd=usage.get("cost"),
             served_by=data.get("provider"),
@@ -309,7 +315,8 @@ class OpenAICompatAdapter(BaseAdapter):
                     if data.get("error"):
                         err = data["error"]
                         raise AdapterError(
-                            f"in-stream error: {err.get('message') or err}",
+                            f"provider error mid-response: "
+                            f"{err.get('message') or err}",
                             kind="api", retryable=True)
                     usage = data.get("usage")
                     if usage:
@@ -486,13 +493,23 @@ class AnthropicAdapter(BaseAdapter):
         if resp.status_code != 200:
             raise _classify_http(resp.status_code, resp.text, resp.headers)
         total = now_ms() - t0
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            raise AdapterError(f"non-JSON 200 response: {resp.text[:200]}",
+                               kind="api", retryable=True)
+        if not isinstance(data, dict):
+            raise AdapterError(f"unexpected 200 body: {str(data)[:200]}",
+                               kind="api", retryable=True)
         text_parts, tool_calls = [], []
-        for block in data.get("content", []):
-            if block["type"] == "text":
-                text_parts.append(block["text"])
-            elif block["type"] == "tool_use":
-                tool_calls.append(ToolCall(id=block["id"], name=block["name"],
+        for block in data.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text_parts.append(block.get("text") or "")
+            elif block.get("type") == "tool_use":
+                tool_calls.append(ToolCall(id=block.get("id") or "",
+                                           name=block.get("name") or "",
                                            args=block.get("input") or {}))
         usage = data.get("usage") or {}
         cache_read = usage.get("cache_read_input_tokens") or 0
@@ -505,7 +522,7 @@ class AnthropicAdapter(BaseAdapter):
             tokens_out=usage.get("output_tokens"),
             cache_read_tokens=cache_read or None,
             cache_write_tokens=cache_write or None,
-            stop_reason=data.get("stop_reason"),
+            stop_reason=_anthropic_stop(data.get("stop_reason")),
             tool_calls=tool_calls,
         )
 
@@ -517,6 +534,7 @@ class AnthropicAdapter(BaseAdapter):
         tokens_in = tokens_out = None
         cache_read = cache_write = 0
         stop_reason = None
+        guard = _LoopGuard()
         try:
             with httpx.stream("POST", self._url(), headers=self._headers(), json=payload,
                               timeout=httpx.Timeout(timeout_s, connect=15)) as resp:
@@ -524,12 +542,23 @@ class AnthropicAdapter(BaseAdapter):
                     resp.read()
                     raise _classify_http(resp.status_code, resp.text, resp.headers)
                 for line in resp.iter_lines():
+                    if (now_ms() - t0) / 1000 > timeout_s:
+                        raise AdapterError(
+                            f"exceeded the {timeout_s}s budget "
+                            f"(streamed {len(''.join(text_parts))} chars)",
+                            kind="timeout", retryable=True)
                     if not line.startswith("data:"):
                         continue
                     data = _safe_json(line[5:].strip())
                     if not data:
                         continue
                     etype = data.get("type")
+                    if etype == "error":
+                        err = data.get("error") or {}
+                        raise AdapterError(
+                            f"provider error mid-response: "
+                            f"{err.get('message') or err}",
+                            kind="api", retryable=True)
                     if etype == "message_start":
                         u0 = (data.get("message", {}).get("usage") or {})
                         cache_read = u0.get("cache_read_input_tokens") or 0
@@ -537,11 +566,19 @@ class AnthropicAdapter(BaseAdapter):
                         tokens_in = ((u0.get("input_tokens") or 0)
                                      + cache_read + cache_write) or None
                     elif etype == "content_block_delta":
-                        piece = (data.get("delta") or {}).get("text")
+                        d = data.get("delta") or {}
+                        piece = d.get("text")
+                        thinking = d.get("thinking")
                         if piece:
                             if ttft is None:
                                 ttft = now_ms() - t0
                             text_parts.append(piece)
+                        if guard.feed((piece or "") + (thinking or "")):
+                            raise AdapterError(
+                                "repetition loop — the model is repeating one "
+                                "short cycle without terminating (going nowhere); "
+                                "aborted before the token ceiling",
+                                kind="repetition_loop", retryable=False)
                     elif etype == "message_delta":
                         usage = data.get("usage") or {}
                         tokens_out = usage.get("output_tokens", tokens_out)
@@ -553,7 +590,7 @@ class AnthropicAdapter(BaseAdapter):
         except httpx.HTTPError as e:
             raise AdapterError(f"stream broke mid-response: {type(e).__name__}: {e}",
                                kind="connect", retryable=True)
-        return ChatResult(
+        result = ChatResult(
             text="".join(text_parts),
             total_ms=now_ms() - t0,
             ttft_ms=ttft,
@@ -561,8 +598,16 @@ class AnthropicAdapter(BaseAdapter):
             tokens_out=tokens_out,
             cache_read_tokens=cache_read or None,
             cache_write_tokens=cache_write or None,
-            stop_reason=stop_reason,
+            stop_reason=_anthropic_stop(stop_reason),
         )
+        _reject_degenerate(result, False)
+        return result
+
+
+def _anthropic_stop(raw):
+    """Anthropic says max_tokens where everyone else says length; the runner's
+    runaway detection keys on the latter."""
+    return "length" if raw == "max_tokens" else raw
 
 
 
