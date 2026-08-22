@@ -5,8 +5,6 @@ import pytest
 
 APP = Path(__file__).parent / "app.html"
 
-# use the project-local browser install when this workspace lives inside the
-# project tree (self-locating so the checker also works from temp dirs)
 for _parent in Path(__file__).resolve().parents:
     _pw = _parent / ".pw-browsers"
     if _pw.is_dir():
@@ -18,8 +16,6 @@ def _launch(p):
     try:
         return p.chromium.launch()
     except Exception:
-        # some environments block the headless-shell helper binary —
-        # fall back to the full (signed) chromium build in new-headless mode
         return p.chromium.launch(channel="chromium")
 
 
@@ -49,20 +45,11 @@ def test_files_window_opens_at_root(page):
     assert page.locator("#files-window").is_visible()
     assert page.text_content("#files-path").strip() == "/"
     names = [t.strip() for t in page.locator(".fs-item").all_text_contents()]
-    # tolerate decorative icons/prefixes around the entry name
     for required in ("bin", "etc", "home", "usr", "var"):
         assert any(required in n for n in names), f"root missing {required}: {names}"
 
 
 def _open_folder(page, name):
-    """Double-click the folder ENTRY, not the text inside it.
-
-    `.fs-item >> text=<name>` resolves to the innermost element holding the
-    label, and a correct app may set `pointer-events: none` on that icon/label
-    so the whole entry is the click target — a standard technique. Playwright
-    then can never land the dblclick on it and times out, failing an app whose
-    navigation works fine by hand. Target the `.fs-item` container, which is
-    where the handler lives and what a user actually double-clicks."""
     page.locator(".fs-item").filter(has_text=name).first.dblclick()
     page.wait_for_timeout(150)
 
@@ -137,11 +124,8 @@ def test_notepad_survives_page_reload(page):
         f"typed text lost after reload: {tab_texts}"
 
 
-# ---- v0.5 upgrade: no dead UI (fresh page so state is untouched) ----------
 
 def test_no_dead_buttons(page):
-    # runs LAST: reload for a fresh DOM, then require every visible button
-    # to observably do something
     page.reload()
     page.wait_for_timeout(500)
     dead = page.evaluate("""() => {

@@ -1,9 +1,3 @@
-"""ext-002 (frontier): the same order id appears in two separate lines and must
-be MERGED (X-10's amount is in one mention, its paid status in another); X-11's
-amount is never given (null, not guessed); three date formats; sort by date. A
-model that emits five rows (one per line) instead of three merged orders, or
-guesses X-11's amount, fails.
-"""
 import json
 import pathlib
 import re

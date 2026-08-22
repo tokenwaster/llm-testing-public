@@ -1,6 +1,10 @@
 from solution import normalize_date
 
 
+def _guards_intact():
+    assert normalize_date("2024-03-05") == "2024-03-05"
+
+
 def test_iso_passthrough():
     assert normalize_date("2024-03-05") == "2024-03-05"
 
@@ -31,10 +35,12 @@ def test_whitespace_tolerated():
 
 
 def test_invalid_calendar_date():
+    _guards_intact()
     assert normalize_date("31/02/2024") is None
 
 
 def test_garbage_returns_none():
+    _guards_intact()
     assert normalize_date("not a date") is None
     assert normalize_date("2024/03/05") is None
     assert normalize_date("") is None

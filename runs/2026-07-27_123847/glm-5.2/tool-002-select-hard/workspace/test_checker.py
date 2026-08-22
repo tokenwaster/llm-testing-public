@@ -1,9 +1,3 @@
-"""tool-002 (frontier): sending the message needs a contact_id, which only
-search_contacts can supply — so the correct NEXT call is search_contacts, not
-send_message with an invented id. The trap is the "helpful" model that emits
-send_message{contact_id: "jordan" / "123" / ...}, fabricating a value it cannot
-know yet.
-"""
 import json
 import pathlib
 import re

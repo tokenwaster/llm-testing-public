@@ -1,7 +1,3 @@
-"""tool-001: pick create_reminder and fill args from the request. Prompt-based
-(the call is emitted as JSON), so every model can attempt it — no native
-tools API required.
-"""
 import json
 import pathlib
 import re
@@ -36,6 +32,5 @@ def test_text_argument_mentions_dentist():
 
 
 def test_no_foreign_arguments():
-    # only text/date belong to create_reminder — no city/to/subject leakage
     args = set(_call().get("arguments", {}))
     assert args <= {"text", "date"}, f"unexpected arguments: {args}"

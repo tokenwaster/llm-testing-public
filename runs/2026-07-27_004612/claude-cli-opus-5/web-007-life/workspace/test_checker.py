@@ -102,8 +102,6 @@ def test_blinker_oscillates(page):
 
 
 def test_glider_travels(page):
-    """A glider returns to its shape shifted by (+1,+1) every 4 steps. This
-    only holds with correct B3/S23 rules AND simultaneous update."""
     moved = page.evaluate("""() => {
         const L = window.life; L.clear();
         // standard glider, top-left at (5,5)

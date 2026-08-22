@@ -119,11 +119,8 @@ def test_delete_and_persist(page):
     assert len(_visible_rows(page)) == before - 1, "deleted expense returned"
 
 
-# ---- v0.5 upgrade: no dead UI (fresh page so state is untouched) ----------
 
 def test_no_dead_buttons(page):
-    # runs LAST: reload for a fresh DOM, then require every visible button
-    # to observably do something
     page.reload()
     page.wait_for_timeout(500)
     dead = page.evaluate("""() => {

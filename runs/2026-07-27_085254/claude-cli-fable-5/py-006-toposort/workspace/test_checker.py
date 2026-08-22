@@ -6,7 +6,6 @@ def test_example():
 
 
 def test_lexicographic_choice():
-    # both z->a and independent m: smallest valid order interleaves alphabetically
     assert topo_sort([("z", "a")], nodes=["m"]) == ["m", "z", "a"]
 
 

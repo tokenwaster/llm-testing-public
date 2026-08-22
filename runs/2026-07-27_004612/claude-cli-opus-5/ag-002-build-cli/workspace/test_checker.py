@@ -8,11 +8,6 @@ TOOL_TIMEOUT_S = 30
 
 
 def run_tool(content: str, tmp_path: Path) -> list[str]:
-    """Run the model's CLI; on timeout kill it and anything it spawned.
-
-    The kill must happen while the top process lives: taskkill /T walks the live
-    tree, and a venv python.exe is a launcher shim hiding the real interpreter.
-    """
     sample = tmp_path / "sample.txt"
     sample.write_text(content, encoding="utf-8")
     kw = {}
@@ -48,7 +43,6 @@ def test_basic(tmp_path):
     out = run_tool("The cat sat.\nThe dog sat!\n", tmp_path)
     assert out[0] == "lines: 2"
     assert out[1] == "words: 6"
-    # 'sat' and 'the' both appear twice; alphabetical tie-break -> sat
     assert out[2] == "top: sat 2"
 
 
@@ -61,7 +55,6 @@ def test_case_folding(tmp_path):
 
 def test_punctuation_and_digits_split(tmp_path):
     out = run_tool("a1a b_b c-c\n", tmp_path)
-    # tokens: a, a, b, b, c, c -> 6 words, tie -> 'a'
     assert out[1] == "words: 6"
     assert out[2] == "top: a 2"
 

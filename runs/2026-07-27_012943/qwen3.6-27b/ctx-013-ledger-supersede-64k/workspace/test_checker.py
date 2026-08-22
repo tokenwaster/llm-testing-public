@@ -1,9 +1,3 @@
-"""ctx-013 grader: five independent checkpoints over the settled-balance
-aggregation, so retrieving most of the ledger correctly but slipping one derived
-value earns partial credit. Reference values are computed by the generator in
-tasks-refs/ctx-013-ledger-supersede-64k/generate.py (fixed seed). Only the last
-occurrence of each label is read, so mid-reasoning mentions don't fool it.
-"""
 import pathlib
 import re
 

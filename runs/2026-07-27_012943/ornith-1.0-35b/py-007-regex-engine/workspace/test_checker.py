@@ -1,22 +1,35 @@
+import io
 import re as _re
+import tokenize
 from pathlib import Path
 
 import pytest
 
-from solution import match
-
 FORBIDDEN = _re.compile(r"\bimport\s+re\b|\bfrom\s+re\b|import\s+regex|\b__import__\b|\bimportlib\b")
 
+def _code_only(src):
+    try:
+        toks = tokenize.generate_tokens(io.StringIO(src).readline)
+        skip = (tokenize.COMMENT, tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", -1))
+        return " ".join(t.string for t in toks if t.type not in skip)
+    except (tokenize.TokenError, SyntaxError):
+        return src
 
-def test_no_regex_library():
-    src = (Path(__file__).parent / "solution.py").read_text(encoding="utf-8")
-    assert not FORBIDDEN.search(src), "solution must not use re/regex modules"
+if FORBIDDEN.search(_code_only((Path(__file__).parent / "solution.py").read_text(encoding="utf-8"))):
+    raise ImportError("solution must not use re/regex modules")
+
+from solution import match
+
+
+def _guards_intact():
+    assert match("a", "a") is True
+    assert match("a", "b") is False
 
 
 def test_literals_and_dot():
     assert match("abc", "abc")
     assert not match("abc", "abd")
-    assert not match("abc", "ab")        # whole-text match
+    assert not match("abc", "ab")
     assert not match("abc", "abcd")
     assert match("a.c", "axc")
     assert not match("a.c", "ac")
@@ -29,7 +42,7 @@ def test_star():
     assert match("ab*c", "abbbc")
     assert match(".*", "anything at all")
     assert match(".*", "")
-    assert match("a*a", "aaaa")          # backtracking required
+    assert match("a*a", "aaaa")
     assert not match("a*b", "aac")
 
 
@@ -65,11 +78,12 @@ def test_combined():
 def test_backtracking_hard():
     assert match("a*a*a*b", "aaab")
     assert match(".*b.*", "abc")
-    assert not match("a+a+a+", "aa")     # needs at least 3
-    assert match("[ab]*abb", "ababb")    # classic NFA backtrack case
+    assert not match("a+a+a+", "aa")
+    assert match("[ab]*abb", "ababb")
 
 
 def test_malformed_patterns():
+    _guards_intact()
     for bad in ("[abc", "*a", "+x", "?y"):
         with pytest.raises(ValueError):
             match(bad, "whatever")

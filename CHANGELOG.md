@@ -24,6 +24,89 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
+## 0.7.11 — the floors are gone, and the tally is the tally
+
+### Scoring fixes, rescored in place
+Everything 0.7.10 found and could not apply. These change scores, so this is
+the patch that carries them: the whole live dataset was rescored under the new
+checkers (`harness rescore`), on one machine with no run active, so every
+model is measured the same way — the 142 human-graded cells are left alone.
+The methodology did not change (same tasks, same prompts, same budgets); what
+changed is that credit now only flows for doing the task.
+
+**Harness (every pytest/webapp/response cell).**
+- **The tally reads pytest's final summary line only.** `_first_int` used to
+  take the FIRST "N passed" anywhere in the output, and the short-summary
+  lines (`FAILED t - AssertionError: got '100 passed'`) print before it with
+  model-controlled text in them — a reply quoting a test count scored 0.99.
+  `_tally` now parses the last line matching pytest's summary shape.
+- **The lane is isolated from the workspace.** Pytest was loading a
+  model-written `conftest.py` / `pytest.ini` / `pyproject.toml` from the
+  workspace (one saved run has a conftest already — benign, but a six-line
+  hookwrapper flips every failure to passed; reproduced). The checker now runs
+  `python -I -m pytest --noconftest -c <empty ini> --rootdir .` with
+  `PYTEST_ADDOPTS` cleared, so nothing in the workspace configures the runner
+  or shadows `pytest` itself. Verified on real saved workspaces from every
+  lane (py/web/ag/hl/ext/rs): all 1.0 → 1.0.
+- `extract_code_block` accepts ```` ```Python ```` / ```` ```python3 ```` /
+  ```` ```py3 ```` (case-insensitive) and prefers the last fence that contains
+  code (`def`/`class`/`import`) over a trailing example block.
+- `ANSWER:` is case-insensitive and tolerates markdown (`**ANSWER:** 253`,
+  `Answer: `253``), so those are scored instead of silently missing the line.
+- `CONTROL_TOKEN_RE` strips Gemma's `<end_of_turn>`/`<eos>`/`<bos>` and
+  DeepSeek's fullwidth-pipe terminator.
+
+**Checkers (reference-verified: known-good 1.0, empty/no-op/trap 0).**
+- **ag-004-data-pipeline**: an empty `output.json` scored 0.6 (three tests
+  passed on zero rows). The row-count/shape guard is folded into every test —
+  `[]`, a placeholder row, and a non-deduped 7-row output all score 0; correct
+  1.0; partial (wrong order, string scores) keeps 0.8/0.6.
+- **ag-006-perf-optimize**: `checker_timeout_s: 240`. Four 45 s per-test caps
+  under the 60 s lane default killed the whole pytest whenever two functions
+  were slow — a 2-of-4 workspace takes 67 s and was recorded as 0 with empty
+  detail (six such zeros in the dataset); it now scores 0.5. Seed 0.0,
+  reference 1.0. (`tasks-refs/ag-006-perf.py` was a second optimised copy, not
+  the seed; renamed `ag-006-perf-optimized-alt.py`. The seed is
+  `setup/perf.py`.)
+- **py-003/004/005/007/008**: the "forbidden library not used" test passed on
+  any source, and the "rejects malformed input" tests passed on a stub that
+  returns None — refusal stubs scored 0.20–0.33. The library check is now a
+  collection-time gate (a violation is 0 for the task; a tokenizer-based scan
+  so a docstring saying "without eval()" does not trip it), and each negative
+  test requires one positive parse. Stubs 0.0; known-good 1.0; every saved
+  partial keeps its real credit minus the free test.
+- **hl-001/hl-002**: answering `NOT STATED` to everything earned 0.25 / 0.43.
+  Abstain tests are gated on at least one correct positive answer — blanket
+  abstention 0.0, a correct response 1.0, a hallucination on one unanswerable
+  still 0.75 / 0.857. Numbered answers are read from the LAST match like
+  ctx-013/rs-013, so a numbered preamble no longer poisons the parse
+  (0.43 → 1.0 on such a reply). All 102 recorded hl cells were 1.0 and stay 1.0.
+- **web-011-sort**: the prompt forbids a one-shot `Array.sort()`, but the
+  checker only looped `sortStep()` until sorted — two gemma-3-4b runs that sort
+  the whole array in one call scored 1.0. Every test now first asserts the core
+  contract (reaches sorted via steps, first step does not finish, ≥ n−1 steps,
+  ≤ 3 elements moved per step); 7 tests. Reference 1.0; empty / no-op /
+  one-shot / pass-per-step traps 0.0. Fleet scan of 56 workspaces: all 36
+  legitimate 1.0s unchanged; 16 submissions that never sort (kept 0.17–0.83 on
+  layout tests) go to 0. Traps + `verify.py` in `tasks-refs/web-011-sort/`.
+
+**Rescore result (2026-08-22, 3,120 cells, 142 human-graded left alone):
+89 moved.** py-004/005/007/008: 59 cells, every one down — the free test left
+each denominator and submissions whose only passing tests were the free ones
+went to 0. web-011: 18 cells, 16 to 0 (never sorted, or sorted in one call),
+two legitimate steppers up a point on re-weighting. hl-001/002 and ag-004: no
+recorded cell moved (all were already 0 or 1). Twelve cells on UNTOUCHED
+checkers moved ±0.1 in both directions — web-003-sand (8), web-002-maze (3),
+web-009-physics (1): run-to-run nondeterminism in those physics/maze tests,
+reported as-is rather than reverted. Largest per-model effect: gemma-3-4b
+−4.08 task-points over 19 cells; no other model moved more than 1.13.
+
+**Not applied: a per-test timeout for the webapp lane.** A hanging
+`page.evaluate` still zeros the whole lane. `pytest-timeout`'s only Windows
+mechanism aborts the entire process with `os._exit` — the same "no summary →
+0" we have — so it cannot deliver a per-test budget here; that needs a
+Playwright-side guard in the shared checker preamble.
+
 ## 0.7.10 — a harness fault is not a model result
 
 ### Hardening pass (no task or scoring change)

@@ -13,7 +13,11 @@ EXPECTED = [
 def load():
     path = Path(__file__).parent / "output.json"
     assert path.exists(), "output.json was not created"
-    return json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(data, list), f"output.json is {type(data).__name__}, not a list"
+    assert len(data) == len(EXPECTED), f"{len(data)} rows, expected {len(EXPECTED)}"
+    assert all(isinstance(r, dict) for r in data), "every row must be an object"
+    return data
 
 
 def test_is_list_of_objects():

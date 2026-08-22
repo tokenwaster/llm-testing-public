@@ -1,6 +1,3 @@
-"""ext-001: messy email -> strict JSON. Each field is a check; an extra
-(hallucinated) key fails its own check, so inventing fields costs points.
-"""
 import json
 import pathlib
 import re

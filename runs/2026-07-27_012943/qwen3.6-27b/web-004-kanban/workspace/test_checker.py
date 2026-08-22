@@ -100,11 +100,8 @@ def test_delete_card_and_persist(page):
     assert _cards_in(page, "#col-todo") == 1
 
 
-# ---- v0.5 upgrade: no dead UI (fresh page so state is untouched) ----------
 
 def test_no_dead_buttons(page):
-    # runs LAST: reload for a fresh DOM, then require every visible button
-    # to observably do something
     page.reload()
     page.wait_for_timeout(500)
     dead = page.evaluate("""() => {

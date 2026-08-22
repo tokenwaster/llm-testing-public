@@ -10,13 +10,24 @@ from . import config
 from .tasks import Task
 from .util import now_iso, run_capped
 
-CODE_BLOCK_RE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
+CODE_BLOCK_RE = re.compile(r"```(?:python3?|py3?)?[ \t]*\n(.*?)```",
+                           re.DOTALL | re.IGNORECASE)
 HTML_BLOCK_RE = re.compile(r"```html\s*\n(.*?)```", re.DOTALL)
-ANSWER_RE = re.compile(r"^\s*ANSWER:\s*(.+?)\s*$", re.MULTILINE)
-CONTROL_TOKEN_RE = re.compile(r"<\|[^|>]*\|>|</?s>|<\|?endoftext\|?>")
+ANSWER_RE = re.compile(
+    r"^\s*[*_`]*\s*ANSWER\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*$",
+    re.MULTILINE | re.IGNORECASE)
+CONTROL_TOKEN_RE = re.compile(
+    r"<\|[^|>]*\|>|</?s>|<\|?endoftext\|?>"
+    r"|<(?:end|start)_of_turn>|<eos>|<bos>|<\uff5c[^\uff5c>]*\uff5c>")
 PYTEST_PASSED_RE = re.compile(r"(\d+) passed")
 PYTEST_FAILED_RE = re.compile(r"(\d+) failed")
-PYTEST_ERROR_RE = re.compile(r"(\d+) error")
+PYTEST_ERROR_RE = re.compile(r"(\d+) errors?\b")
+PYTEST_SUMMARY_LINE_RE = re.compile(
+    r"^=*\s*(?:\d+ (?:passed|failed|errors?|skipped|xfailed|xpassed|warnings?"
+    r"|deselected)(?:,\s*)?)+.*\bin \d")
+PYTEST_CONFIG_FILES = ("pytest.ini", "pyproject.toml", "tox.ini",
+                       "setup.cfg", ".pytest.ini")
+HARNESS_INI = "_harness_pytest.ini"
 PYTEST_COLLECT_RE = re.compile(r"ERROR collecting|errors? during collection")
 SUBMISSION_BROKE_RE = re.compile(
     r"^E\s+((?:Syntax|Indentation|Tab|Import|ModuleNotFound|Name|Attribute|Type|Value)"
@@ -25,7 +36,11 @@ SUBMISSION_BROKE_RE = re.compile(
 
 def extract_code_block(text: str) -> str | None:
     blocks = CODE_BLOCK_RE.findall(text)
-    return blocks[-1].strip() + "\n" if blocks else None
+    if not blocks:
+        return None
+    code = [b for b in blocks if re.search(r"^\s*(def|class|import|from)\s",
+                                           b, re.M)]
+    return (code or blocks)[-1].strip() + "\n"
 
 
 def extract_html_block(text: str) -> str | None:
@@ -41,7 +56,9 @@ def extract_html_block(text: str) -> str | None:
 def extract_answer(text: str) -> str | None:
     text = CONTROL_TOKEN_RE.sub("", text)
     matches = ANSWER_RE.findall(text)
-    return matches[-1].strip() if matches else None
+    if not matches:
+        return None
+    return matches[-1].strip().strip("*`_ \t")
 
 
 def run_pytest_checker(task: Task, workspace: Path) -> dict:
@@ -50,11 +67,16 @@ def run_pytest_checker(task: Task, workspace: Path) -> dict:
         return _record(0.0, "checker", "missing checker.py")
     target = workspace / "test_checker.py"
     shutil.copyfile(checker, target)
-    cmd = [sys.executable, "-m", "pytest", str(target.name), "-q", "--tb=line",
-           "-p", "no:cacheprovider", "--color=no"]
+    ini = workspace / HARNESS_INI
+    ini.write_text("[pytest]\n", encoding="utf-8")
+    cmd = [sys.executable, "-I", "-m", "pytest", str(target.name), "-q",
+           "--tb=line", "-p", "no:cacheprovider", "--color=no",
+           "--noconftest", "-c", HARNESS_INI, "--rootdir", "."]
     timeout = task.checker_timeout_s
     from .util import child_env
     env = child_env()
+    env["PYTEST_ADDOPTS"] = ""
+    env.pop("PYTEST_PLUGINS", None)
     local_browsers = config.ROOT / ".pw-browsers"
     if local_browsers.is_dir():
         env["PLAYWRIGHT_BROWSERS_PATH"] = str(local_browsers)
@@ -67,15 +89,17 @@ def run_pytest_checker(task: Task, workspace: Path) -> dict:
                            str(Path(env["LOCALAPPDATA"]) / "ms-playwright"))
         except (RuntimeError, OSError):
             pass
-    proc = run_capped(
-        cmd, timeout, cwd=str(workspace), text=True,
-        encoding="utf-8", errors="replace", env=env,
-        stdin=subprocess.DEVNULL)
+    try:
+        proc = run_capped(
+            cmd, timeout, cwd=str(workspace), text=True,
+            encoding="utf-8", errors="replace", env=env,
+            stdin=subprocess.DEVNULL)
+    finally:
+        ini.unlink(missing_ok=True)
     if proc.timed_out:
         return _record(0.0, "checker", f"checker timed out after {timeout}s")
     out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    passed = _first_int(PYTEST_PASSED_RE, out)
-    failed = _first_int(PYTEST_FAILED_RE, out) + _first_int(PYTEST_ERROR_RE, out)
+    passed, failed = _tally(out)
     total = passed + failed
     if passed == 0 and PYTEST_COLLECT_RE.search(out):
         why = SUBMISSION_BROKE_RE.search(out)
@@ -179,6 +203,19 @@ def _to_float(s: str) -> float:
 def _first_int(pattern: re.Pattern, text: str) -> int:
     m = pattern.search(text)
     return int(m.group(1)) if m else 0
+
+
+def _tally(out: str) -> tuple[int, int]:
+    """Counts from pytest's FINAL summary line only. Short-summary lines
+    ("FAILED t - AssertionError: 100 passed") and warnings print before it and
+    carry model-controlled text, so the first match in the output is not the
+    tally."""
+    for line in reversed(out.splitlines()):
+        if PYTEST_SUMMARY_LINE_RE.match(line.strip()):
+            return (_first_int(PYTEST_PASSED_RE, line),
+                    _first_int(PYTEST_FAILED_RE, line)
+                    + _first_int(PYTEST_ERROR_RE, line))
+    return 0, 0
 
 
 def _tail(text: str, lines: int = 30) -> str:

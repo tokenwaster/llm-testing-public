@@ -1,5 +1,3 @@
-"""web-002 v2 checker: bots must EXPLORE (discover the exit, backtrack,
-remember dead ends) — omniscient shortest-path walkers fail here."""
 import os
 from collections import deque
 from pathlib import Path
@@ -37,7 +35,6 @@ def page():
 
 @pytest.fixture(scope="module")
 def world(page):
-    """Reset, run to completion, harvest the full state once."""
     page.evaluate("() => window.game.reset()")
     page.evaluate("() => window.game.tick(20000)")
     return page.evaluate("""() => {
@@ -58,7 +55,6 @@ def world(page):
 
 
 def _shortest(world) -> int:
-    """BFS shortest path length (cells entered) from spawn to exit."""
     rows, cols = world["size"]["rows"], world["size"]["cols"]
     w = world["walls"]
     start = (world["spawn"]["r"], world["spawn"]["c"])
@@ -123,7 +119,6 @@ def test_all_bots_finish_and_timer_freezes(page, world):
 
 
 def test_movement_continuity(world):
-    """Every step is to an adjacent cell through an open wall."""
     rows, cols = world["size"]["rows"], world["size"]["cols"]
     w = world["walls"]
     for i, b in enumerate(world["bots"]):
@@ -141,8 +136,6 @@ def test_movement_continuity(world):
 
 
 def test_bots_explore_not_omniscient(world):
-    """An omniscient BFS walker walks exactly the shortest path. Explorers
-    can't: average traveled path must exceed it, and most bots backtrack."""
     shortest = _shortest(world)
     lengths = [len(b["path"]) for b in world["bots"]]
     avg = sum(lengths) / len(lengths)
@@ -152,17 +145,13 @@ def test_bots_explore_not_omniscient(world):
     backtrackers = 0
     for b in world["bots"]:
         cells = [(p["r"], p["c"]) for p in b["path"]]
-        if len(set(cells)) < len(cells):     # revisited a cell = backtracked
+        if len(set(cells)) < len(cells):
             backtrackers += 1
     assert backtrackers >= 12, \
         f"only {backtrackers}/24 bots ever backtracked — not exploration"
 
 
 def test_dead_end_memory(world):
-    """Tremaux bound: no PASSAGE (edge between two cells) traversed more
-    than twice by the same bot — the signature of remembered dead ends.
-    A forgetful walker re-walks passages 3+ times. True dead-end cells
-    (single opening) additionally allow at most 2 entries."""
     rows_walls = world["walls"]
     marked_any = 0
     for i, b in enumerate(world["bots"]):
@@ -187,7 +176,7 @@ def test_dead_end_memory(world):
             r, c = cell
             openings = sum(1 for s in ("n", "e", "s", "w")
                            if not rows_walls[r][c].get(s))
-            if openings == 1:      # a true cul-de-sac
+            if openings == 1:
                 assert cells.get(cell, 0) <= 2, \
                     (f"bot {i} entered cul-de-sac {cell} "
                      f"{cells[cell]} times — memory isn't working")
@@ -229,17 +218,11 @@ def test_maze_visibly_drawn(page):
 
 
 def test_runs_on_its_own(page):
-    """The app must ANIMATE BY ITSELF — bots move and the timer advances over
-    real time with NO external game.tick() call. A model can build a correct
-    tick()/reset() API and still ship a dead maze (no autoplay loop): the
-    checker's own tick() drives it to a pass while a human sees nothing move.
-    Reuses the module page fixture (a nested sync_playwright would error);
-    runs last, and reload()+reset() give it a clean, undriven starting state."""
     page.reload()
     page.wait_for_timeout(300)
     before = page.evaluate("() => { window.game.reset(); "
                            "return window.game.elapsed; }")
-    page.wait_for_timeout(1600)   # real time only — do NOT call tick()
+    page.wait_for_timeout(1600)
     after = page.evaluate("""() => ({
         elapsed: window.game.elapsed,
         moved: window.game.bots.filter(b => b.path.length > 1).length,

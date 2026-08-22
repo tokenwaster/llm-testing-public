@@ -1,9 +1,3 @@
-"""Constraint checks for if-001: the model's raw reply is response.txt.
-
-Each rule from the prompt is one test, so the score is the fraction of the
-format contract the model actually honored. A do-nothing / prose reply fails
-every check.
-"""
 import pathlib
 import re
 

@@ -1,9 +1,3 @@
-"""rs-013 grader: five independent checkpoints over the traced final state, so a
-model that slips on one op earns partial credit rather than zero. The reference
-values are computed by simulating the program in prompt.md under its stated rules
-(top->bottom final stack 10,162,6). Only the last occurrence of each label is
-read, so scratch work that mentions a label mid-reasoning does not fool it.
-"""
 import pathlib
 import re
 

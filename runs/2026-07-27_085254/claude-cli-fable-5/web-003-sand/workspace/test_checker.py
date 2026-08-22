@@ -92,7 +92,6 @@ def test_sand_lands_on_bottom(page):
 
 
 def test_walls_are_static_and_support_sand(page):
-    # a 5-wide wall platform: sand dropped on the center cannot slide off
     got = page.evaluate("""() => {
         window.sim.clear();
         const x = Math.floor(window.sim.w / 2), wy = window.sim.h - 10;
@@ -160,17 +159,12 @@ def test_canvas_visibly_drawn(page):
     assert colors >= 3 or colors == -1, \
         f"canvas shows {colors} distinct colors — materials must be visible"
     if colors == -1:
-        # DOM-grid implementation: require a healthy number of cell elements
         n = page.evaluate("() => document.querySelector('#sand').querySelectorAll('*').length")
         assert n >= 100, f"#sand is not a canvas and has only {n} elements"
 
 
-# ---- v0.5 upgrade: no anti-gravity liquid transport ------------------------
 
 def test_no_liquid_elevator(page):
-    """Pouring sand into a pool must not teleport the pool's liquid up the
-    falling column. Displaced water may slosh a little; it must NOT climb
-    dozens of cells against gravity (naive swap rules do exactly that)."""
     rise = page.evaluate("""() => {
         const W = sim.w, H = sim.h;
         sim.clear();

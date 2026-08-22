@@ -41,9 +41,6 @@ def _get(page, cell):
 
 
 def test_no_dead_buttons(page):
-    # FIRST test on purpose: buttons are judged against fresh state, before
-    # other tests have already exercised them (an idempotent second click
-    # is not evidence of deadness)
     dead = page.evaluate("""() => {
         const sig = () => document.body.innerHTML.length + '|' +
             JSON.stringify(Object.entries(localStorage)) + '|' +
@@ -108,7 +105,7 @@ def test_transitive_recalc(page):
     _set(page, "D2", "=D1*10")
     _set(page, "D3", "=D2+D1")
     assert float(_get(page, "D3")) == 22
-    _set(page, "D1", "3")                     # ripple through D2 to D3
+    _set(page, "D1", "3")
     assert float(_get(page, "D2")) == 30
     assert float(_get(page, "D3")) == 33
 
@@ -118,16 +115,16 @@ def test_cycle_detection(page):
     _set(page, "E2", "=E1")
     assert _get(page, "E1") == "#CYCLE"
     assert _get(page, "E2") == "#CYCLE"
-    _set(page, "E2", "7")                     # break the cycle -> recovers
+    _set(page, "E2", "7")
     assert float(_get(page, "E1")) == 7
 
 
 def test_errors_and_empty(page):
     _set(page, "F1", "=A1+")
     assert _get(page, "F1") == "#ERR"
-    _set(page, "F2", "=Z99")                  # not a valid cell
+    _set(page, "F2", "=Z99")
     assert _get(page, "F2") == "#ERR"
-    _set(page, "F3", "=G9+1")                 # empty cell counts as 0
+    _set(page, "F3", "=G9+1")
     assert float(_get(page, "F3")) == 1
 
 
@@ -138,7 +135,6 @@ def test_dom_editing(page):
     inp.press("Enter")
     page.wait_for_timeout(150)
     assert float(_get(page, "H1")) == 42
-    # dependent updates from DOM-driven edit too
     _set(page, "H2", "=H1/2")
     inp.click()
     inp.fill("=2*10")
@@ -164,7 +160,6 @@ def test_csv_export(page):
 
 
 def _dom_edit(page, cell, text):
-    """Type into a real cell input and commit with Enter (as a human would)."""
     inp = page.locator("#" + cell)
     inp.click()
     inp.fill(text)
@@ -173,24 +168,18 @@ def _dom_edit(page, cell, text):
 
 
 def _shown(page, cell):
-    """The cell's DISPLAYED value (what a human sees when not editing it)."""
     return page.locator("#" + cell).input_value()
 
 
 def test_dom_recalc_and_cycle(page):
-    """Everything typed through the REAL grid, not window.sheet — a working
-    API over a visibly-broken grid (no recalc on type, no #CYCLE shown in the
-    cells) must not pass. Uses row 5, untouched by other tests."""
     _dom_edit(page, "cell-A5", "5")
     _dom_edit(page, "cell-B5", "=A5*3")
     assert _shown(page, "cell-B5") == "15", \
         f"typed formula didn't compute in the cell (showed {_shown(page,'cell-B5')!r})"
-    # transitive recalc driven purely by typing into the upstream cell
     _dom_edit(page, "cell-A5", "10")
     assert _shown(page, "cell-B5") == "30", \
         f"dependent cell didn't recalc when its input changed by typing " \
         f"(showed {_shown(page,'cell-B5')!r})"
-    # a cycle built by typing must show #CYCLE IN THE CELLS
     _dom_edit(page, "cell-C5", "=D5")
     _dom_edit(page, "cell-D5", "=C5")
     assert _shown(page, "cell-C5") == "#CYCLE" and _shown(page, "cell-D5") == "#CYCLE", \

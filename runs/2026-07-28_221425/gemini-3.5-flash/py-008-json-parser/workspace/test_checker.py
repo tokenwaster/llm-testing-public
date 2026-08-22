@@ -1,14 +1,26 @@
+import io
 import re
+import tokenize
 from pathlib import Path
-
-from solution import parse
 
 FORBIDDEN = re.compile(r"\bimport\s+json\b|\bfrom\s+json\b|import\s+simplejson|\b__import__\b|\bimportlib\b")
 
+def _code_only(src):
+    try:
+        toks = tokenize.generate_tokens(io.StringIO(src).readline)
+        skip = (tokenize.COMMENT, tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", -1))
+        return " ".join(t.string for t in toks if t.type not in skip)
+    except (tokenize.TokenError, SyntaxError):
+        return src
 
-def test_no_json_library():
-    src = (Path(__file__).parent / "solution.py").read_text(encoding="utf-8")
-    assert not FORBIDDEN.search(src), "solution must not use the json module"
+if FORBIDDEN.search(_code_only((Path(__file__).parent / "solution.py").read_text(encoding="utf-8"))):
+    raise ImportError("solution must not use the json module")
+
+from solution import parse
+
+
+def _guards_intact():
+    assert parse("[1]") == [1]
 
 
 def test_scalars():
@@ -48,6 +60,7 @@ def test_whitespace_tolerance():
 
 
 def test_malformed_returns_none():
+    _guards_intact()
     bad = ['{', '[1, 2', '"unterminated', "{'single': 1}",
            '{"a": 1,}', '[1, 2,]', '{"a" 1}', '{"a": }', 'nul',
            '007', '1 2', '[1] trailing', '{"a": undefined}',

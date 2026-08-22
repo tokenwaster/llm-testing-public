@@ -1,8 +1,3 @@
-"""if-002 (frontier): five interlocking constraints — acrostic FROND, strictly
-increasing length, exactly one palindrome, and a total-letter count divisible by
-5. Each is independent, and satisfying all at once (while the length ladder
-limits word choice) is what makes strong models slip.
-"""
 import pathlib
 
 _TXT = pathlib.Path("response.txt")

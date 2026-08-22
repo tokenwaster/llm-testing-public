@@ -1,24 +1,36 @@
+import io
 import math
 import re
+import tokenize
 from pathlib import Path
 
 import pytest
 
-from solution import evaluate
-
 FORBIDDEN = re.compile(r"\b(eval|exec)\s*\(|import\s+ast|from\s+ast\b|\b__import__\b|\bimportlib\b")
 
+def _code_only(src):
+    try:
+        toks = tokenize.generate_tokens(io.StringIO(src).readline)
+        skip = (tokenize.COMMENT, tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", -1))
+        return " ".join(t.string for t in toks if t.type not in skip)
+    except (tokenize.TokenError, SyntaxError):
+        return src
 
-def test_no_eval_or_ast():
-    src = (Path(__file__).parent / "solution.py").read_text(encoding="utf-8")
-    assert not FORBIDDEN.search(src), "solution must not use eval/exec/ast"
+if FORBIDDEN.search(_code_only((Path(__file__).parent / "solution.py").read_text(encoding="utf-8"))):
+    raise ImportError("solution must not use eval/exec/ast")
+
+from solution import evaluate
+
+
+def _guards_intact():
+    assert evaluate("1+1") == 2.0
 
 
 def test_basic_precedence():
     assert evaluate("2+3*4") == 14.0
     assert evaluate("2*3+4") == 10.0
-    assert evaluate("10-4-3") == 3.0          # left-assoc
-    assert evaluate("100/10/5") == 2.0        # left-assoc
+    assert evaluate("10-4-3") == 3.0
+    assert evaluate("100/10/5") == 2.0
 
 
 def test_parentheses():
@@ -53,6 +65,7 @@ def test_whitespace():
 
 
 def test_errors():
+    _guards_intact()
     for bad in ["2+", "(2+3", "2 3", "2*/3", "", ")2(", "1+*2"]:
         with pytest.raises(ValueError):
             evaluate(bad)
