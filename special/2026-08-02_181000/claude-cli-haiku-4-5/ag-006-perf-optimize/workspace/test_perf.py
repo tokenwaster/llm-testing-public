@@ -1,6 +1,7 @@
 import perf
 import time
 
+# Test common_elements
 a = list(range(1, 200001))
 b = list(range(100001, 300001))
 start = time.time()
@@ -10,11 +11,13 @@ print(f'common_elements: {elapsed:.3f}s, result length={len(result)}')
 assert result == sorted(result), 'Not sorted'
 assert result[0] == 100001 and result[-1] == 200000, 'Wrong range'
 
+# Test fib
 start = time.time()
 result = perf.fib(300)
 elapsed = time.time() - start
 print(f'fib(300): {elapsed:.3f}s')
 
+# Test count_pairs
 nums = list(range(100000))
 target = 100000
 start = time.time()
@@ -22,6 +25,7 @@ result = perf.count_pairs(nums, target)
 elapsed = time.time() - start
 print(f'count_pairs: {elapsed:.3f}s, result={result}')
 
+# Test dedupe_keep_order
 items = list(range(100000)) + list(range(100000))
 start = time.time()
 result = perf.dedupe_keep_order(items)

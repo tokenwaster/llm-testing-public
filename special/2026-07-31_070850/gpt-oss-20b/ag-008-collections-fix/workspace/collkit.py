@@ -31,6 +31,7 @@ def take_while(items, pred):
         out.append(x)
     return out
 
+# Preserve order while removing duplicates
 
 def unique(items):
     seen = set()
@@ -46,10 +47,12 @@ def partition(items, pred):
     yes, no = [], []
     for x in items:
         (yes if pred(x) else no).append(x)
+    # Return matches first as expected by tests
     return yes, no
 
 
 def windows(items, k):
     if k <= 0:
         raise ValueError("k must be positive")
+    # Include the final window when len - k + 1 > 0
     return [items[i:i + k] for i in range(0, len(items) - k + 1)]

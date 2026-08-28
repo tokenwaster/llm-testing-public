@@ -591,9 +591,10 @@ def test_every_task_page_states_its_measured_difficulty():
 
 def test_the_task_badge_carries_the_evidence_for_its_own_label():
     from harness import report as rp
-    b = rp.lens_badge("ctx-012-aggregate-reversals-32k")
+    d0 = rp.discrimination_stats(rp.load_all_runs(), rp._task_defs())
+    b = rp.lens_badge("ctx-012-aggregate-reversals-32k", d0)
     assert b["key"] == "hard"
-    for frag in ("spread", "top-8 mean", "Classified"):
+    for frag in ("spread", f"top-{d0['cohort_k']} mean", "Classified"):
         assert frag in b["why"], (
             f"a badge that just says 'hard' is an assertion; it has to show "
             f"the numbers that put it there. missing {frag}")

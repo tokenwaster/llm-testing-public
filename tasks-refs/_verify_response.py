@@ -30,7 +30,7 @@ def verify(tid: str, tasks: dict) -> bool:
 
 
 if __name__ == "__main__":
-    tasks = {t.id: t for t in load_tasks()}
+    tasks = {t.id: t for t in load_tasks(include_staging=True)}
     ids = sys.argv[1:] or sorted(
         d.name for d in REF.iterdir() if (d / "good.txt").is_file())
     allok = all(verify(t, tasks) for t in ids)

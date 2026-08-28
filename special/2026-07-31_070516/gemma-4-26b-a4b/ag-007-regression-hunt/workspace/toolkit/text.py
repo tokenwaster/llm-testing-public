@@ -1,4 +1,6 @@
 def title_case(s: str) -> str:
+    # The test expects "It's A Dog's Life" for "it's a dog's life".
+    # This means each word should have its and only its first letter capitalized and the rest of the word lowercased.
     words = s.split()
     res = []
     for word in words:

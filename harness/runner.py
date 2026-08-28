@@ -155,14 +155,23 @@ BUDGET_CEILING_FRAC = 0.9
 
 
 def budget_matrix() -> dict[str, list[str]]:
+    from .util import read_json
     out: dict[str, set] = {}
     if not config.RUNS_DIR.is_dir():
         return {}
     caps = _model_caps()
+    run_caps: dict = {}
     for mfile in config.RUNS_DIR.glob("*/*/*/metrics.json"):
-        vis = _visible_answer(mfile, caps.get(mfile.parents[1].name))
+        model = mfile.parents[1].name
+        run_dir = mfile.parents[2]
+        if run_dir not in run_caps:
+            run_caps[run_dir] = read_json(run_dir / "run.json",
+                                          {}).get("model_sampling") or {}
+        cap = ((run_caps[run_dir].get(model) or {}).get("max_tokens")
+               or caps.get(model))
+        vis = _visible_answer(mfile, cap)
         if vis is not None and vis <= BUDGET_MUTE_TOKENS:
-            out.setdefault(mfile.parents[1].name, set()).add(mfile.parent.name)
+            out.setdefault(model, set()).add(mfile.parent.name)
     return {m: sorted(t) for m, t in sorted(out.items())}
 
 
@@ -374,6 +383,7 @@ class TaskRunner:
             "stop_reason": res.stop_reason,
             "over_cap_tokens": res.over_cap_tokens,
             "cost_usd": res.cost_usd, "served_by": res.served_by,
+            "tool_attempts": res.tool_attempts,
         })
         self._log(task_dir, "response", {
             "attempt": n, "text": res.text, "stop_reason": res.stop_reason,
@@ -457,7 +467,7 @@ class TaskRunner:
         status = "ok"
         response_text = ""
 
-        if task.tier >= 2 and self.model.provider == "claude-cli":
+        if task.tier >= 2 and self.model.is_cli:
             turns, response_text, status = self._run_agentic_cli(task, task_dir,
                                                                  workspace, attempts)
         elif task.tier >= 2 and self.model.supports_tools:
@@ -568,7 +578,8 @@ class TaskRunner:
         from .adapters import AdapterError
         self._log(task_dir, "request", {
             "attempt": 1, "n_messages": 1, "roles": ["user"],
-            "agent_harness": "claude-code-cli",
+            "agent_harness": getattr(self.adapter, "agent_harness",
+                                     "claude-code-cli"),
             "messages": [{"role": "user", "content": task.prompt}]})
         rec: dict = {"n": 1, "t_start": now_iso()}
         try:
@@ -759,9 +770,10 @@ def _stamp_load_plan(meta_path, plan: list[tuple]) -> None:
 
 
 def run_model(run_dir: Path, model: Model, tasks: list[Task], progress=print,
-              manage_memory: bool = True, cancel=None, spend=None) -> None:
+              manage_memory: bool = True, cancel=None, spend=None,
+              predicted=None) -> None:
     run_model_cycles([run_dir], model, tasks, progress, manage_memory, cancel,
-                     spend=spend)
+                     spend=spend, predicted=predicted)
 
 
 _MANIFEST_LOCK = threading.Lock()
@@ -787,9 +799,10 @@ def _stop_all(run_dirs, model_name: str, reason: str,
 
 def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
                      progress=print, manage_memory: bool = True,
-                     cancel=None, spend=None) -> None:
+                     cancel=None, spend=None, predicted=None) -> None:
     from . import budget
     from .util import read_json
+    per_task_predicted = (predicted or {}).get(model.name, {})
     adapter = make_adapter(model)
     runners = [TaskRunner(rd, model, adapter, cancel=cancel) for rd in run_dirs]
     n_cycles = len(runners)
@@ -823,7 +836,7 @@ def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
 
         def _skipped(t: Task) -> bool:
             return (t.tier >= 2 and not model.supports_tools
-                    and model.provider != "claude-cli")
+                    and not model.is_cli)
 
         def _spread(meta: dict) -> None:
             for rd in run_dirs[1:]:
@@ -908,8 +921,11 @@ def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
                         return
                     except RateLimited as rl:
                         task_dir = run_dir / model.name / task.id
-                        if task_dir.exists():
-                            shutil.rmtree(task_dir, ignore_errors=True)
+                        workspace = task_dir / "workspace"
+                        if workspace.exists():
+                            shutil.rmtree(workspace, ignore_errors=True)
+                        for stale in ("score.json", "metrics.json"):
+                            (task_dir / stale).unlink(missing_ok=True)
                         _record_dropped(run_dir, model.name, task.id, "rate_limit")
                         rl_streak += 1
                         progress(f"[{model.name}] {task.id}: provider rate-limited "
@@ -981,10 +997,23 @@ def run_model_cycles(run_dirs: list[Path], model: Model, tasks: list[Task],
                     score_str = ("pending review" if s.get("status") == "pending"
                                  else "unscored" if not s
                                  else f"score {s.get('score', 0):.2f}")
+                    pred = per_task_predicted.get(task.id)
+                    if (pred and pred.get("cost") is not None
+                            and pred["basis"] in ("known", "projected")):
+                        tag = "" if pred["basis"] == "known" else " (projected)"
+                        pred_str = f", predicted ${pred['cost']:,.4f}{tag}"
+                    elif pred and pred.get("basis") == "blind":
+                        pred_str = ", predicted n/a (no comparable data)"
+                    else:
+                        pred_str = ""
+                    actual = m.get("cost_usd")
+                    actual_str = (f", actual ${actual:,.4f}"
+                                  if actual is not None
+                                  and not model.local and not model.is_cli else "")
                     progress(f"[{model.name}] {task.id}: {m['status']}, {score_str}, "
                              f"{m['wall_ms'] / 1000:.1f}s, "
                              f"tok {m['tokens_in'] or '?'}/{m['tokens_out'] or '?'}, "
-                             f"retries {m['n_retries']}")
+                             f"retries {m['n_retries']}{pred_str}{actual_str}")
         progress(f"[{model.name}] done")
     finally:
         if sampler:
@@ -1094,13 +1123,19 @@ def run_suite(models: list[Model], tasks: list[Task], run_dir: Path | None = Non
             f"${pre['estimate']['billable']:,.2f}"
             + (f" (ceiling ${pre['cap']:,.2f})" if pre["cap"] else
                " (no ceiling set; put max_spend_usd in settings.local.json)"))
-    for _n, _b in (pre["balances"] or {}).items():
-        if _b and _b.get("remaining") is not None:
+    _seen_bal = set()
+    for _b in (pre["balances"] or {}).values():
+        if not _b or _b.get("remaining") is None:
+            continue
+        _k = _b.get("pool") or _b.get("provider")
+        if _k not in _seen_bal:
+            _seen_bal.add(_k)
             log(f"{_b['provider']}: ${_b['remaining']:,.2f} available")
     try:
+        predicted = {r["model"]: r["per_task"] for r in pre["estimate"]["rows"]}
         with keep_awake():
             _run_all(models, tasks, run_dirs, log, parallel, cancel,
-                     spend=_spend)
+                     spend=_spend, predicted=predicted)
     except budget.SpendExceeded as e:
         log(f"!! {e}")
         for rd in run_dirs:
@@ -1215,16 +1250,27 @@ def cycle_plan_summary(models: list[Model], tasks: list[Task],
 
 
 def _run_all(models, tasks, run_dirs, progress, parallel, cancel,
-             spend=None) -> None:
+             spend=None, predicted=None) -> None:
     run_dir = run_dirs[0]
     if parallel and len(models) > 1:
-        threads = [threading.Thread(target=run_model,
-                                    args=(run_dir, m, tasks, progress, False, cancel),
-                                    daemon=True) for m in models]
+        from . import budget as _budget
+        tripped: list = []
+
+        def _guarded(m):
+            try:
+                run_model(run_dir, m, tasks, progress, False, cancel,
+                          spend=spend, predicted=predicted)
+            except _budget.SpendExceeded as e:
+                tripped.append(e)
+
+        threads = [threading.Thread(target=_guarded, args=(m,), daemon=True)
+                   for m in models]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
+        if tripped:
+            raise tripped[0]
     else:
         for model in models:
             if cancel is not None and cancel.is_set():
@@ -1232,10 +1278,10 @@ def _run_all(models, tasks, run_dirs, progress, parallel, cancel,
             mine = cycles_for(model, run_dirs)
             if len(mine) > 1:
                 run_model_cycles(mine, model, tasks, progress, cancel=cancel,
-                                 spend=spend)
+                                 spend=spend, predicted=predicted)
             else:
                 for rd in run_dirs:
                     if cancel is not None and cancel.is_set():
                         break
                     run_model(rd, model, tasks, progress, cancel=cancel,
-                              spend=spend)
+                              spend=spend, predicted=predicted)

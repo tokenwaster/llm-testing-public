@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Billiards</title>
+<style>
+  html,body{margin:0;height:100%;background:#222;display:flex;align-items:center;justify-content:center;font-family:sans-serif}
+  #wrap{position:relative}
+  canvas{background:#0a5c36;border:8px solid #5a3e1b;border-radius:6px;display:block}
+  #ui{position:absolute;top:8px;left:8px;color:#fff;background:rgba(0,0,0,.5);padding:8px 12px;border-radius:6px;font-size:14px;line-height:1.4}
+  #ui button{margin-top:6px;padding:4px 10px}
+</style>
+</head>
+<body>
+<div id="wrap">
+<canvas id="c" width="900" height="450"></canvas>
+<div id="ui">
+<b>How to play</b><br>
+Click on the white cue ball, drag back and release to shoot.<br>
+Longer drag = harder shot.<br>
+<button id="reset">Reset / Rack</button>
+</div>
+</div>
+<script>
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+const W=900, H=450, R=14;
+const POCKET_RADIUS=R*2.2;
+const FRICTION=120;
+const CUSHION_RESTITUTION=0.75;
+const BALL_RESTITUTION=0.95;
+
+const pockets=[
+ {x:R,y:R},{x:W-R,y:R},{x:R,y:H-R},{x:W-R,y:H-R},
+ {x:W/2,y:R},{x:W/2,y:H-R}
+];
+
+let balls=[];
+let paused=false;
+let aiming=false;
+let mousePos={x:0,y:0};
+
+function resetBalls(input){
+  balls=input.map(b=>({
+    x:b.x, y:b.y,
+    vx:b.vx||0, vy:b.vy||0,
+    cue:!!b.cue,
+    potted:false
+  }));
+}
+
+function stepPhysics(dt){
+  for(const b of balls){
+    if(b.potted) continue;
+    b.x+=b.vx*dt;
+    b.y+=b.vy*dt;
+    if(b.vx!==0){
+      const dec=FRICTION*dt;
+      if(Math.abs(b.vx)<=dec) b.vx=0; else b.vx-=Math.sign(b.vx)*dec;
+    }
+    if(b.vy!==0){
+      const dec=FRICTION*dt;
+      if(Math.abs(b.vy)<=dec) b.vy=0; else b.vy-=Math.sign(b.vy)*dec;
+    }
+  }
+  for(const b of balls){
+    if(b.potted) continue;
+    for(const p of pockets){
+      const dx=b.x-p.x, dy=b.y-p.y;
+      if(dx*dx+dy*dy < POCKET_RADIUS*POCKET_RADIUS){
+        b.potted=true; b.vx=0; b.vy=0; break;
+      }
+    }
+  }
+  for(const b of balls){
+    if(b.potted) continue;
+    if(b.x<R){b.x=R; b.vx=-b.vx*CUSHION_RESTITUTION;}
+    else if(b.x>W-R){b.x=W-R; b.vx=-b.vx*CUSHION_RESTITUTION;}
+    if(b.y<R){b.y=R; b.vy=-b.vy*CUSHION_RESTITUTION;}
+    else if(b.y>H-R){b.y=H-R; b.vy=-b.vy*CUSHION_RESTITUTION;}
+  }
+  for(let i=0;i<balls.length;i++){
+    const a=balls[i]; if(a.potted) continue;
+    for(let j=i+1;j<balls.length;j++){
+      const b=balls[j]; if(b.potted) continue;
+      const dx=b.x-a.x, dy=b.y-a.y;
+      const dist2=dx*dx+dy*dy;
+      const minDist=2*R;
+      if(dist2<minDist*minDist && dist2>1e-6){
+        const dist=Math.sqrt(dist2);
+        const nx=dx/dist, ny=dy/dist;
+        const overlap=minDist-dist;
+        const push=overlap*0.5;
+        a.x-=nx*push; a.y-=ny*push;
+        b.x+=nx*push; b.y+=ny*push;
+        const rvx=b.vx-a.vx, rvy=b.vy-a.vy;
+        const velAlong=rvx*nx+rvy*ny;
+        if(velAlong>0) continue;
+        const e=BALL_RESTITUTION;
+        const impulse=-(1+e)*velAlong/2;
+        a.vx-=impulse*nx; a.vy-=impulse*ny;
+        b.vx+=impulse*nx; b.vy+=impulse*ny;
+      }
+    }
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#0a5c36'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#5a3e1b';
+  ctx.fillRect(0,0,W,20); ctx.fillRect(0,H-20,W,20);
+  ctx.fillRect(0,0,20,H); ctx.fillRect(W-20,0,20,H);
+  ctx.fillStyle='black';
+  for(const p of pockets){ ctx.beginPath(); ctx.arc(p.x,p.y,POCKET_RADIUS,0,Math.PI*2); ctx.fill(); }
+  for(let i=0;i<balls.length;i++){
+    const b=balls[i]; if(b.potted) continue;
+    ctx.beginPath(); ctx.arc(b.x,b.y,R,0,Math.PI*2);
+    if(b.cue) ctx.fillStyle='white';
+    else ctx.fillStyle=`hsl(${(i*37)%360},70%,55%)`;
+    ctx.fill(); ctx.strokeStyle='black'; ctx.lineWidth=1; ctx.stroke();
+  }
+  const cue=balls.find(b=>b.cue && !b.potted);
+  if(aiming && cue){
+    const dx=cue.x-mousePos.x, dy=cue.y-mousePos.y;
+    const ang=Math.atan2(dy,dx);
+    const len=Math.min(Math.sqrt(dx*dx+dy*dy)*0.15,150);
+    ctx.strokeStyle='rgba(255,255,255,0.85)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(cue.x,cue.y);
+    ctx.lineTo(cue.x+Math.cos(ang)*len, cue.y+Math.sin(ang)*len); ctx.stroke();
+  }
+}
+
+function toCanvas(e){
+  const r=canvas.getBoundingClientRect();
+  return {
+    x:(e.clientX-r.left)*(W/r.width),
+    y:(e.clientY-r.top)*(H/r.height)
+  };
+}
+
+canvas.addEventListener('mousedown',e=>{
+  const p=toCanvas(e); mousePos=p;
+  const cue=balls.find(b=>b.cue && !b.potted);
+  if(!cue) return;
+  const d=Math.hypot(p.x-cue.x,p.y-cue.y);
+  if(d<=R){ aiming=true; }
+});
+canvas.addEventListener('mousemove',e=>{ mousePos=toCanvas(e); });
+window.addEventListener('mouseup',e=>{
+  if(!aiming) return;
+  aiming=false;
+  const p=toCanvas(e);
+  const cue=balls.find(b=>b.cue && !b.potted);
+  if(!cue) return;
+  const dx=cue.x-p.x, dy=cue.y-p.y;
+  const dist=Math.hypot(dx,dy);
+  const power=Math.min(dist*2,800);
+  const ang=Math.atan2(dy,dx);
+  const vx=Math.cos(ang)*power, vy=Math.sin(ang)*power;
+  if(cue){ cue.vx=vx; cue.vy=vy; }
+});
+
+function initRack(){
+  const rack=[];
+  const cue={x:W*0.25,y:H/2,cue:true};
+  rack.push(cue);
+  const startX=W*0.65, startY=H/2, s=2*R+1;
+  for(let row=0;row<5;row++){
+    for(let col=0;col<=row;col++){
+      const x=startX + row*s*0.866;
+      const y=startY + (col - row/2)*s;
+      rack.push({x,y});
+    }
+  }
+  resetBalls(rack);
+}
+document.getElementById('reset').onclick=initRack;
+
+let last=performance.now();
+function loop(now){
+  if(!paused){
+    const dt=Math.min((now-last)/1000,0.033);
+    last=now;
+    stepPhysics(dt);
+  }else last=now;
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+initRack();
+
+window.sim={
+  W, H, R,
+  reset(balls){ resetBalls(balls); draw(); },
+  step(dt){ stepPhysics(dt); draw(); },
+  state(){ return balls.map(b=>({x:b.x,y:b.y,vx:b.vx,vy:b.vy,potted:b.potted,cue:b.cue})); },
+  shoot(vx,vy){ const c=balls.find(b=>b.cue && !b.potted); if(c){c.vx=vx;c.vy=vy;} draw(); },
+  pause(){ paused=true; },
+  resume(){ paused=false; }
+};
+</script>
+</body>
+</html>

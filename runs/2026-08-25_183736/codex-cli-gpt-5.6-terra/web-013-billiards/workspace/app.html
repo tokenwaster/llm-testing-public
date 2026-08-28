@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Canvas Billiards</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: radial-gradient(circle at top, #26313a, #101418 70%);
+    font-family: Arial, sans-serif; color: #eef5ed;
+  }
+  .game {
+    width: min(960px, 96vw); padding: 16px; border-radius: 16px;
+    background: #1a2022; box-shadow: 0 18px 50px #0009;
+  }
+  .bar { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .08em; }
+  button {
+    border: 0; border-radius: 7px; padding: 9px 14px; cursor: pointer;
+    color: white; background: #a82d28; font-weight: bold;
+  }
+  button:hover { background: #c53a33; }
+  canvas { width: 100%; height: auto; display: block; border-radius: 10px; cursor: crosshair; }
+  p { margin: 12px 2px 0; color: #d2ddd0; font-size: 14px; }
+  kbd { background: #344039; padding: 2px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="game">
+  <div class="bar">
+    <h1>CANVAS BILLIARDS</h1>
+    <button id="rack">Reset / Rack</button>
+  </div>
+  <canvas id="table" width="900" height="500" aria-label="Playable billiards table"></canvas>
+  <p>To shoot: press the <kbd>white cue ball</kbd>, drag back to choose direction and power, then release.</p>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("table");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height, R = 12;
+  const pocketRadius = 25, friction = 0.82, stopSpeed = 2;
+  const pockets = [
+    {x:0,y:0}, {x:W/2,y:0}, {x:W,y:0},
+    {x:0,y:H}, {x:W/2,y:H}, {x:W,y:H}
+  ];
+  let balls = [], aiming = false, pointer = null, paused = false, raf = 0, last = 0;
+
+  function rack() {
+    const r = [];
+    r.push({x: W * .24, y: H / 2, vx: 0, vy: 0, cue: true, potted: false, color: "#fafafa"});
+    const sx = W * .70, sy = H / 2;
+    const colors = ["#f0d01f","#2465ba","#bd2726","#743694","#e57d22","#21864b","#741e22",
+                    "#171717","#f0d01f","#2465ba","#bd2726","#743694","#e57d22","#21864b","#741e22"];
+    let n = 0;
+    for (let row = 0; row < 5; row++) {
+      for (let k = 0; k <= row; k++) {
+        r.push({
+          x: sx + row * (R * 1.76),
+          y: sy + (k - row / 2) * (R * 2.06),
+          vx: 0, vy: 0, cue: false, potted: false, color: colors[n++]
+        });
+      }
+    }
+    reset(r);
+  }
+
+  function reset(list) {
+    balls = list.map((b, i) => ({
+      x: Number(b.x), y: Number(b.y),
+      vx: Number(b.vx) || 0, vy: Number(b.vy) || 0,
+      cue: !!b.cue, potted: !!b.potted,
+      color: b.cue ? "#fafafa" : (b.color || ["#d52d2d","#e0b726","#2773ba","#71358e","#e57721","#27844e"][i % 6])
+    }));
+    draw();
+  }
+
+  function isPocketed(b) {
+    for (const p of pockets) {
+      const dx = b.x - p.x, dy = b.y - p.y;
+      if (dx * dx + dy * dy <= pocketRadius * pocketRadius) return true;
+    }
+    return false;
+  }
+
+  function advance(dt) {
+    const pieces = Math.max(1, Math.ceil(dt / (1 / 240)));
+    const h = dt / pieces;
+    for (let tick = 0; tick < pieces; tick++) {
+      for (const b of balls) {
+        if (b.potted) continue;
+        b.x += b.vx * h;
+        b.y += b.vy * h;
+
+        if (isPocketed(b)) {
+          b.potted = true; b.vx = 0; b.vy = 0;
+          continue;
+        }
+
+        if (b.x < R) { b.x = R; if (b.vx < 0) b.vx = -b.vx; }
+        if (b.x > W - R) { b.x = W - R; if (b.vx > 0) b.vx = -b.vx; }
+        if (b.y < R) { b.y = R; if (b.vy < 0) b.vy = -b.vy; }
+        if (b.y > H - R) { b.y = H - R; if (b.vy > 0) b.vy = -b.vy; }
+      }
+
+      for (let pass = 0; pass < 2; pass++) {
+        for (let i = 0; i < balls.length; i++) for (let j = i + 1; j < balls.length; j++) {
+          const a = balls[i], b = balls[j];
+          if (a.potted || b.potted) continue;
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+          if (d >= R * 2) continue;
+          if (d < 0.00001) { dx = 1; dy = 0; d = 1; }
+          const nx = dx / d, ny = dy / d;
+          const overlap = R * 2 - d;
+          a.x -= nx * overlap * .5; a.y -= ny * overlap * .5;
+          b.x += nx * overlap * .5; b.y += ny * overlap * .5;
+
+          const relative = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+          if (relative < 0) {
+            const impulse = -relative; // equal masses, perfectly elastic
+            a.vx -= impulse * nx; a.vy -= impulse * ny;
+            b.vx += impulse * nx; b.vy += impulse * ny;
+          }
+        }
+      }
+
+      const damping = Math.exp(-friction * h);
+      for (const b of balls) {
+        if (b.potted) continue;
+        b.vx *= damping; b.vy *= damping;
+        if (Math.hypot(b.vx, b.vy) < stopSpeed) { b.vx = 0; b.vy = 0; }
+      }
+    }
+  }
+
+  function step(dt) {
+    advance(Math.max(0, Number(dt) || 0));
+    draw();
+  }
+
+  function state() {
+    return balls.map(b => ({x:b.x, y:b.y, vx:b.vx, vy:b.vy, potted:b.potted, cue:b.cue}));
+  }
+
+  function shoot(vx, vy) {
+    const cue = balls.find(b => b.cue && !b.potted);
+    if (!cue) return;
+    cue.vx = Number(vx) || 0;
+    cue.vy = Number(vy) || 0;
+    draw();
+  }
+
+  function drawBall(b) {
+    const g = ctx.createRadialGradient(b.x - R*.35, b.y - R*.4, R*.15, b.x, b.y, R);
+    g.addColorStop(0, "#fff8");
+    g.addColorStop(.18, b.color);
+    g.addColorStop(1, "#0008");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(b.x, b.y, R, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#0008"; ctx.lineWidth = 1; ctx.stroke();
+    if (!b.cue && b.color !== "#171717") {
+      ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(b.x, b.y, R*.38, 0, Math.PI*2); ctx.fill();
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#6b3b1f"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#173f29"; ctx.fillRect(18, 18, W - 36, H - 36);
+    ctx.strokeStyle = "#326744"; ctx.lineWidth = 2; ctx.strokeRect(18, 18, W - 36, H - 36);
+    for (const p of pockets) {
+      ctx.fillStyle = "#080909";
+      ctx.beginPath(); ctx.arc(p.x, p.y, pocketRadius, 0, Math.PI * 2); ctx.fill();
+    }
+
+    const cue = balls.find(b => b.cue && !b.potted);
+    if (aiming && pointer && cue) {
+      const dx = cue.x - pointer.x, dy = cue.y - pointer.y;
+      ctx.setLineDash([8, 7]); ctx.lineWidth = 2; ctx.strokeStyle = "#f5f0c9cc";
+      ctx.beginPath(); ctx.moveTo(cue.x, cue.y); ctx.lineTo(cue.x + dx * 2.2, cue.y + dy * 2.2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle = "#ffffff88"; ctx.beginPath(); ctx.moveTo(cue.x, cue.y); ctx.lineTo(pointer.x, pointer.y); ctx.stroke();
+    }
+    for (const b of balls) if (!b.potted) drawBall(b);
+  }
+
+  function point(e) {
+    const r = canvas.getBoundingClientRect();
+    return {x:(e.clientX-r.left)*W/r.width, y:(e.clientY-r.top)*H/r.height};
+  }
+  canvas.addEventListener("pointerdown", e => {
+    const p = point(e), cue = balls.find(b => b.cue && !b.potted);
+    if (cue && Math.hypot(p.x-cue.x, p.y-cue.y) <= R * 2) {
+      aiming = true; pointer = p; canvas.setPointerCapture(e.pointerId); draw();
+    }
+  });
+  canvas.addEventListener("pointermove", e => { if (aiming) { pointer = point(e); draw(); } });
+  canvas.addEventListener("pointerup", e => {
+    if (!aiming) return;
+    pointer = point(e);
+    const cue = balls.find(b => b.cue && !b.potted);
+    if (cue) shoot((cue.x-pointer.x)*5, (cue.y-pointer.y)*5);
+    aiming = false; pointer = null; draw();
+  });
+  canvas.addEventListener("pointercancel", () => { aiming = false; pointer = null; draw(); });
+  document.getElementById("rack").addEventListener("click", rack);
+
+  function frame(t) {
+    if (paused) return;
+    if (last) step(Math.min((t-last)/1000, .05));
+    last = t;
+    raf = requestAnimationFrame(frame);
+  }
+  function pause() { paused = true; cancelAnimationFrame(raf); }
+  function resume() { if (!paused) return; paused = false; last = performance.now(); raf = requestAnimationFrame(frame); }
+
+  window.sim = { W, H, R, reset, step, state, shoot, pause, resume };
+  rack();
+  raf = requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -56,12 +56,14 @@ def validate_models(models=None) -> list[str]:
                 out.append(f"{w}: sampling_profiles set but {why} — never sent.")
         if m.effort is not None:
             if not m.effort_settable:
-                out.append(f"{w}: effort={m.effort!r} but only the claude-cli "
-                           f"transport takes --effort; provider {m.provider} "
-                           f"would never receive it. Remove the key.")
-            elif str(m.effort) not in m.EFFORT_LEVELS:
+                out.append(f"{w}: effort={m.effort!r} but only the subscription "
+                           f"CLI transports (claude-cli, codex-cli) take an "
+                           f"effort level; provider {m.provider} would never "
+                           f"receive it. Remove the key.")
+            elif str(m.effort) not in m.effort_levels:
                 out.append(f"{w}: effort={m.effort!r} is not a level the CLI "
-                           f"accepts. Valid: {', '.join(m.EFFORT_LEVELS)}")
+                           f"accepts ({m.provider}). Valid: "
+                           f"{', '.join(m.effort_levels)}")
         if m.thinking_off_in_yaml:
             out.append(f"{w}: thinking_off is a probe-only parameter and must "
                        f"not appear in a model yaml — a scored run has to use "

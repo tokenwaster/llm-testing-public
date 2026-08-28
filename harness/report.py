@@ -191,8 +191,19 @@ def load_all_runs(runs_dir: Path | None = None) -> list[dict]:
         return []
 
     def build():
+        from .tasks import load_tasks
+        staged = {t.id for t in load_tasks(include_staging=True) if t.staging}
         runs = [load_run(d) for d in sorted(runs_dir.iterdir()) if d.is_dir()]
-        return [r for r in runs if r and r["results"]]
+        out = []
+        for r in runs:
+            if not r:
+                continue
+            if staged:
+                r["results"] = [res for res in r["results"]
+                                if res.get("task") not in staged]
+            if r["results"]:
+                out.append(r)
+        return out
 
     return _gen_cached(("runs", str(runs_dir.resolve())), build)
 
@@ -2179,7 +2190,7 @@ def _model_of(rs: list[dict]):
 
 def _is_subscription(rs: list[dict]) -> bool:
     mo = _model_of(rs)
-    return bool(mo and mo.provider == "claude-cli")
+    return bool(mo and mo.is_cli)
 
 
 def _scaffold_total(rs: list[dict]) -> int:
@@ -5681,9 +5692,12 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
     complete = {m: v for m, v in by_model.items() if len(v) >= n_suite}
     means = {m: sum(v) / len(v) for m, v in (complete or by_model).items()}
     ranked = sorted(means, key=lambda m: -means[m])
-    k = min(TOP_COHORT, len(ranked)) if len(ranked) >= 3 else max(3, len(ranked))
+    k = (min(TOP_COHORT, len(ranked) // 2) if len(ranked) >= 6
+         else max(1, len(ranked) // 2) if len(ranked) >= 2
+         else 1)
     top, bot = set(ranked[:k]), set(ranked[-k:])
-    top_spread = (means[ranked[0]] - means[ranked[k - 1]]) if len(ranked) >= k else 0.0
+    top_spread = ((means[ranked[0]] - means[ranked[k - 1]])
+                  if len(ranked) >= k >= 1 and ranked else 0.0)
 
     rows, tvecs = [], {}
     for tid, info in td.items():
@@ -5716,6 +5730,8 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
             flag = "ceiling"
         elif gap is not None and gap > 0.3:
             flag = "floor-gate"
+        elif top_mean is not None and top_mean >= 0.95:
+            flag = "ceiling"
         else:
             flag = "mixed"
         rows.append({
@@ -7268,14 +7284,85 @@ def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
 
 _GEN_LOCK = threading.RLock()
 
+_STAMP_NAME = ".render-stamp.json"
+
+
+def _render_fingerprint(runs_dir: Path) -> str:
+    """Everything a rendered page can depend on, cheap to compute: file
+    (mtime, size) over the data trees plus the rendering code itself."""
+    import hashlib
+    import os
+    h = hashlib.sha256()
+
+    def tree(base: Path, suffixes=(".json", ".yaml")):
+        if not base.is_dir():
+            return
+        for root, _dirs, files in os.walk(base):
+            for f in files:
+                if suffixes and not f.endswith(suffixes):
+                    continue
+                fp = os.path.join(root, f)
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                h.update(f"{fp}|{st.st_mtime_ns}|{st.st_size};".encode())
+
+    tree(runs_dir)
+    tree(config.TASKS_DIR, suffixes=())
+    tree(config.MODELS_DIR)
+    tree(getattr(config, "SPECIAL_DIR", Path("_none")))
+    for f in (config.ROOT / "directives.yaml", config.ROOT / "families.yaml",
+              config.ROOT / "SUITE_VERSION",
+              getattr(config, "PRIVATE_DIR", Path("_none")) / "mirror.json"):
+        try:
+            st = f.stat()
+            h.update(f"{f}|{st.st_mtime_ns}|{st.st_size};".encode())
+        except OSError:
+            pass
+    code = Path(__file__).parent
+    for mod in ("report.py", "assess.py", "apicost.py", "fit.py", "mirror.py",
+                "budget.py", "thinking.py", "registry.py", "tasks.py"):
+        try:
+            st = (code / mod).stat()
+            h.update(f"{mod}|{st.st_mtime_ns}|{st.st_size};".encode())
+        except OSError:
+            pass
+    return h.hexdigest()
+
 
 def _one_render_at_a_time(fn):
+    """Serialise renders, and skip one entirely when nothing it reads has
+    changed since the stamp was written (default live render only — exports
+    and archive renders pass explicit dirs and always run)."""
     import functools
+    import json as _json
 
     @functools.wraps(fn)
-    def inner(*a, **k):
+    def inner(runs_dir=None, out_dir=None, dataset_label="",
+              dataset_key="live", tasks_dir=None, public_nav=False):
         with _GEN_LOCK:
-            return fn(*a, **k)
+            default_live = (runs_dir is None and out_dir is None
+                            and tasks_dir is None and dataset_key == "live"
+                            and not public_nav)
+            if default_live:
+                stamp = config.REPORTS_DIR / _STAMP_NAME
+                fp = _render_fingerprint(config.RUNS_DIR)
+                try:
+                    if (stamp.read_text(encoding="utf-8").strip() == fp
+                            and (config.REPORTS_DIR / "index.html").is_file()):
+                        return config.REPORTS_DIR
+                except OSError:
+                    pass
+            out = fn(runs_dir, out_dir, dataset_label, dataset_key,
+                     tasks_dir, public_nav)
+            if default_live:
+                try:
+                    stamp.write_text(_render_fingerprint(config.RUNS_DIR),
+                                     encoding="utf-8")
+                except OSError:
+                    pass
+            return out
     return inner
 
 

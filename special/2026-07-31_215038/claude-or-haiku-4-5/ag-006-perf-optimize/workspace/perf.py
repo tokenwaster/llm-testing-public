@@ -1,6 +1,7 @@
 def common_elements(a, b):
     """Return sorted list of values appearing in both lists."""
     b_set = set(b)
+    # Use dict to maintain order while removing duplicates
     seen = {}
     for x in a:
         if x in b_set and x not in seen:
@@ -13,6 +14,7 @@ def fib(n):
     if n < 2:
         return n
     
+    # Iterative approach for O(n) time, O(1) space
     a, b = 0, 1
     for _ in range(2, n + 1):
         a, b = b, a + b
@@ -24,11 +26,13 @@ def count_pairs(nums, target):
     count = 0
     seen = {}
     
+    # Single pass: for each number, check if its complement exists
     for num in nums:
         complement = target - num
         if complement in seen:
             count += seen[complement]
         
+        # Track occurrences of current number
         seen[num] = seen.get(num, 0) + 1
     
     return count

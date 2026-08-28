@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maze Discovery</title>
+<style>
+  html, body {
+    margin: 0;
+    min-height: 100%;
+    background: #101522;
+    color: #eef4ff;
+    font-family: system-ui, sans-serif;
+    display: flex;
+    justify-content: center;
+  }
+  main { width: min(94vw, 720px); padding: 18px; text-align: center; }
+  h1 { margin: 0 0 10px; font-size: 24px; }
+  .stats { display: flex; justify-content: center; gap: 24px; margin: 10px 0; }
+  .stat { font-weight: 700; }
+  #maze {
+    display: block;
+    width: min(92vw, 680px);
+    height: min(92vw, 680px);
+    min-width: 400px;
+    min-height: 400px;
+    margin: 12px auto;
+    background: #172033;
+    border: 2px solid #71809b;
+    box-sizing: border-box;
+  }
+  button {
+    border: 0;
+    border-radius: 6px;
+    padding: 9px 18px;
+    background: #4e8cff;
+    color: white;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .hint { color: #aebbd2; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Maze Discovery</h1>
+  <div class="stats">
+    <div class="stat">Completed: <span id="completed">0</span>/24</div>
+    <div class="stat">Ticks: <span id="timer">0</span></div>
+  </div>
+  <canvas id="maze" width="680" height="680"></canvas>
+  <button id="reset">Reset Maze</button>
+  <div class="hint">Each bot independently explores using local Tremaux-style memory.</div>
+</main>
+
+<script>
+(() => {
+  const canvas = document.getElementById("maze");
+  const ctx = canvas.getContext("2d");
+  const completedEl = document.getElementById("completed");
+  const timerEl = document.getElementById("timer");
+  const resetEl = document.getElementById("reset");
+
+  const ROWS = 21, COLS = 21, BOT_COUNT = 24;
+  const dirs = [
+    { dr: -1, dc: 0, wall: "n", opposite: "s" },
+    { dr: 0, dc: 1, wall: "e", opposite: "w" },
+    { dr: 1, dc: 0, wall: "s", opposite: "n" },
+    { dr: 0, dc: -1, wall: "w", opposite: "e" }
+  ];
+
+  let seed = 1;
+  let mazeWalls = [];
+  let spawn = { r: 0, c: 0 };
+  let exitCell = { r: 0, c: 0 };
+  let bots = [];
+  let elapsed = 0;
+  let lastFrame = performance.now();
+
+  function rngFactory(value) {
+    let x = (value >>> 0) || 1;
+    return () => {
+      x ^= x << 13;
+      x ^= x >>> 17;
+      x ^= x << 5;
+      return (x >>> 0) / 4294967296;
+    };
+  }
+
+  function key(r, c) { return r + "," + c; }
+
+  function makeMaze(random) {
+    mazeWalls = Array.from({ length: ROWS }, () =>
+      Array.from({ length: COLS }, () => ({ n: true, e: true, s: true, w: true }))
+    );
+
+    const visited = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
+    const stack = [{ r: 0, c: 0 }];
+    visited[0][0] = true;
+
+    while (stack.length) {
+      const cur = stack[stack.length - 1];
+      const choices = [];
+      for (let i = 0; i < 4; i++) {
+        const d = dirs[i], nr = cur.r + d.dr, nc = cur.c + d.dc;
+        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && !visited[nr][nc]) {
+          choices.push({ d, nr, nc });
+        }
+      }
+      if (!choices.length) {
+        stack.pop();
+        continue;
+      }
+      const choice = choices[Math.floor(random() * choices.length)];
+      mazeWalls[cur.r][cur.c][choice.d.wall] = false;
+      mazeWalls[choice.nr][choice.nc][choice.d.opposite] = false;
+      visited[choice.nr][choice.nc] = true;
+      stack.push({ r: choice.nr, c: choice.nc });
+    }
+  }
+
+  function createBot(index, random) {
+    const order = [0, 1, 2, 3];
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    const rotation = index % 4;
+    const preferred = order.map((_, i) => order[(i + rotation) % 4]);
+
+    return {
+      id: index,
+      path: [{ r: spawn.r, c: spawn.c }],
+      deadEnds: [],
+      finishTick: null,
+      current: { r: spawn.r, c: spawn.c },
+      route: [{ r: spawn.r, c: spawn.c }],
+      seen: new Set([key(spawn.r, spawn.c)]),
+      edgeUse: new Map(),
+      order: preferred,
+      visual: {
+        from: { r: spawn.r, c: spawn.c },
+        to: { r: spawn.r, c: spawn.c },
+        started: performance.now(),
+        duration: 85
+      }
+    };
+  }
+
+  function edgeKey(r1, c1, r2, c2) {
+    const a = key(r1, c1), b = key(r2, c2);
+    return a < b ? a + "|" + b : b + "|" + a;
+  }
+
+  function sense(r, c) {
+    const w = mazeWalls[r][c];
+    return { n: w.n, e: w.e, s: w.s, w: w.w };
+  }
+
+  function moveBot(bot, next) {
+    const old = bot.current;
+    const ek = edgeKey(old.r, old.c, next.r, next.c);
+    bot.edgeUse.set(ek, (bot.edgeUse.get(ek) || 0) + 1);
+
+    bot.visual.from = { r: old.r, c: old.c };
+    bot.visual.to = { r: next.r, c: next.c };
+    bot.visual.started = performance.now();
+
+    bot.current = { r: next.r, c: next.c };
+    bot.path.push({ r: next.r, c: next.c });
+
+    if (bot.route.length && key(bot.route[bot.route.length - 1].r, bot.route[bot.route.length - 1].c) === key(old.r, old.c)) {
+      bot.route.push({ r: next.r, c: next.c });
+    } else {
+      bot.route.push({ r: next.r, c: next.c });
+    }
+
+    bot.seen.add(key(next.r, next.c));
+  }
+
+  function stepBot(bot) {
+    if (bot.finishTick !== null) return;
+
+    const here = bot.current;
+
+    if (here.r === exitCell.r && here.c === exitCell.c) {
+      bot.finishTick = elapsed;
+      return;
+    }
+
+    const localWalls = sense(here.r, here.c);
+    let chosen = null;
+
+    for (const di of bot.order) {
+      const d = dirs[di];
+      if (localWalls[d.wall]) continue;
+      const nr = here.r + d.dr, nc = here.c + d.dc;
+      const ek = edgeKey(here.r, here.c, nr, nc);
+      if ((bot.edgeUse.get(ek) || 0) === 0) {
+        chosen = { r: nr, c: nc };
+        break;
+      }
+    }
+
+    if (chosen) {
+      moveBot(bot, chosen);
+      if (chosen.r === exitCell.r && chosen.c === exitCell.c) {
+        bot.finishTick = elapsed;
+      }
+      return;
+    }
+
+    if (bot.route.length > 1) {
+      const deadKey = key(here.r, here.c);
+      if (!bot.deadEnds.some(p => key(p.r, p.c) === deadKey)) {
+        bot.deadEnds.push({ r: here.r, c: here.c });
+      }
+      bot.route.pop();
+      const parent = bot.route[bot.route.length - 1];
+      moveBot(bot, parent);
+    }
+  }
+
+  function simulationTick() {
+    if (bots.every(b => b.finishTick !== null)) return;
+
+    elapsed++;
+    for (const bot of bots) stepBot(bot);
+
+    completedEl.textContent = bots.filter(b => b.finishTick !== null).length;
+    timerEl.textContent = elapsed;
+  }
+
+  function cellPosition(cell, now) {
+    const size = canvas.width / COLS;
+    let t = 1;
+    if (cell.visual.started) {
+      t = Math.min(1, (now - cell.visual.started) / cell.visual.duration);
+    }
+    return {
+      x: (cell.visual.from.c + 0.5) * size +
+         (cell.visual.to.c - cell.visual.from.c) * size * t,
+      y: (cell.visual.from.r + 0.5) * size +
+         (cell.visual.to.r - cell.visual.from.r) * size * t
+    };
+  }
+
+  function draw(now = performance.now()) {
+    const size = canvas.width / COLS;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#172033";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.strokeStyle = "#d9e4fa";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const x = c * size, y = r * size, w = mazeWalls[r][c];
+        if (w.n) { ctx.moveTo(x, y); ctx.lineTo(x + size, y); }
+        if (w.e) { ctx.moveTo(x + size, y); ctx.lineTo(x + size, y + size); }
+        if (w.s) { ctx.moveTo(x, y + size); ctx.lineTo(x + size, y + size); }
+        if (w.w) { ctx.moveTo(x, y); ctx.lineTo(x, y + size); }
+      }
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = "#ffd34d";
+    ctx.beginPath();
+    ctx.arc((exitCell.c + 0.5) * size, (exitCell.r + 0.5) * size, size * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+
+    const colors = [
+      "#ff4d6d", "#ff8c42", "#ffd166", "#a7c957", "#48cae4", "#4d96ff",
+      "#845ec2", "#d65db1", "#f94144", "#f3722c", "#90be6d", "#43aa8b",
+      "#577590", "#f8961e", "#b5179e", "#00b4d8", "#80ed99", "#c77dff",
+      "#ef476f", "#06d6a0", "#118ab2", "#8338ec", "#fb5607", "#3a86ff"
+    ];
+
+    bots.forEach((bot, i) => {
+      const p = cellPosition(bot, now);
+      ctx.fillStyle = colors[i];
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, size * 0.19, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#101522";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    });
+
+    requestAnimationFrame(draw);
+  }
+
+  function reset(newSeed) {
+    if (typeof newSeed === "number" && Number.isFinite(newSeed)) {
+      seed = newSeed >>> 0;
+    } else {
+      seed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+    }
+
+    const random = rngFactory(seed);
+    makeMaze(random);
+
+    spawn = { r: Math.floor(ROWS / 2), c: Math.floor(COLS / 2) };
+    do {
+      exitCell = { r: Math.floor(random() * ROWS), c: Math.floor(random() * COLS) };
+    } while (exitCell.r === spawn.r && exitCell.c === spawn.c);
+
+    bots = [];
+    for (let i = 0; i < BOT_COUNT; i++) {
+      bots.push(createBot(i, rngFactory((seed + 0x9e3779b9 * (i + 1)) >>> 0)));
+    }
+
+    elapsed = 0;
+    completedEl.textContent = "0";
+    timerEl.textContent = "0";
+  }
+
+  const game = {
+    tick(n = 1) {
+      n = Math.max(0, Math.floor(Number(n) || 0));
+      for (let i = 0; i < n; i++) simulationTick();
+      return this;
+    },
+    reset,
+    get elapsed() { return elapsed; },
+    get size() { return { rows: ROWS, cols: COLS }; },
+    get spawn() { return { r: spawn.r, c: spawn.c }; },
+    get exit() { return { r: exitCell.r, c: exitCell.c }; },
+    walls(r, c) {
+      if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return null;
+      return { ...mazeWalls[r][c] };
+    },
+    get bots() { return bots; }
+  };
+
+  window.game = game;
+  reset(1);
+  resetEl.addEventListener("click", () => reset());
+  setInterval(() => game.tick(1), 85);
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

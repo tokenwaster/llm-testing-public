@@ -18,6 +18,7 @@ def median(values):
     mid = n // 2
     if n % 2 == 1:
         return s[mid]
+    # even length – average the two middle values
     return (s[mid - 1] + s[mid]) / 2
 
 

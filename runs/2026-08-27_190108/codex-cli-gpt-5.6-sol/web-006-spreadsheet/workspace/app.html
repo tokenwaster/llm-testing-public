@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    min-width: 600px;
+    min-height: 400px;
+    font-family: Arial, sans-serif;
+    background: #f4f6f8;
+    color: #202124;
+  }
+  #app {
+    width: max-content;
+    min-width: 600px;
+    min-height: 400px;
+    margin: auto;
+    padding: 18px;
+    background: white;
+    border: 1px solid #c7ccd1;
+    border-radius: 8px;
+    box-shadow: 0 3px 14px rgba(0,0,0,.08);
+  }
+  h1 {
+    margin: 0 0 14px;
+    font-size: 22px;
+  }
+  table {
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+  th, td {
+    border: 1px solid #b8bec5;
+    padding: 0;
+  }
+  th {
+    width: 70px;
+    height: 28px;
+    background: #e9edf1;
+    font-size: 13px;
+    text-align: center;
+    user-select: none;
+  }
+  th.row-header {
+    width: 38px;
+  }
+  td input {
+    display: block;
+    width: 70px;
+    height: 30px;
+    padding: 4px 6px;
+    border: 0;
+    outline: none;
+    background: white;
+    font: 14px Arial, sans-serif;
+  }
+  td input:focus {
+    box-shadow: inset 0 0 0 2px #1a73e8;
+    background: #eef5ff;
+  }
+  .controls {
+    margin-top: 16px;
+  }
+  #export {
+    padding: 8px 15px;
+    border: 1px solid #1558b0;
+    border-radius: 4px;
+    background: #1a73e8;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+  }
+  #export:hover { background: #155fbd; }
+  #export:active { background: #104d9a; }
+  #csv {
+    display: block;
+    width: 100%;
+    min-width: 738px;
+    height: 90px;
+    margin-top: 10px;
+    padding: 8px;
+    resize: vertical;
+    border: 1px solid #b8bec5;
+    font: 12px Consolas, monospace;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <table id="grid" aria-label="Spreadsheet"></table>
+  <div class="controls">
+    <button id="export" type="button">Export CSV</button>
+    <textarea id="csv" aria-label="CSV output" readonly></textarea>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const columns = "ABCDEFGHIJ".split("");
+  const addresses = [];
+  const cells = Object.create(null);
+  const rawValues = Object.create(null);
+  const displayedValues = Object.create(null);
+  const grid = document.getElementById("grid");
+
+  const headerRow = document.createElement("tr");
+  const corner = document.createElement("th");
+  corner.className = "row-header";
+  corner.scope = "col";
+  headerRow.appendChild(corner);
+
+  for (const column of columns) {
+    const header = document.createElement("th");
+    header.scope = "col";
+    header.textContent = column;
+    headerRow.appendChild(header);
+  }
+  grid.appendChild(headerRow);
+
+  for (let row = 1; row <= 10; row++) {
+    const tr = document.createElement("tr");
+    const rowHeader = document.createElement("th");
+    rowHeader.className = "row-header";
+    rowHeader.scope = "row";
+    rowHeader.textContent = row;
+    tr.appendChild(rowHeader);
+
+    for (const column of columns) {
+      const address = column + row;
+      addresses.push(address);
+      rawValues[address] = "";
+      displayedValues[address] = "";
+
+      const td = document.createElement("td");
+      const input = document.createElement("input");
+      input.type = "text";
+      input.id = "cell-" + address;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.setAttribute("aria-label", address);
+      input.dataset.address = address;
+      cells[address] = input;
+
+      input.addEventListener("focus", function () {
+        input.value = rawValues[address];
+      });
+
+      input.addEventListener("blur", function () {
+        rawValues[address] = input.value;
+        recalculate();
+      });
+
+      input.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          input.blur();
+        }
+      });
+
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+    grid.appendChild(tr);
+  }
+
+  function validAddress(value) {
+    return /^[A-J](?:[1-9]|10)$/.test(value);
+  }
+
+  function formulaValue(address, evaluate) {
+    const raw = rawValues[address];
+
+    if (raw === "") return 0;
+
+    if (raw.charAt(0) !== "=") {
+      const trimmed = raw.trim();
+      if (trimmed !== "" && isFinite(Number(trimmed))) {
+        return Number(trimmed);
+      }
+      throw new Error("Non-numeric cell");
+    }
+
+    return parseFormula(raw.slice(1), evaluate);
+  }
+
+  function parseFormula(source, evaluate) {
+    let position = 0;
+
+    function skipWhitespace() {
+      while (position < source.length && /\s/.test(source[position])) position++;
+    }
+
+    function parseExpression() {
+      let value = parseTerm();
+      while (true) {
+        skipWhitespace();
+        const operator = source[position];
+        if (operator !== "+" && operator !== "-") break;
+        position++;
+        const right = parseTerm();
+        value = operator === "+" ? value + right : value - right;
+      }
+      return value;
+    }
+
+    function parseTerm() {
+      let value = parseUnary();
+      while (true) {
+        skipWhitespace();
+        const operator = source[position];
+        if (operator !== "*" && operator !== "/") break;
+        position++;
+        const right = parseUnary();
+        value = operator === "*" ? value * right : value / right;
+      }
+      return value;
+    }
+
+    function parseUnary() {
+      skipWhitespace();
+      if (source[position] === "+") {
+        position++;
+        return parseUnary();
+      }
+      if (source[position] === "-") {
+        position++;
+        return -parseUnary();
+      }
+      return parsePrimary();
+    }
+
+    function parsePrimary() {
+      skipWhitespace();
+
+      if (source[position] === "(") {
+        position++;
+        const value = parseExpression();
+        skipWhitespace();
+        if (source[position] !== ")") throw new Error("Missing parenthesis");
+        position++;
+        return value;
+      }
+
+      const rest = source.slice(position);
+      const numberMatch = rest.match(/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/);
+      if (numberMatch) {
+        position += numberMatch[0].length;
+        return Number(numberMatch[0]);
+      }
+
+      const referenceMatch = rest.match(/^[A-Za-z]+\d+/);
+      if (referenceMatch) {
+        const reference = referenceMatch[0].toUpperCase();
+        position += referenceMatch[0].length;
+        if (!validAddress(reference)) throw new Error("Invalid reference");
+        return evaluate(reference);
+      }
+
+      throw new Error("Invalid expression");
+    }
+
+    skipWhitespace();
+    if (position >= source.length) throw new Error("Empty formula");
+    const result = parseExpression();
+    skipWhitespace();
+    if (position !== source.length || !Number.isFinite(result)) {
+      throw new Error("Invalid formula");
+    }
+    return result;
+  }
+
+  function recalculate() {
+    const states = Object.create(null);
+    const values = Object.create(null);
+    const stack = [];
+    const cycleCells = new Set();
+
+    function evaluate(address) {
+      if (states[address] === 2) {
+        if (cycleCells.has(address)) throw new Error("Cycle");
+        if (values[address] === "#ERR") throw new Error("Dependency error");
+        return values[address];
+      }
+
+      if (states[address] === 1) {
+        const start = stack.indexOf(address);
+        for (let i = start; i < stack.length; i++) cycleCells.add(stack[i]);
+        throw new Error("Cycle");
+      }
+
+      states[address] = 1;
+      stack.push(address);
+
+      let result;
+      try {
+        result = formulaValue(address, evaluate);
+      } catch (error) {
+        result = "#ERR";
+      }
+
+      stack.pop();
+      states[address] = 2;
+
+      if (cycleCells.has(address)) {
+        values[address] = "#CYCLE";
+        throw new Error("Cycle");
+      }
+
+      values[address] = result;
+      if (result === "#ERR") throw new Error("Formula error");
+      return result;
+    }
+
+    for (const address of addresses) {
+      if (states[address] !== 2) {
+        try { evaluate(address); } catch (error) {}
+      }
+    }
+
+    for (const address of addresses) {
+      let display;
+      if (cycleCells.has(address)) {
+        display = "#CYCLE";
+      } else {
+        const value = values[address];
+        display = value === undefined ? "#ERR" : String(value);
+      }
+      displayedValues[address] = display;
+
+      if (document.activeElement !== cells[address]) {
+        cells[address].value = display;
+      }
+    }
+  }
+
+  function normalizeAddress(address) {
+    const normalized = String(address).toUpperCase();
+    if (!validAddress(normalized)) throw new Error("Invalid cell address: " + address);
+    return normalized;
+  }
+
+  window.sheet = {
+    set: function (address, text) {
+      const normalized = normalizeAddress(address);
+      rawValues[normalized] = String(text);
+      recalculate();
+    },
+    get: function (address) {
+      return displayedValues[normalizeAddress(address)];
+    },
+    raw: function (address) {
+      return rawValues[normalizeAddress(address)];
+    }
+  };
+
+  function csvEscape(value) {
+    const text = String(value);
+    if (/[",\r\n]/.test(text)) return '"' + text.replace(/"/g, '""') + '"';
+    return text;
+  }
+
+  document.getElementById("export").addEventListener("click", function () {
+    const lines = [];
+    for (let row = 1; row <= 10; row++) {
+      const fields = [];
+      for (const column of columns) {
+        fields.push(csvEscape(displayedValues[column + row]));
+      }
+      lines.push(fields.join(","));
+    }
+    document.getElementById("csv").value = lines.join("\n");
+  });
+
+  recalculate();
+})();
+</script>
+</body>
+</html>

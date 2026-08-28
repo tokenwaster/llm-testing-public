@@ -20,7 +20,7 @@ def _openrouter_balance(key: str) -> dict | None:
         used = float(d.get("total_usage") or 0)
         out["remaining"] = round(granted - used, 4)
         out["detail"] = f"${granted:,.2f} granted, ${used:,.2f} used"
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, ValueError) as e:
         return {"provider": "openrouter", "error": f"{type(e).__name__}: {e}"}
     try:
         r = httpx.get("https://openrouter.ai/api/v1/auth/key", headers=h,
@@ -35,18 +35,39 @@ def _openrouter_balance(key: str) -> dict | None:
                 if out.get("remaining") is None or lim < out["remaining"]:
                     out["remaining"] = round(lim, 4)
                     out["binding"] = "key limit"
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ValueError):
         pass
     return out
 
 
-BALANCE_LOOKUP = {"openrouter.ai": _openrouter_balance}
+def _moonshot_balance(key: str) -> dict | None:
+    import httpx
+    h = {"Authorization": f"Bearer {key}"}
+    try:
+        r = httpx.get("https://api.moonshot.ai/v1/users/me/balance", headers=h,
+                      timeout=BALANCE_TIMEOUT_S)
+        if r.status_code != 200:
+            return {"provider": "moonshot", "error":
+                    f"HTTP {r.status_code}: {r.text[:120]}"}
+        d = (r.json() or {}).get("data") or {}
+        avail = float(d.get("available_balance") or 0)
+        cash = float(d.get("cash_balance") or 0)
+        voucher = float(d.get("voucher_balance") or 0)
+        return {"provider": "moonshot", "remaining": round(avail, 4),
+                "detail": f"${cash:,.2f} cash + ${voucher:,.2f} voucher"}
+    except (httpx.HTTPError, ValueError) as e:
+        return {"provider": "moonshot", "error": f"{type(e).__name__}: {e}"}
+
+
+BALANCE_LOOKUP = {"openrouter.ai": _openrouter_balance,
+                  "api.moonshot.ai": _moonshot_balance}
 
 NO_BALANCE_API = {
     "anthropic": "the Anthropic API exposes no balance on a standard key "
                  "(cost_report needs an admin key), so a ceiling is the only "
                  "guard",
     "claude-cli": "a subscription has no balance to read",
+    "codex-cli": "a subscription has no balance to read",
 }
 
 
@@ -67,15 +88,25 @@ def balance_for(model) -> dict | None:
             "unavailable": "no balance endpoint known for this host"}
 
 
+def _pool_key(m) -> str:
+    base = (m.base_url or m.provider or "").lower().rstrip("/")
+    return base.removeprefix("https://").removeprefix("http://")
+
+
 def balances(models) -> dict:
+    """One dict per provider pool (keyed by normalized base_url so spelling
+    variants share it), aliased under every model name. Each dict carries
+    its "pool" key — callers group by that, never by object identity."""
     out: dict = {}
     seen: dict = {}
     for m in models:
-        base = m.base_url or m.provider
+        base = _pool_key(m)
         if base in seen:
             out[m.name] = seen[base]
             continue
         b = balance_for(m)
+        if b is not None:
+            b["pool"] = base
         seen[base] = b
         out[m.name] = b
     return out
@@ -122,24 +153,29 @@ def estimate(models, tasks, repeat: int = 1) -> dict:
     rows = []
     unknown = []
     for m in models:
-        billed = not m.local and m.provider != "claude-cli"
+        billed = not m.local and not m.is_cli
         known = projected = 0.0
         priced = modelled = blind = 0
+        per_task: dict = {}
         for tid in want:
             e = (td.get(tid) or {}).get("agg", {}).get(m.name)
             c = (e or {}).get("cost_usd")
             if c is not None:
                 known += c
                 priced += 1
+                per_task[tid] = {"cost": round(c, 6), "basis": "known"}
                 continue
             if not billed:
+                per_task[tid] = {"cost": 0.0, "basis": "free"}
                 continue
             p = _project_task(td, tid, m, by_provider)
             if p is None:
                 blind += 1
+                per_task[tid] = {"cost": None, "basis": "blind"}
                 continue
             projected += p
             modelled += 1
+            per_task[tid] = {"cost": round(p, 6), "basis": "projected"}
         missing = len(want) - priced
         basis = ("own" if priced and not modelled else
                  "mixed" if priced else
@@ -154,7 +190,8 @@ def estimate(models, tasks, repeat: int = 1) -> dict:
                      "per_sweep": round(known + projected, 6),
                      "total": round((known + projected) * reps, 6),
                      "local": bool(m.local),
-                     "subscription": m.provider == "claude-cli"})
+                     "subscription": m.is_cli,
+                     "per_task": per_task})
     billed_rows = [r for r in rows
                    if not r["local"] and not r["subscription"]]
     return {"rows": rows,
@@ -182,17 +219,26 @@ class SpendExceeded(Exception):
 
 
 class SpendTracker:
+    """Shared across model threads in parallel mode: every mutation is
+    locked, and once the ceiling is crossed EVERY subsequent add() raises —
+    a one-shot flag would disarm the guard for the other threads."""
+
     def __init__(self, cap: float | None = None):
+        import threading
         self.cap = cap if cap is not None else max_spend_usd()
         self.spent = 0.0
         self.tripped = False
+        self._lock = threading.Lock()
 
     def add(self, cost) -> None:
         if not cost or self.cap is None:
             return
-        self.spent += float(cost)
-        if self.spent > self.cap and not self.tripped:
-            self.tripped = True
+        with self._lock:
+            self.spent += float(cost)
+            over = self.spent > self.cap
+            if over:
+                self.tripped = True
+        if over:
             raise SpendExceeded(
                 f"run stopped: ${self.spent:,.2f} spent, over the "
                 f"${self.cap:,.2f} ceiling. Nothing already recorded is lost. "
@@ -208,16 +254,26 @@ def preflight(models, tasks, repeat: int = 1) -> dict:
     bal = balances(models)
     cap = max_spend_usd()
     problems = []
+    pooled: dict = {}
     for m in models:
         b = bal.get(m.name) or {}
         rem = b.get("remaining")
         if rem is None:
             continue
         mine = next((r["total"] for r in est["rows"] if r["model"] == m.name), 0)
-        if mine and rem < mine:
+        entry = pooled.setdefault(b.get("pool") or b.get("provider"),
+                                  {"b": b, "total": 0.0, "models": []})
+        entry["total"] += mine
+        if mine:
+            entry["models"].append(m.name)
+    for entry in pooled.values():
+        b, total = entry["b"], entry["total"]
+        if total and b["remaining"] < total:
+            who = (entry["models"][0] if len(entry["models"]) == 1 else
+                   f"{len(entry['models'])} models ({', '.join(entry['models'])})")
             problems.append(
-                f"{m.name}: needs about ${mine:,.2f} but {b['provider']} "
-                f"reports ${rem:,.2f} available"
+                f"{who}: needs about ${total:,.2f} but {b['provider']} "
+                f"reports ${b['remaining']:,.2f} available"
                 + (f" ({b['binding']})" if b.get("binding") else ""))
     if cap is not None and est["billable"] > cap:
         problems.append(f"estimated ${est['billable']:,.2f} exceeds the "

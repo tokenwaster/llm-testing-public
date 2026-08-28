@@ -24,6 +24,235 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ---
 
+## Unreleased
+
+(nothing pending)
+
+## 0.7.15 — the cloud budget is actually the cloud budget
+
+### Six cloud models were tested at HALF the cloud output budget
+deepseek-v4-flash, gemini-3.7-flash, glm-5.3, grok-4.6, qwen3.7-plus and
+qwen3.8-max carried `max_tokens: 32768` — the LOCAL budget — instead of the
+cloud 65,536 the methodology declares. glm-5.3 is the measured proof of what
+that does to a thinking model: 99%+ of the halved budget went to reasoning and
+12 tasks scored 0 with 2 visible answer tokens; those 12 results were removed
+as condition-contaminated, and the yamls now carry 65,536. Cells other models
+recorded at 32,768 remain in their means (cross-condition, like any pricing or
+provider drift — disclosed here, not silently rewritten). `budget_matrix()`
+now reads the cap each run actually enforced from its manifest
+(`model_sampling`), not today's yaml, so budget-death evidence measured at
+32,768 still qualifies after the raise. ling-3.0-flash stays at 32,768 — that
+is the provider's real completion cap, not a misconfiguration.
+
+### The spend ceiling now works in parallel mode
+Parallel runs never passed the SpendTracker into their threads at all; when it
+was first wired in, a tripped ceiling killed one thread silently and disarmed
+the guard for the rest. The tracker is now locked, keeps raising for every
+thread once over the cap, and the ceiling trip is re-raised on the main thread
+after join so `stopped_reason: spend_ceiling` lands in run.json like serial.
+
+### Provider balance pools are keyed by host, not object identity
+Insufficient-balance preflight pools models by normalized base_url (scheme and
+trailing-slash insensitive), so two spellings of the same gateway can no longer
+each be told the full remaining balance.
+
+### Public export scrubs account identifiers
+Provider error bodies recorded in run artifacts can embed account identifiers
+(an OpenRouter 404 carried the operator's user_id; a model once typed the
+operator's email into a webapp). `export_public.py` now scrubs user_id / key
+URLs / operator paths from exported run artifacts; local `runs/` stays
+verbatim. The three existing leaks were redacted in place.
+
+### A model that reasons past the deadline owns that zero
+The streaming deadline message counted `text_parts` — visible answer text —
+and nothing else. Reasoning deltas accumulate in a separate counter, so a
+model still thinking at the 900s wall reported **"streamed 0 chars"**, byte
+for byte what a dead socket reports. It was read here as provider noise.
+It was not: kimi-k3 finished ctx-014 in **859s** with 45,507 output tokens and
+crossed the wall on rs-015 — the same model on the same endpoint, differing
+only in how long that draw of the think channel ran. Thinking length is a
+property of the model, not the network.
+
+Worse than the misread: `timeout` attributes to **infra**, and infra is in
+`attributed_excludes`. A model that spent the entire budget reasoning and
+produced no answer had its zero *written off as the provider's fault and
+dropped from its attributed score* — free credit for exactly the failure
+CLAUDE.md 3a says scores 0, and the mirror image of the harness-crash defect
+fixed in 0.7.10.
+
+**Three** streaming paths had a deadline, not two — the claude-cli path
+(`_stream_claude_cli`) had its own, message "claude CLI exceeded the 900s
+budget", counting nothing at all. That is the path every `claude-cli` model
+runs on, and it is what recorded sonnet-5's 1,808s zero on ctx-014 (it was
+thinking). It already tracked `saw_text`/`first_text_ms` and discarded them at
+the deadline; it now counts the CLI's `thinking` content blocks, which it had
+been parsing for `tool_use` only.
+
+All three now separate the two cases at the deadline. Reasoning or answer
+text seen ⇒ `kind="think_timeout"`, non-retryable (retrying a 900s thinker
+just burns another 900s), attributed to the **model**, message naming both
+channels: "still generating at the 900s deadline — 61,082 chars of reasoning
+and 0 of answer". Nothing at all seen ⇒ `kind="timeout"`, still infra, still
+retryable, message says so plainly. The Anthropic stream had no think-channel
+counter at all and now has one.
+
+**Cells recorded before this fix cannot be reclassified.** A stalled socket
+and a model mid-thought both burn the full budget and leave byte-identical
+records, so the eight historical `timeout` cells stay as they are rather than
+being relabelled on an inference the data cannot support. They will resolve
+the next time those cells are run.
+
+### Calibration round 1 → retune
+12 models ran the two candidates. **rs-015 at 190 ops**: six perfect 7/7s
+(fable, sol, grok-4.6, terra, glm-5.2, glm-5.3), 0.86 ×2, 0.71, and three
+collapses (kimi-k3 900 s timeout with nothing streamed on both tasks — suspect
+provider; qwen3.8-max and kimi-k2.7-code burned the budget thinking). σ 0.46
+among the top-8 run, but entirely "finished vs. collapsed" — every model that
+answered scored ≥ 0.71, so the trace itself was too easy for the top.
+**ctx-014 at 1,250 instructions**: a wall — best 1/6 (sol, terra), fable wrote
+a script instead of answering, both groks bailed in 6 s with made-up numbers,
+five models exhausted their output budget reasoning. σ 0.06: nobody to
+separate. Retuned: rs-015 → 300 ops with a denser UNDO/RENAME/MERGE mix (60 of
+300 cancelled), ctx-014 → 850 instructions (ctx-013's 640 put the top-8 at
+0.75; 1,250 put them at 0.03). New seeds, references and traps re-verified,
+independent resolvers re-matched. Every round-1 cell for the two ids was
+removed so the next sweep starts clean against the new content.
+
+### tasks-staging/ is runnable by name and counted toward nothing
+Putting the two calibration candidates straight into `tasks/` (the 0.6/0.7
+precedent) broke the live board the moment nobody had run them: every model
+was "partial" against a 57-task suite and the ranking vanished. They now live
+in `tasks-staging/`. `load_tasks()` excludes staging by default, so reports,
+coverage, the lens and the mirror stay on the 56 live tasks;
+`load_tasks(include_staging=True)` is used where a task is named explicitly —
+`harness run --tasks <id>` (which now also takes a comma-separated list; the
+roadmap's calibration command never worked as a single glob), the /run page
+(◇ staging, unticked by default, a glob never sweeps them in), the probes, and
+rescore. Results a calibration run leaves under `runs/` for a staging id are
+dropped at load time until the task is `git mv`-ed into `tasks/`, at which
+point they start counting — the same as the earlier frontier tasks'
+calibration runs did. The abandoned rs-014 draft that shared its id with the
+live task was removed from staging.
+
+### An expired CLI login is a refusal, not a zero
+`claude -p` answered "Failed to authenticate: OAuth session expired and could
+not be refreshed" and the adapter called it a retryable `api` error, so the
+cell retried twice and was scored **0.0** — two such zeros landed on fable-5
+(run 2026-08-22_193612) the moment the operator tried the new frontier tasks.
+Both CLI adapters now recognise the auth wordings (`_is_auth_failure`) and
+raise `kind="auth"`, which the runner already drops unscored and stops the
+model on, with the message saying to re-login. The two cells were converted
+to what the fixed harness writes (no `score.json`, `dropped_unscored: auth`);
+the transcripts stay.
+
+### codex-cli: the ChatGPT subscription as a provider
+A second subscription avenue beside `claude-cli`: `provider: codex-cli` runs
+`codex exec --json` (the Codex CLI bundled with the desktop app, found on PATH,
+via `CODEX_EXE`, or under the app's `bin/`; login is the app's ChatGPT login).
+Three models registered — `codex-cli-gpt-5.6-sol` / `-terra` / `-luna` — with
+`compare_key` pairing each to its OpenRouter twin so the avenue comparison and
+the API-equivalent cost work as they do for Claude. Every `claude-cli` special
+case in the harness became `Model.is_cli` (subscription: not billed, no
+balance to read, agentic path through the CLI, sampling not settable, effort
+settable with per-provider levels — Codex takes minimal/low/medium/high/xhigh).
+
+The text-only lane is locked down, because Codex is an agent with a shell:
+`--ignore-user-config` (the operator's config carries live web search,
+plugins and MCP servers), an empty `--sandbox read-only` cwd,
+`shell_environment_policy.inherit="none"`, `web_search="disabled"`, and the
+browser / computer-use / apps / multi-agent / memories / goals / hooks features
+disabled. Measured: asked to run `python -c "print(7*191)"`, Codex tried
+PowerShell and then cmd, the Windows sandbox rejected both ("blocked by
+policy"), and it answered from arithmetic. The sandbox is not trusted alone —
+**if a command execution completes in the text-only lane the attempt fails**
+(`AdapterError kind=tool_use`, non-retryable), the same way `claude -p` runs
+with every tool disallowed. Tier-2 tasks use `chat_agentic` with
+`--sandbox workspace-write` in the task workspace, like the Claude CLI path.
+
+Accounting mirrors the Claude adapter: output budget enforced post-hoc (the CLI
+takes no cap), `reasoning_output_tokens` recorded, cached input tokens split
+out, usage-limit wordings mapped to the pause-and-resume path (best-effort
+list, extend `_CODEX_LIMIT_PHRASES` when a real one differs). `effort_used`
+reads `inherited` when unset — with the user config ignored that is the Codex
+binary's default, not `~/.codex/config.toml`. Measured scaffold: a one-line
+prompt costs ~10.3k input tokens (22k with the user config loaded), so the CLI
+overhead model applies to it exactly as to `claude -p`.
+
+### Two frontier candidates, built and reference-verified, awaiting calibration
+The frontier lens is empty: the top-8 cohort averages > 0.75 on every task
+(ctx-013 misses by 0.004). Two tasks of the shape that still works — answers
+known by construction, expensive to derive, trivially checked — are in `tasks/`
+and count toward nothing until the calibration run admits them (σ(top-8) ≥ 0.15
+and top-8 mean < 0.75; command in `docs/PUBLIC-FEEDBACK-ROADMAP.md`).
+
+- **ctx-014-cascade-ledger-128k** (long-context, response lane, 213k chars):
+  ctx-013's ledger with cascades — VOID/RESTORE, SETTLE (kills the "ignore
+  pending" shortcut), TRANSFER between accounts, VOID-ALL of an account's
+  holdings *at that moment*, and 12 quoted aliases declared mid-document that
+  later lines use in place of the id. 1,250 instructions, narrative decoys that
+  mention transactions but change nothing. Six answers. Measured with an
+  independent resolver: ignoring SETTLE gets 0/6 right, TRANSFER 1/6, RESTORE
+  2/6, VOID-ALL 3/6; without alias resolution the ledger does not parse.
+- **rs-015-graph-rewrite-trace** (reasoning, response lane, 7k chars): a
+  directed graph built by 190 operations — ADD/DEL edges, MERGE x INTO y,
+  RENAME (the old name becomes free again), and UNDO, which cancels the most
+  recent uncancelled non-UNDO operation *including ignored ones*. The final
+  graph is the replay of every never-cancelled operation; 27 are cancelled.
+  Seven answers (counts, reachability, shortest path, max out-degree, cycle).
+  Ignoring UNDO gets 3/7 right.
+
+Both: generator with a `SEED` (mirror re-seedable), `good.txt`/`bad.txt`
+(1.000 / 0.000 / 0.000), and a second resolver written independently from the
+prompt text alone that reproduces every answer — the question is real, not the
+generator's private opinion. Not versioned: admission, or a hardening loop if
+the cohort aces them, happens after the operator's calibration run.
+
+## 0.7.14 — two frontier tasks admitted, and the cohorts stop overlapping
+
+### ctx-014 and rs-015 are live (58 tasks)
+Both candidates move from `tasks-staging/` into the suite on the operator's
+call, as a **patch** — same dataset, no archive, following the 0.6.13
+precedent for adding tasks mid-baseline. The 28 calibration cells already in
+`runs/` were run against exactly this content (every `task_hash` matches, 0
+mismatches), so admitting the tasks is all it takes for them to start
+counting; nothing was rescored or re-attributed by hand.
+
+Round-2 spread across 11 models — `ctx-014` mean 0.379 / sd 0.409,
+`rs-015` mean 0.312 / sd 0.326, both spanning 0 to 1.0:
+opus-5 takes both (1.0/1.0), kimi-k3 and grok-4.6 solve the ledger, sol takes
+the graph trace, and the qwens burn their whole budget reasoning on both.
+Models that have not run them show as not-run until topped up:
+`harness run --tasks ctx-014-cascade-ledger-128k,rs-015-graph-rewrite-trace`.
+
+### /run gets a derived "◯ Gaps" selector
+43 of 54 models have not run the two new tasks, and the only one-click
+selectors were hardcoded lists. `NEW_TASKS` was the obvious place to put the
+new ids, but that tuple *means* the five v0.6.13 capability lanes and three
+tests assert it holds exactly ten — so it stays as it is.
+
+Instead: tick the models, press **◯ Gaps**, and the task list selects exactly
+what those models have never run. It reads the per-model `missing` array the
+page already receives, so it is derived rather than curated and cannot go
+stale the next time a task is added — the same rule the coverage badges and
+the fit advisor follow.
+
+### The top and bottom cohorts were the same eight models
+Admitting two tasks dropped every model that had not run them below full
+coverage, leaving **8** models complete — and `TOP_COHORT` is 8, so
+`ranked[:8]` and `ranked[-8:]` were the *same set*. Every "top-to-bottom gap"
+on every task page read exactly +0.00, `floor-gate` (gap > 0.3) could never
+fire, and `dead` (|gap| < 0.06 and mean > 0.9) fired on the arithmetic rather
+than on evidence. This was not new — any fleet with fewer than 16 fully
+covered models hit it, and a unit test had been asserting the fake zero.
+`k` is now `min(8, len(ranked) // 2)`, so the cohorts are disjoint by
+construction and the badge names the size it actually used ("top-4 mean"
+while coverage is thin, widening back toward top-8 as models are topped up).
+
+A task the top cohort has solved (top mean ≥ 0.95) but that is not
+fleet-saturated used to reach no lens button at all — `web-005-expense` was
+sitting in that hole. It now falls to `ceiling` as a last resort, after every
+other branch, so the lenses still partition the suite.
+
 ## 0.7.13 — web-003-sand stops flipping a coin
 
 ### An orphaned checker, a clean re-measure, and three racy tests

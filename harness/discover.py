@@ -121,6 +121,12 @@ def probe_models(models, probe_local: bool = True) -> dict[str, dict]:
             ok = shutil.which("claude") is not None
             out[m.name] = {"status": "ready" if ok else "missing CLI", "ok": ok,
                            "detail": "runs on subscription via claude -p"}
+        elif m.provider == "codex-cli":
+            from .adapters import _codex_exe
+            ok = _codex_exe() is not None
+            out[m.name] = {"status": "ready" if ok else "missing CLI", "ok": ok,
+                           "detail": "runs on the ChatGPT subscription via "
+                                     "codex exec"}
         elif m.provider == "mock":
             out[m.name] = {"status": "ready", "ok": True, "detail": "offline mock"}
         elif m.local and not probe_local:

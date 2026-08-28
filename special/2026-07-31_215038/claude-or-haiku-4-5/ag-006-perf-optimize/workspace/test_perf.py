@@ -1,15 +1,18 @@
 import time
 from perf import common_elements, fib, count_pairs, dedupe_keep_order
 
+# Test 1: common_elements
 print("Testing common_elements...")
 result = common_elements([1, 2, 3, 4], [3, 4, 5, 6])
 assert result == [3, 4], f"Expected [3, 4], got {result}"
 print("  Basic test passed")
 
+# Test with duplicates in first list
 result = common_elements([1, 1, 2, 3], [2, 3, 4])
 assert result == [2, 3], f"Expected [2, 3], got {result}"
 print("  Duplicate handling test passed")
 
+# Performance test for common_elements
 start = time.time()
 a = list(range(200000))
 b = list(range(100000, 300000))
@@ -19,6 +22,7 @@ print(f"  Performance test (200k elements): {elapsed:.3f}s")
 assert result == sorted(set(a) & set(b)), "Result mismatch"
 print(f"  Found {len(result)} common elements")
 
+# Test 2: fib
 print("\nTesting fib...")
 assert fib(0) == 0
 assert fib(1) == 1
@@ -29,24 +33,28 @@ assert fib(5) == 5
 assert fib(10) == 55
 print("  Basic tests passed")
 
+# Performance test for fib(300)
 start = time.time()
 result = fib(300)
 elapsed = time.time() - start
 print(f"  fib(300) = {result}")
 print(f"  Time: {elapsed:.3f}s")
+# Verify it's correct by comparing with known values
 assert fib(10) == 55
 assert fib(20) == 6765
 print("  Correctness verified")
 
+# Test 3: count_pairs
 print("\nTesting count_pairs...")
 result = count_pairs([1, 2, 3, 4, 5], 7)
-assert result == 2, f"Expected 2, got {result}"
+assert result == 2, f"Expected 2, got {result}"  # (2,5), (3,4)
 print("  Basic test passed")
 
 result = count_pairs([1, 1, 1, 1], 2)
-assert result == 6, f"Expected 6, got {result}"
+assert result == 6, f"Expected 6, got {result}"  # All 6 pairs of 1+1
 print("  Duplicate test passed")
 
+# Performance test for count_pairs
 start = time.time()
 nums = list(range(100000))
 result = count_pairs(nums, 100000)
@@ -54,6 +62,7 @@ elapsed = time.time() - start
 print(f"  Performance test (100k elements): {elapsed:.3f}s")
 print(f"  Found {result} pairs")
 
+# Test 4: dedupe_keep_order
 print("\nTesting dedupe_keep_order...")
 result = dedupe_keep_order([1, 2, 2, 3, 1, 4])
 assert result == [1, 2, 3, 4], f"Expected [1, 2, 3, 4], got {result}"
@@ -67,6 +76,7 @@ result = dedupe_keep_order([1])
 assert result == [1], f"Expected [1], got {result}"
 print("  Single element test passed")
 
+# Performance test for dedupe_keep_order
 start = time.time()
 items = list(range(100000)) + list(range(100000))
 result = dedupe_keep_order(items)

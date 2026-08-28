@@ -22,6 +22,7 @@ class Task:
     max_turns: int = config.DEFAULT_AGENT_MAX_TURNS
     checker_timeout_s: int = config.CHECKER_TIMEOUT_S
     content_hash: str = ""
+    staging: bool = False
 
     @property
     def scoring_type(self) -> str:
@@ -58,13 +59,27 @@ def _load_task(task_dir: Path, category: str) -> Task:
     )
 
 
-def load_tasks(tasks_dir: Path | None = None) -> list[Task]:
-    tasks_dir = tasks_dir or config.TASKS_DIR
+def _scan(tasks_dir: Path, staging: bool) -> list[Task]:
     tasks: list[Task] = []
+    if not tasks_dir.is_dir():
+        return tasks
     for category_dir in sorted(p for p in tasks_dir.iterdir() if p.is_dir()):
         for task_dir in sorted(p for p in category_dir.iterdir() if p.is_dir()):
             if (task_dir / "meta.yaml").exists() and (task_dir / "prompt.md").exists():
-                tasks.append(_load_task(task_dir, category_dir.name))
+                t = _load_task(task_dir, category_dir.name)
+                t.staging = staging
+                tasks.append(t)
+    return tasks
+
+
+def load_tasks(tasks_dir: Path | None = None,
+               include_staging: bool = False) -> list[Task]:
+    """The live suite is tasks/. tasks-staging/ holds candidates awaiting a
+    calibration run: runnable when named explicitly, never part of the
+    default set — so reports, coverage and the lens do not count them."""
+    tasks = _scan(tasks_dir or config.TASKS_DIR, staging=False)
+    if include_staging and tasks_dir is None:
+        tasks += _scan(config.STAGING_DIR, staging=True)
     ids = [t.id for t in tasks]
     dupes = {i for i in ids if ids.count(i) > 1}
     if dupes:

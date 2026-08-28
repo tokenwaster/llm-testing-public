@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-width: 600px; min-height: 400px; padding: 24px;
+    background: #f3f5f8; color: #1d2733; font: 14px Arial, sans-serif;
+  }
+  .app {
+    min-width: 600px; min-height: 400px; max-width: 1000px; margin: auto;
+    background: white; padding: 20px; border-radius: 10px;
+    box-shadow: 0 3px 16px #0002;
+  }
+  h1 { margin: 0 0 16px; font-size: 21px; }
+  #grid {
+    display: grid;
+    grid-template-columns: 42px repeat(10, minmax(52px, 1fr));
+    border: 1px solid #b9c2ce;
+  }
+  .header {
+    padding: 8px 3px; text-align: center; font-weight: bold;
+    background: #e8edf3; border-right: 1px solid #b9c2ce;
+    border-bottom: 1px solid #b9c2ce;
+  }
+  .row-header { background: #e8edf3; }
+  input {
+    width: 100%; min-width: 0; height: 34px; border: 0;
+    border-right: 1px solid #d3d9e0; border-bottom: 1px solid #d3d9e0;
+    padding: 6px; font: inherit; color: #17212b;
+  }
+  input:focus { outline: 2px solid #3478d4; outline-offset: -2px; background: #fffde8; }
+  .controls { display: flex; gap: 12px; margin-top: 16px; align-items: flex-start; }
+  button {
+    padding: 9px 14px; border: 0; border-radius: 5px; cursor: pointer;
+    background: #276bc2; color: white; font: inherit; font-weight: bold;
+  }
+  button:hover { background: #1d58a2; }
+  textarea {
+    flex: 1; min-height: 74px; resize: vertical; padding: 7px;
+    border: 1px solid #b9c2ce; border-radius: 5px; font: 12px monospace;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Mini Spreadsheet</h1>
+  <div id="grid" aria-label="Spreadsheet"></div>
+  <div class="controls">
+    <button id="export" type="button">Export CSV</button>
+    <textarea id="csv" aria-label="CSV export" placeholder="CSV output appears here"></textarea>
+  </div>
+</div>
+
+<script>
+(() => {
+  const cols = "ABCDEFGHIJ".split("");
+  const rows = Array.from({ length: 10 }, (_, i) => i + 1);
+  const raw = Object.create(null);
+  const values = Object.create(null);
+  const grid = document.getElementById("grid");
+
+  function key(ref) {
+    const m = /^([A-J])(10|[1-9])$/.exec(String(ref).toUpperCase());
+    return m ? m[1] + m[2] : null;
+  }
+  function allKeys() {
+    return rows.flatMap(r => cols.map(c => c + r));
+  }
+
+  grid.appendChild(Object.assign(document.createElement("div"), { className: "header", textContent: "" }));
+  cols.forEach(c => grid.appendChild(Object.assign(document.createElement("div"), { className: "header", textContent: c })));
+
+  rows.forEach(r => {
+    grid.appendChild(Object.assign(document.createElement("div"), { className: "header row-header", textContent: r }));
+    cols.forEach(c => {
+      const ref = c + r, input = document.createElement("input");
+      input.id = "cell-" + ref;
+      input.setAttribute("aria-label", ref);
+      input.autocomplete = "off";
+      raw[ref] = "";
+      input.addEventListener("focus", () => { input.value = raw[ref]; });
+      input.addEventListener("blur", () => {
+        raw[ref] = input.value;
+        recalculate();
+      });
+      input.addEventListener("keydown", e => {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { input.value = raw[ref]; input.blur(); }
+      });
+      grid.appendChild(input);
+    });
+  });
+
+  function formula(text, resolve) {
+    let i = 0;
+    const s = text.slice(1);
+
+    function skip() { while (/\s/.test(s[i] || "")) i++; }
+    function primary() {
+      skip();
+      if (s[i] === "(") {
+        i++; const n = expression(); skip();
+        if (s[i++] !== ")") throw Error();
+        return n;
+      }
+      const rest = s.slice(i);
+      const ref = /^([A-Za-z])(0|[1-9]\d*)/.exec(rest);
+      if (ref) {
+        i += ref[0].length;
+        const id = key(ref[0]);
+        if (!id) throw Error();
+        return resolve(id);
+      }
+      const num = /^(?:\d+(?:\.\d*)?|\.\d+)/.exec(rest);
+      if (num) { i += num[0].length; return Number(num[0]); }
+      throw Error();
+    }
+    function unary() {
+      skip();
+      if (s[i] === "+") { i++; return unary(); }
+      if (s[i] === "-") { i++; return -unary(); }
+      return primary();
+    }
+    function term() {
+      let n = unary();
+      while (true) {
+        skip();
+        const op = s[i];
+        if (op !== "*" && op !== "/") return n;
+        i++;
+        const b = unary();
+        n = op === "*" ? n * b : n / b;
+      }
+    }
+    function expression() {
+      let n = term();
+      while (true) {
+        skip();
+        const op = s[i];
+        if (op !== "+" && op !== "-") return n;
+        i++;
+        const b = term();
+        n = op === "+" ? n + b : n - b;
+      }
+    }
+    const result = expression();
+    skip();
+    if (i !== s.length || !Number.isFinite(result)) throw Error();
+    return result;
+  }
+
+  function recalculate() {
+    const state = Object.create(null);
+    const stack = [];
+
+    function evaluate(id) {
+      if (state[id] === 2) return values[id];
+      if (state[id] === 1) {
+        const start = stack.indexOf(id);
+        stack.slice(start).forEach(cell => {
+          values[cell] = "#CYCLE";
+          state[cell] = 2;
+        });
+        return "#CYCLE";
+      }
+
+      state[id] = 1;
+      stack.push(id);
+      const text = raw[id] || "";
+      let result;
+
+      if (!text.startsWith("=")) {
+        result = text;
+      } else {
+        try {
+          result = formula(text, ref => {
+            const v = evaluate(ref);
+            if (v === "#CYCLE" || v === "#ERR") throw Error();
+            if (v === "") return 0;
+            const n = Number(v);
+            if (!Number.isFinite(n)) throw Error();
+            return n;
+          });
+          result = String(result);
+        } catch {
+          result = "#ERR";
+        }
+      }
+
+      stack.pop();
+      if (state[id] !== 2) {
+        values[id] = result;
+        state[id] = 2;
+      }
+      return values[id];
+    }
+
+    allKeys().forEach(evaluate);
+    allKeys().forEach(id => {
+      const input = document.getElementById("cell-" + id);
+      if (document.activeElement !== input) input.value = values[id];
+    });
+  }
+
+  function csvValue(value) {
+    value = String(value);
+    return /[",\n\r]/.test(value) ? '"' + value.replace(/"/g, '""') + '"' : value;
+  }
+
+  document.getElementById("export").addEventListener("click", () => {
+    recalculate();
+    document.getElementById("csv").value = rows.map(r =>
+      cols.map(c => csvValue(values[c + r])).join(",")
+    ).join("\n");
+  });
+
+  window.sheet = {
+    set(ref, text) {
+      const id = key(ref);
+      if (!id) throw new Error("Invalid cell reference");
+      raw[id] = String(text);
+      recalculate();
+    },
+    get(ref) {
+      const id = key(ref);
+      if (!id) throw new Error("Invalid cell reference");
+      recalculate();
+      return String(values[id]);
+    },
+    raw(ref) {
+      const id = key(ref);
+      if (!id) throw new Error("Invalid cell reference");
+      return raw[id];
+    }
+  };
+
+  recalculate();
+})();
+</script>
+</body>
+</html>

@@ -10,6 +10,7 @@ def is_leap_year(year: int) -> bool:
     * Years divisible by 100 are *not* leap years **unless** they are also
       divisible by 400.
     """
+    # Century years must be divisible by 400 to be leap years.
     if year % 400 == 0:
         return True
     if year % 100 == 0:

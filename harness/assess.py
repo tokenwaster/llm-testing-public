@@ -61,6 +61,8 @@ CATEGORIES = {
                          "config, not the model: it never saw the prompt, so "
                          "the task is dropped unscored rather than zeroed"),
     "timeout": ("infra", "the request timed out"),
+    "think-timeout": ("model", "spent the whole time budget reasoning and "
+                               "never produced an answer"),
     "context-overflow": ("known-limit", "prompt exceeded the model's usable "
                          "context window — expected, config-visible"),
     "unknown-error": ("infra", "errored for an unclassified reason"),
@@ -198,6 +200,8 @@ def classify(result: dict, tdef, cfg: dict, suspect: dict | None = None) -> dict
         return pack("rate-limit")
     if "request_rejected" in kinds or "auth" in kinds:
         return pack("request-rejected", str(last.get("error") or "")[:120])
+    if errored and "think_timeout" in kinds:
+        return pack("think-timeout")
     if errored and "timeout" in kinds:
         return pack("timeout")
 

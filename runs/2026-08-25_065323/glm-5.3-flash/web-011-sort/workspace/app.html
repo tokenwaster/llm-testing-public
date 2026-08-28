@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sorting Visualizer — Bubble Sort</title>
+<style>
+  :root{
+    --bg:#0b0e14;
+    --panel:#121722;
+    --edge:#222b3d;
+    --ink:#e8edf7;
+    --muted:#8b97ad;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:
+      radial-gradient(1100px 520px at 70% -10%, rgba(76,163,255,.09), transparent 60%),
+      var(--bg);
+    color:var(--ink);
+    font-family:"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    min-height:100vh;
+    display:flex;flex-direction:column;align-items:center;
+    gap:18px;padding:28px 18px 40px;
+  }
+  header{text-align:center}
+  h1{font-size:clamp(20px,3vw,28px);letter-spacing:.4px;font-weight:650}
+  header p{color:var(--muted);font-size:13px;margin-top:6px}
+  code{
+    font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.92em;
+    background:#1a2233;padding:1px 5px;border-radius:4px;color:#9fd0ff;
+  }
+  #controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center}
+  button{
+    appearance:none;border:1px solid var(--edge);background:#171e2c;color:var(--ink);
+    padding:9px 18px;border-radius:9px;font-size:14px;font-weight:600;cursor:pointer;
+    transition:transform .06s ease, background .15s ease, border-color .15s ease, filter .15s ease;
+  }
+  button:hover{background:#1d2739;border-color:#33405c}
+  button:active{transform:translateY(1px)}
+  #sort{background:linear-gradient(180deg,#2ea8ff,#1668d8);border-color:#2f7fe0;color:#fff}
+  #sort:hover{filter:brightness(1.1)}
+  #stats{
+    display:flex;gap:16px;color:var(--muted);font-size:13px;
+    font-variant-numeric:tabular-nums;flex-wrap:wrap;justify-content:center;
+  }
+  #stats b{color:var(--ink);font-weight:600}
+  #stage{
+    width:min(980px,100%);
+    background:var(--panel);
+    border:1px solid var(--edge);
+    border-radius:14px;
+    padding:16px 14px 12px;
+    box-shadow:0 18px 50px rgba(0,0,0,.45);
+  }
+  #bars{
+    display:flex;align-items:flex-end;gap:2px;
+    height:clamp(240px,46vh,400px);
+  }
+  .bar{
+    flex:1 1 0;min-width:2px;
+    background-color:#3e7bfa;
+    box-shadow:
+      inset 0 12px 18px -6px rgba(255,255,255,.28),
+      inset 0 -12px 18px -8px rgba(0,0,0,.45);
+    border-radius:3px 3px 0 0;
+    transition:height 70ms linear, background-color .3s ease, box-shadow .3s ease;
+  }
+  .bar.cmp{
+    background-color:#ffa63d;
+    box-shadow:
+      inset 0 12px 18px -6px rgba(255,255,255,.35),
+      0 0 14px rgba(255,150,60,.5);
+  }
+  #bars.done .bar{
+    background-color:#2fbf71;
+    transition-delay:calc(var(--i,0)*14ms);
+  }
+  footer{color:var(--muted);font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Sorting Visualizer</h1>
+  <p>Bubble sort, one comparison at a time — driven entirely through <code>window.viz.sortStep()</code></p>
+</header>
+
+<div id="controls">
+  <button id="sort" type="button">&#9654; Sort</button>
+  <button id="shuffle" type="button">&#8646; Shuffle</button>
+  <button id="reset" type="button">&#8634; Reset</button>
+</div>
+
+<div id="stats">
+  <span>Comparisons <b id="stat-comp">0</b></span>
+  <span>Swaps <b id="stat-swaps">0</b></span>
+  <span>Status <b id="stat-state">Ready</b></span>
+</div>
+
+<div id="stage"><div id="bars"></div></div>
+
+<footer>Ascending order &middot; bar height proportional to value</footer>
+
+<script>
+(() => {
+  "use strict";
+
+  const BAR_COUNT = 44;
+  const MAX_VAL = 100;
+  const MIN_VAL = 6;
+
+  const barsEl   = document.getElementById("bars");
+  const statComp = document.getElementById("stat-comp");
+  const statSwaps= document.getElementById("stat-swaps");
+  const statState= document.getElementById("stat-state");
+
+  let arr = [];            // live array being sorted
+  let snapshot = [];       // last "fresh" array (load or shuffle) for Reset
+  let barEls = [];         // cached .bar elements
+  let prevH = [];          // last rendered heights (diff to keep DOM writes cheap)
+  let prevCmp = new Set(); // last highlighted indices
+
+  // bubble-sort cursor: one comparison per sortStep()
+  let pass = 0, idx = 0;
+  let comps = 0, swaps = 0;
+  let lastCmp = [];
+
+  let timer = null;        // animation interval handle
+  let doneTimer = null;    // "sorted" flash timeout
+
+  const randVal = () => MIN_VAL + Math.floor(Math.random() * (MAX_VAL - MIN_VAL + 1));
+
+  function randomize() {
+    arr = Array.from({ length: BAR_COUNT }, randVal);
+  }
+
+  function resetCursor() {
+    pass = 0; idx = 0; comps = 0; swaps = 0; lastCmp = [];
+  }
+
+  function isAscending(a) {
+    for (let k = 1; k < a.length; k++) if (a[k - 1] > a[k]) return false;
+    return true;
+  }
+
+  /* ---------- rendering ---------- */
+
+  function ensureBars() {
+    while (barEls.length < arr.length) {
+      const b = document.createElement("div");
+      b.className = "bar";
+      b.style.setProperty("--i", barEls.length);
+      barsEl.appendChild(b);
+      barEls.push(b);
+      prevH.push(NaN); // force first height write
+    }
+    while (barEls.length > arr.length) {
+      barEls.pop().remove();
+      prevH.pop();
+    }
+  }
+
+  function render() {
+    ensureBars();
+    const cmp = new Set(lastCmp);
+    for (let k = 0; k < arr.length; k++) {
+      const h = (arr[k] / MAX_VAL) * 100;
+      if (prevH[k] !== h) {
+        barEls[k].style.height = h + "%";
+        prevH[k] = h;
+      }
+      const on = cmp.has(k);
+      if (prevCmp.has(k) !== on) barEls[k].classList.toggle("cmp", on);
+    }
+    prevCmp = cmp;
+    paintStats();
+  }
+
+  function paintStats() {
+    statComp.textContent = comps;
+    statSwaps.textContent = swaps;
+    statState.textContent = timer ? "Sorting\u2026" : (isAscending(arr) ? "Sorted \u2713" : "Ready");
+  }
+
+  /* ---------- programmatic API (grading contract) ---------- */
+
+  window.viz = {
+    array() { return arr.slice(); },
+
+    setArray(a) {
+      stopAnim();
+      clearDoneFlash();
+      arr = Array.from(a != null ? a : [], Number);
+      snapshot = arr.slice();
+      resetCursor();
+      render();
+    },
+
+    // Performs exactly ONE comparison (and possible adjacent swap) of the
+    // bubble sort, redraws, and returns true iff the array is now ascending.
+    sortStep() {
+      const n = arr.length;
+      if (n > 1 && pass < n - 1) {
+        if (arr[idx] > arr[idx + 1]) {
+          const t = arr[idx]; arr[idx] = arr[idx + 1]; arr[idx + 1] = t;
+          swaps++;
+        }
+        comps++;
+        lastCmp = [idx, idx + 1];
+        idx++;
+        if (idx >= n - 1 - pass) { idx = 0; pass++; }
+      } else {
+        lastCmp = []; // sort finished; report state without touching data
+      }
+      render();
+      return isAscending(arr);
+    },
+
+    sorted() { return isAscending(arr); }
+  };
+
+  /* ---------- animation driver ---------- */
+
+  function stopAnim() {
+    if (timer) { clearInterval(timer); timer = null; paintStats(); }
+  }
+
+  function startSort() {
+    if (timer || arr.length < 2) return;
+    const perTick = Math.max(1, Math.ceil(arr.length / 9)); // scale speed to size
+    paintStats();
+    timer = setInterval(() => {
+      let done = false;
+      for (let s = 0; s < perTick && !done; s++) done = window.viz.sortStep();
+      if (done) {
+        stopAnim();
+        celebrate();
+      }
+    }, 16);
+  }
+
+  function celebrate() {
+    barsEl.classList.add("done");
+    clearTimeout(doneTimer);
+    doneTimer = setTimeout(() => barsEl.classList.remove("done"), 1400);
+  }
+
+  function clearDoneFlash() {
+    clearTimeout(doneTimer);
+    barsEl.classList.remove("done");
+  }
+
+  /* ---------- controls ---------- */
+
+  document.getElementById("sort").addEventListener("click", startSort);
+
+  document.getElementById("shuffle").addEventListener("click", () => {
+    stopAnim();
+    clearDoneFlash();
+    randomize();
+    snapshot = arr.slice();
+    resetCursor();
+    render();
+  });
+
+  document.getElementById("reset").addEventListener("click", () => {
+    stopAnim();
+    clearDoneFlash();
+    arr = snapshot.slice();
+    resetCursor();
+    render();
+  });
+
+  /* ---------- boot ---------- */
+
+  randomize();
+  snapshot = arr.slice();
+  render();
+})();
+</script>
+</body>
+</html>

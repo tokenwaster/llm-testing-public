@@ -1,12 +1,14 @@
+#!/usr/bin/env python3
 """Final performance benchmark against timing budgets."""
 import time
 import random
 from perf import common_elements, fib, count_pairs, dedupe_keep_order
 
-BUDGET = 2.0
+BUDGET = 2.0  # 2 seconds for all tests
 
 print("=== FINAL PERFORMANCE BENCHMARK ===\n")
 
+# Test 1: common_elements on two 200,000-element lists
 print("1. common_elements on 200,000 elements")
 a = list(range(100000)) + list(range(100000, 200000))
 b = list(range(50000, 250000))
@@ -17,6 +19,7 @@ status = "PASS" if elapsed < BUDGET else "FAIL"
 print(f"   Time: {elapsed:.4f}s / {BUDGET}s [{status}]")
 print(f"   Result: {len(result)} common elements\n")
 
+# Test 2: fib(300)
 print("2. fib(300)")
 start = time.time()
 result = fib(300)
@@ -25,6 +28,7 @@ status = "PASS" if elapsed < BUDGET else "FAIL"
 print(f"   Time: {elapsed:.4f}s / {BUDGET}s [{status}]")
 print(f"   Result: {str(result)[:50]}... ({len(str(result))} digits)\n")
 
+# Test 3: count_pairs on 100,000 elements
 print("3. count_pairs on 100,000 elements")
 random.seed(42)
 nums = [random.randint(0, 100000) for _ in range(100000)]
@@ -35,6 +39,7 @@ status = "PASS" if elapsed < BUDGET else "FAIL"
 print(f"   Time: {elapsed:.4f}s / {BUDGET}s [{status}]")
 print(f"   Result: {result} pairs\n")
 
+# Test 4: dedupe_keep_order on 200,000 items
 print("4. dedupe_keep_order on 200,000 items")
 items = list(range(100000)) + list(range(100000))
 start = time.time()

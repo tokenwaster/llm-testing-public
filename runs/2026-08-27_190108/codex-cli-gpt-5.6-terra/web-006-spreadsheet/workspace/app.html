@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #17212b; }
+  .app { min-width: 600px; min-height: 400px; padding: 24px; }
+  h1 { margin: 0 0 16px; font-size: 22px; }
+  .sheet-wrap { overflow: auto; border: 1px solid #b9c3cc; background: white; }
+  .grid {
+    display: grid;
+    grid-template-columns: 48px repeat(10, minmax(72px, 1fr));
+    min-width: 820px;
+  }
+  .corner, .col-header, .row-header {
+    background: #e8edf2;
+    border-right: 1px solid #b9c3cc;
+    border-bottom: 1px solid #b9c3cc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    height: 34px;
+  }
+  .cell {
+    width: 100%;
+    height: 34px;
+    border: 0;
+    border-right: 1px solid #d4dbe1;
+    border-bottom: 1px solid #d4dbe1;
+    padding: 5px 7px;
+    font: inherit;
+    color: #17212b;
+    background: #fff;
+  }
+  .cell:focus { outline: 2px solid #2878d4; outline-offset: -2px; background: #f7fbff; }
+  .actions { margin-top: 16px; display: flex; gap: 12px; align-items: flex-start; }
+  button { padding: 8px 14px; border: 0; border-radius: 4px; background: #2878d4; color: white; font: inherit; cursor: pointer; }
+  button:hover { background: #1c63b1; }
+  textarea { width: 460px; height: 90px; resize: vertical; font-family: monospace; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Mini Spreadsheet</h1>
+  <div class="sheet-wrap"><div class="grid" id="grid"></div></div>
+  <div class="actions">
+    <button id="export" type="button">Export CSV</button>
+    <textarea id="csv" aria-label="Exported CSV" readonly></textarea>
+  </div>
+</div>
+
+<script>
+(() => {
+  const cols = "ABCDEFGHIJ".split("");
+  const rows = Array.from({ length: 10 }, (_, i) => i + 1);
+  const rawValues = Object.create(null);
+  const grid = document.getElementById("grid");
+
+  const corner = document.createElement("div");
+  corner.className = "corner";
+  grid.appendChild(corner);
+  cols.forEach(col => {
+    const header = document.createElement("div");
+    header.className = "col-header";
+    header.textContent = col;
+    grid.appendChild(header);
+  });
+
+  rows.forEach(row => {
+    const header = document.createElement("div");
+    header.className = "row-header";
+    header.textContent = row;
+    grid.appendChild(header);
+
+    cols.forEach(col => {
+      const address = col + row;
+      rawValues[address] = "";
+      const input = document.createElement("input");
+      input.className = "cell";
+      input.id = "cell-" + address;
+      input.setAttribute("aria-label", address);
+      input.addEventListener("focus", () => { input.value = rawValues[address]; });
+      input.addEventListener("blur", () => {
+        rawValues[address] = input.value;
+        recalculate();
+      });
+      input.addEventListener("keydown", event => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          input.blur();
+        }
+      });
+      grid.appendChild(input);
+    });
+  });
+
+  function validAddress(address) {
+    return /^[A-J](?:[1-9]|10)$/.test(address);
+  }
+
+  function tokenize(source) {
+    const tokens = [];
+    let i = 0;
+    while (i < source.length) {
+      const rest = source.slice(i);
+      if (/^\s/.test(rest)) { i++; continue; }
+      const number = rest.match(/^(?:\d+(?:\.\d*)?|\.\d+)/);
+      if (number) {
+        tokens.push({ type: "number", value: Number(number[0]) });
+        i += number[0].length;
+        continue;
+      }
+      const word = rest.match(/^[A-Za-z]+\d+/);
+      if (word) {
+        tokens.push({ type: "ref", value: word[0].toUpperCase() });
+        i += word[0].length;
+        continue;
+      }
+      if ("+-*/()".includes(source[i])) {
+        tokens.push({ type: source[i], value: source[i] });
+        i++;
+        continue;
+      }
+      throw new Error("Bad token");
+    }
+    return tokens;
+  }
+
+  function recalculate() {
+    const states = Object.create(null);
+    const results = Object.create(null);
+    const stack = [];
+    const cycleCells = new Set();
+
+    function error(kind) { return { kind }; }
+    function number(value) { return { kind: "number", value }; }
+
+    function evaluate(address) {
+      if (states[address] === "done") return results[address];
+      if (states[address] === "visiting") {
+        const start = stack.indexOf(address);
+        stack.slice(start).forEach(cell => cycleCells.add(cell));
+        return error("cycle");
+      }
+
+      states[address] = "visiting";
+      stack.push(address);
+      let result;
+      const raw = rawValues[address] || "";
+
+      if (!raw.startsWith("=")) {
+        if (raw.trim() === "") result = number(0);
+        else if (raw.trim() !== "" && Number.isFinite(Number(raw))) result = number(Number(raw));
+        else result = { kind: "text", value: raw };
+      } else {
+        try {
+          const tokens = tokenize(raw.slice(1));
+          let pos = 0;
+          const peek = () => tokens[pos];
+          const consume = type => {
+            if (!peek() || peek().type !== type) throw new Error("Syntax");
+            return tokens[pos++];
+          };
+          const numeric = value => {
+            if (value.kind === "number") return value.value;
+            if (value.kind === "cycle") throw error("cycle");
+            throw error("err");
+          };
+          const factor = () => {
+            if (peek() && peek().type === "number") return numeric(consume("number"));
+            if (peek() && peek().type === "ref") {
+              const ref = consume("ref").value;
+              if (!validAddress(ref)) throw new Error("Invalid reference");
+              return numeric(evaluate(ref));
+            }
+            if (peek() && peek().type === "(") {
+              consume("(");
+              const value = expression();
+              consume(")");
+              return value;
+            }
+            if (peek() && peek().type === "+") { consume("+"); return factor(); }
+            if (peek() && peek().type === "-") { consume("-"); return -factor(); }
+            throw new Error("Syntax");
+          };
+          const term = () => {
+            let value = factor();
+            while (peek() && (peek().type === "*" || peek().type === "/")) {
+              const op = tokens[pos++].type;
+              const right = factor();
+              value = op === "*" ? value * right : value / right;
+            }
+            return value;
+          };
+          const expression = () => {
+            let value = term();
+            while (peek() && (peek().type === "+" || peek().type === "-")) {
+              const op = tokens[pos++].type;
+              const right = term();
+              value = op === "+" ? value + right : value - right;
+            }
+            return value;
+          };
+          const value = expression();
+          if (pos !== tokens.length || !Number.isFinite(value)) throw new Error("Invalid formula");
+          result = number(value);
+        } catch (e) {
+          result = e && e.kind === "cycle" ? error("cycle") : error("err");
+        }
+      }
+
+      stack.pop();
+      states[address] = "done";
+      if (cycleCells.has(address)) result = error("cycle");
+      else if (result.kind === "cycle") result = error("err");
+      results[address] = result;
+      return result;
+    }
+
+    Object.keys(rawValues).forEach(evaluate);
+
+    Object.keys(rawValues).forEach(address => {
+      const input = document.getElementById("cell-" + address);
+      if (document.activeElement !== input) {
+        const result = results[address];
+        input.value = result.kind === "number" ? String(result.value) :
+                      result.kind === "text" ? result.value :
+                      result.kind === "cycle" ? "#CYCLE" : "#ERR";
+      }
+    });
+
+    return results;
+  }
+
+  function displayed(address) {
+    const input = document.getElementById("cell-" + address);
+    return input.value;
+  }
+
+  window.sheet = {
+    set(address, value) {
+      address = String(address).toUpperCase();
+      if (!validAddress(address)) throw new Error("Invalid cell address");
+      rawValues[address] = String(value);
+      recalculate();
+    },
+    get(address) {
+      address = String(address).toUpperCase();
+      if (!validAddress(address)) throw new Error("Invalid cell address");
+      return displayed(address);
+    },
+    raw(address) {
+      address = String(address).toUpperCase();
+      if (!validAddress(address)) throw new Error("Invalid cell address");
+      return rawValues[address];
+    }
+  };
+
+  document.getElementById("export").addEventListener("click", () => {
+    recalculate();
+    const escapeCSV = value => /[",\n\r]/.test(value) ? '"' + value.replace(/"/g, '""') + '"' : value;
+    document.getElementById("csv").value = rows.map(row =>
+      cols.map(col => escapeCSV(displayed(col + row))).join(",")
+    ).join("\n");
+  });
+
+  recalculate();
+})();
+</script>
+</body>
+</html>

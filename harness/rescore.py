@@ -45,7 +45,7 @@ def _rescore(selector, progress=print, force: bool = False) -> int:
             "against, which can wrongly zero a correct submission. Wait for the "
             "run to finish, or pass --force if you accept that risk.")
 
-    tasks = {t.id: t for t in load_tasks()}
+    tasks = {t.id: t for t in load_tasks(include_staging=True)}
     n = 0
     skipped_human: list[str] = []
     for run_dir in sorted(p for p in config.RUNS_DIR.iterdir() if p.is_dir()):

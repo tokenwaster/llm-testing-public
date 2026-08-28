@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spreadsheet</title>
+<style>
+#app{min-width:600px;min-height:400px;font-family:sans-serif;padding:10px}
+table{border-collapse:collapse}
+th,td{border:1px solid #ccc;padding:2px}
+th{background:#f0f0f0;text-align:center;font-weight:normal}
+input{width:70px;height:22px;border:none;outline:none;text-align:right;font-family:monospace;padding:0 4px}
+input:focus{background:#eef}
+#csv{width:100%;margin-top:8px;font-family:monospace}
+button{margin-top:8px}
+</style>
+</head>
+<body>
+<div id="app">
+<table id="grid"></table>
+<div>
+<button id="export">Export CSV</button>
+<textarea id="csv" rows="12"></textarea>
+</div>
+</div>
+<script>
+const COLS=['A','B','C','D','E','F','G','H','I','J'];
+const ROWS=10;
+let cellsRaw={};
+let displayMap={};
+
+function initCells(){
+  for(let r=1;r<=ROWS;r++){
+    for(const c of COLS){
+      cellsRaw[c+r]='';
+    }
+  }
+}
+function buildTable(){
+  const table=document.getElementById('grid');
+  const thead=document.createElement('thead');
+  const hr=document.createElement('tr');
+  hr.appendChild(document.createElement('th'));
+  COLS.forEach(c=>{const th=document.createElement('th');th.textContent=c;hr.appendChild(th);});
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody=document.createElement('tbody');
+  for(let r=1;r<=ROWS;r++){
+    const tr=document.createElement('tr');
+    const th=document.createElement('th');th.textContent=r;tr.appendChild(th);
+    COLS.forEach(c=>{
+      const td=document.createElement('td');
+      const input=document.createElement('input');
+      input.type='text';
+      input.id='cell-'+c+r;
+      td.appendChild(input);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+}
+function recalc(){
+  const isFormula={};
+  const formulaValid={};
+  const errorCells=new Set();
+  const adj={};
+  for(const id in cellsRaw){
+    const raw=cellsRaw[id]||'';
+    if(raw.startsWith('=')){
+      isFormula[id]=true;
+      const body=raw.slice(1);
+      const refRegex=/[A-Z][0-9]+/g;
+      let m,valid=true,refs=[];
+      while((m=refRegex.exec(body))!==null){
+        const ref=m[0];
+        if(!/^[A-J]([1-9]|10)$/.test(ref)){valid=false;break;}
+        refs.push(ref);
+      }
+      if(valid){
+        const bodyNoRefs=body.replace(/[A-J]([1-9]|10)/g,'0');
+        if(!/^[\d\.\+\-\*\/\(\)\s]+$/.test(bodyNoRefs)) valid=false;
+        else{
+          try{Function('return ('+bodyNoRefs+')')();}catch(e){valid=false;}
+        }
+      }
+      if(!valid){formulaValid[id]=false;errorCells.add(id);}
+      else{formulaValid[id]=true;adj[id]=refs;}
+    }else{
+      isFormula[id]=false;
+    }
+  }
+  const state={};
+  const stack=[];
+  const cycleNodes=new Set();
+  function dfs(u){
+    state[u]=1;stack.push(u);
+    const neighbors=adj[u]||[];
+    for(const v of neighbors){
+      if(!formulaValid[v]||!isFormula[v]) continue;
+      if(state[v]===undefined){dfs(v);}
+      else if(state[v]===1){
+        const idx=stack.indexOf(v);
+        for(let i=idx;i<stack.length;i++) cycleNodes.add(stack[i]);
+      }
+    }
+    stack.pop();state[u]=2;
+  }
+  for(const id in cellsRaw){
+    if(isFormula[id]&&formulaValid[id]&&state[id]===undefined) dfs(id);
+  }
+  const numericCache={};
+  function getNumericValue(id){
+    if(numericCache.hasOwnProperty(id)) return numericCache[id];
+    if(cycleNodes.has(id)){numericCache[id]=NaN;return NaN;}
+    if(errorCells.has(id)){numericCache[id]=NaN;return NaN;}
+    const raw=cellsRaw[id]||'';
+    if(raw.startsWith('=')){
+      if(!formulaValid[id]){numericCache[id]=NaN;return NaN;}
+      const body=raw.slice(1);
+      let expr;
+      try{
+        expr=body.replace(/[A-J]([1-9]|10)/g,(match)=>{
+          const v=getNumericValue(match);
+          return isNaN(v)?'NaN':String(v);
+        });
+        const res=Function('return ('+expr+')')();
+        if(typeof res!=='number'||!isFinite(res)) numericCache[id]=NaN;
+        else numericCache[id]=res;
+        return numericCache[id];
+      }catch(e){numericCache[id]=NaN;return NaN;}
+    }else{
+      if(raw===''){numericCache[id]=0;return 0;}
+      const num=parseFloat(raw);
+      if(!isNaN(num)){numericCache[id]=num;return num;}
+      numericCache[id]=NaN;return NaN;
+    }
+  }
+  const newDisplay={};
+  for(const id in cellsRaw){
+    if(cycleNodes.has(id)){newDisplay[id]='#CYCLE';continue;}
+    if(errorCells.has(id)){newDisplay[id]='#ERR';continue;}
+    const raw=cellsRaw[id]||'';
+    if(raw.startsWith('=')){
+      const v=getNumericValue(id);
+      if(isNaN(v)) newDisplay[id]='#ERR';
+      else newDisplay[id]=Number.isInteger(v)?String(v):String(parseFloat(v.toFixed(10)));
+    }else{
+      newDisplay[id]=raw;
+    }
+  }
+  displayMap=newDisplay;
+  for(const id in cellsRaw){
+    const input=document.getElementById('cell-'+id);
+    if(!input) continue;
+    if(document.activeElement!==input) input.value=displayMap[id]??'';
+    input.dataset.raw=cellsRaw[id]??'';
+  }
+}
+function attachListeners(){
+  for(let r=1;r<=ROWS;r++){
+    for(const c of COLS){
+      const id=c+r;
+      const input=document.getElementById('cell-'+id);
+      input.addEventListener('focus',()=>{input.value=cellsRaw[id]??'';});
+      input.addEventListener('blur',()=>{
+        const newRaw=input.value;
+        if(cellsRaw[id]!==newRaw){cellsRaw[id]=newRaw;recalc();}
+      });
+      input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();input.blur();}});
+    }
+  }
+}
+initCells();
+buildTable();
+attachListeners();
+recalc();
+document.getElementById('export').addEventListener('click',()=>{
+  const lines=[];
+  for(let r=1;r<=ROWS;r++){
+    const row=[];
+    for(const c of COLS){
+      const id=c+r;
+      row.push(displayMap[id]??'');
+    }
+    lines.push(row.join(','));
+  }
+  document.getElementById('csv').value=lines.join('\n');
+});
+window.sheet={
+  set(ref,val){if(!/^[A-J]([1-9]|10)$/.test(ref))return;cellsRaw[ref]=val;recalc();},
+  get(ref){return displayMap[ref]??'';},
+  raw(ref){return cellsRaw[ref]??'';}
+};
+</script>
+</body>
+</html>

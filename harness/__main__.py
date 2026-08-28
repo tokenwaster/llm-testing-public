@@ -25,7 +25,7 @@ def cmd_add(args) -> int:
 
 def cmd_list(_args) -> int:
     models = load_models()
-    tasks = load_tasks()
+    tasks = load_tasks(include_staging=True)
     print(f"Models ({len(models)} enabled):")
     for m in models:
         loc = "local" if m.local else "cloud"
@@ -34,13 +34,14 @@ def cmd_list(_args) -> int:
     print(f"\nTasks ({len(tasks)}):")
     for t in tasks:
         print(f"  {t.id:28s} T{t.tier} {t.category:16s} "
-              f"{t.scoring_type:7s} hash {t.content_hash}  {t.title}")
+              f"{t.scoring_type:7s} hash {t.content_hash}  {t.title}"
+              f"{'  [STAGING: run by name, counted toward nothing]' if t.staging else ''}")
     return 0
 
 
 def cmd_run(args) -> int:
     models = load_models()
-    tasks = load_tasks()
+    tasks = load_tasks(include_staging=True)
     if args.models:
         wanted = [w.strip() for w in args.models.split(",")]
         missing = [w for w in wanted if not any(m.name == w for m in models)]
@@ -55,8 +56,13 @@ def cmd_run(args) -> int:
     elif args.tasks == "new":
         tasks = [t for t in tasks if t.id in config.NEW_TASKS]
     elif args.tasks:
-        tasks = [t for t in tasks if fnmatch.fnmatch(t.id, args.tasks)
-                 or fnmatch.fnmatch(t.category, args.tasks)]
+        pats = [p.strip() for p in args.tasks.split(",") if p.strip()]
+        tasks = [t for t in tasks
+                 if any(fnmatch.fnmatch(t.id, p) or fnmatch.fnmatch(t.category, p)
+                        for p in pats)
+                 and (not t.staging or t.id in pats)]
+    else:
+        tasks = [t for t in tasks if not t.staging]
     if args.tier:
         tasks = [t for t in tasks if t.tier == args.tier]
     if not models:

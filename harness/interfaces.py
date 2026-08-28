@@ -33,7 +33,8 @@ PRESETS = {
     "anthropic-api": {
         "kind": "anthropic", "base_url": "https://api.anthropic.com",
         "key_env": "ANTHROPIC_API_KEY",
-        "note": "Claude via API key (claude-cli models already cover subscription)"},
+        "note": "Claude via API key (claude-cli models already cover subscription; "
+                "codex-cli models ride the ChatGPT subscription the same way)"},
     "custom": {
         "kind": "openai", "base_url": "", "key_env": "",
         "note": "any OpenAI-compatible endpoint"},

@@ -1,8 +1,10 @@
+#!/usr/bin/env python3
 """Comprehensive correctness verification for optimized functions."""
 from perf import common_elements, fib, count_pairs, dedupe_keep_order
 
 print("=== COMPREHENSIVE CORRECTNESS VERIFICATION ===\n")
 
+# Test common_elements with various inputs
 print("1. Testing common_elements...")
 tests = [
     ([], [], []),
@@ -17,6 +19,7 @@ for a, b, expected in tests:
     assert result == expected, f"common_elements({a}, {b}): expected {expected}, got {result}"
     print(f"   PASS: common_elements({a}, {b}) = {result}")
 
+# Test fib
 print("\n2. Testing fib...")
 fib_tests = [
     (0, 0),
@@ -35,13 +38,14 @@ for n, expected in fib_tests:
     assert result == expected, f"fib({n}): expected {expected}, got {result}"
     print(f"   PASS: fib({n}) = {result}")
 
+# Test count_pairs
 print("\n3. Testing count_pairs...")
 count_tests = [
-    ([1, 2, 3, 4, 5], 5, 2),
-    ([1, 2, 3], 4, 1),
-    ([0, 0, 0], 0, 3),
-    ([1, 1, 1, 1], 2, 6),
-    ([2, 4, 3, 5, 7], 9, 2),
+    ([1, 2, 3, 4, 5], 5, 2),  # (1,4), (2,3)
+    ([1, 2, 3], 4, 1),  # (1,3)
+    ([0, 0, 0], 0, 3),  # C(3,2) = 3
+    ([1, 1, 1, 1], 2, 6),  # C(4,2) = 6
+    ([2, 4, 3, 5, 7], 9, 2),  # (2,7), (4,5)
     ([], 0, 0),
     ([1], 5, 0),
 ]
@@ -50,6 +54,7 @@ for nums, target, expected in count_tests:
     assert result == expected, f"count_pairs({nums}, {target}): expected {expected}, got {result}"
     print(f"   PASS: count_pairs({nums}, {target}) = {result}")
 
+# Test dedupe_keep_order
 print("\n4. Testing dedupe_keep_order...")
 dedupe_tests = [
     ([], []),

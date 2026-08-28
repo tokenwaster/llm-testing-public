@@ -35,6 +35,7 @@ class ChatResult:
     turns: int | None = None
     cost_usd: float | None = None
     served_by: str | None = None
+    tool_attempts: int | None = None
 
 
 class AdapterError(Exception):
@@ -121,6 +122,24 @@ _INFRA_PHRASES = (
 def _is_infra_failure(text: str) -> bool:
     low = (text or "").lower()
     return any(p in low for p in _INFRA_PHRASES)
+
+
+_AUTH_PHRASES = (
+    "failed to authenticate",
+    "oauth session expired",
+    "not logged in",
+    "please run /login",
+    "please log in",
+    "login required",
+    "authentication_error",
+    "invalid api key",
+    "invalid_api_key",
+)
+
+
+def _is_auth_failure(text: str) -> bool:
+    low = (text or "").lower()
+    return any(p in low for p in _AUTH_PHRASES)
 
 
 def _classify_http(status: int, body: str, headers=None) -> AdapterError:
@@ -298,9 +317,18 @@ class OpenAICompatAdapter(BaseAdapter):
                     raise _classify_http(resp.status_code, resp.text, resp.headers)
                 for line in resp.iter_lines():
                     if (now_ms() - t0) / 1000 > timeout_s:
+                        vis = len("".join(text_parts))
+                        if reasoning_chars or vis:
+                            raise AdapterError(
+                                f"still generating at the {timeout_s}s "
+                                f"deadline — {reasoning_chars:,} chars of reasoning "
+                                f"and {vis:,} of answer; the model was working "
+                                f"and did not finish inside the budget every "
+                                f"other model was given",
+                                kind="think_timeout", retryable=False)
                         raise AdapterError(
-                            f"exceeded the {timeout_s}s budget "
-                            f"(streamed {len(''.join(text_parts))} chars)",
+                            f"exceeded the {timeout_s}s budget — nothing "
+                            f"arrived at all (no answer, no reasoning)",
                             kind="timeout", retryable=True)
                     if not line.startswith("data:"):
                         continue
@@ -534,6 +562,7 @@ class AnthropicAdapter(BaseAdapter):
         tokens_in = tokens_out = None
         cache_read = cache_write = 0
         stop_reason = None
+        think_chars = 0
         guard = _LoopGuard()
         try:
             with httpx.stream("POST", self._url(), headers=self._headers(), json=payload,
@@ -543,9 +572,18 @@ class AnthropicAdapter(BaseAdapter):
                     raise _classify_http(resp.status_code, resp.text, resp.headers)
                 for line in resp.iter_lines():
                     if (now_ms() - t0) / 1000 > timeout_s:
+                        vis = len("".join(text_parts))
+                        if think_chars or vis:
+                            raise AdapterError(
+                                f"still generating at the {timeout_s}s "
+                                f"deadline — {think_chars:,} chars of reasoning "
+                                f"and {vis:,} of answer; the model was working "
+                                f"and did not finish inside the budget every "
+                                f"other model was given",
+                                kind="think_timeout", retryable=False)
                         raise AdapterError(
-                            f"exceeded the {timeout_s}s budget "
-                            f"(streamed {len(''.join(text_parts))} chars)",
+                            f"exceeded the {timeout_s}s budget — nothing "
+                            f"arrived at all (no answer, no reasoning)",
                             kind="timeout", retryable=True)
                     if not line.startswith("data:"):
                         continue
@@ -569,6 +607,8 @@ class AnthropicAdapter(BaseAdapter):
                         d = data.get("delta") or {}
                         piece = d.get("text")
                         thinking = d.get("thinking")
+                        if thinking:
+                            think_chars += len(thinking)
                         if piece:
                             if ttft is None:
                                 ttft = now_ms() - t0
@@ -629,7 +669,7 @@ class ClaudeCLIAdapter(BaseAdapter):
             raise AdapterError("claude CLI not found on PATH", kind="connect", retryable=False)
         prompt = "\n\n".join(m["content"] for m in messages if m["role"] == "user")
         cmd = [exe, "-p", "--output-format", "json", "--max-turns", "1",
-               "--model", self.model.model,
+               "--model", self.model.model, "--tools", "",
                "--disallowedTools", ",".join(self.DISALLOWED)]
         if self.model.effort:
             cmd += ["--effort", self.model.effort]
@@ -672,6 +712,10 @@ class ClaudeCLIAdapter(BaseAdapter):
                 except (TypeError, ValueError):
                     dump = str(data)[:300]
                 detail = str(data.get("subtype") or data.get("error") or dump)
+            if data and data.get("subtype") == "error_max_turns":
+                used = ", ".join(data.get("_tools_used") or []) or "a tool"
+                detail = (f"spent its single turn on {used} instead of "
+                          f"answering (error_max_turns)")
             is_limit, reset_at, reset_hint = _detect_usage_limit(str(detail))
             if is_limit:
                 disp = reset_hint or (f"resets {_fmt_epoch(reset_at)}"
@@ -681,6 +725,11 @@ class ClaudeCLIAdapter(BaseAdapter):
                     + (f" — {disp}" if disp else ""),
                     kind="usage_limit", retryable=False,
                     reset_at=reset_at, reset_hint=reset_hint)
+            if _is_auth_failure(str(detail)):
+                raise AdapterError(
+                    f"claude CLI is not authenticated — run `claude login` "
+                    f"and re-run this model ({str(detail)[:200]})",
+                    kind="auth", retryable=False)
             if _is_infra_failure(str(detail)):
                 raise AdapterError(f"claude CLI failed: {str(detail)[:300]}",
                                    kind="infra", retryable=False)
@@ -716,6 +765,254 @@ class ClaudeCLIAdapter(BaseAdapter):
             served_by=served,
         )
 
+
+
+_CODEX_LIMIT_PHRASES = (
+    "usage limit", "hit your limit", "reached your limit", "plan limit",
+    "limit resets", "weekly limit", "5-hour limit", "daily limit",
+    "usage_limit",
+)
+
+CODEX_TEXT_ONLY_DISABLED = ("browser_use", "browser_use_external",
+                            "computer_use", "image_generation", "apps",
+                            "multi_agent", "memories", "goals", "hooks")
+
+
+def _codex_exe() -> str | None:
+    import glob
+    import os as _os
+    import shutil
+    from pathlib import Path
+    env = _os.environ.get("CODEX_EXE")
+    if env and Path(env).is_file():
+        return env
+    found = shutil.which("codex")
+    if found:
+        return found
+    base = _os.environ.get("LOCALAPPDATA")
+    if base:
+        cands = glob.glob(str(Path(base) / "OpenAI" / "Codex" / "bin" / "*"
+                              / "codex.exe"))
+        if cands:
+            return max(cands, key=lambda p: _os.path.getmtime(p))
+    return None
+
+
+class CodexCLIAdapter(BaseAdapter):
+    """ChatGPT subscription via `codex exec --json`, the way claude-cli rides
+    the Claude subscription via `claude -p`. The text-only lane runs in an
+    empty read-only sandbox with the user's config ignored (it carries live
+    web search, plugins and MCP servers), the shell environment stripped and
+    the browser/computer-use/apps features disabled; a command that still
+    executes fails the attempt, because this avenue is a text reply.
+
+    The agentic lane uses `--approve-for-me` (workspace-write sandbox with
+    codex's automatic approval reviewer). This is NOT a pinned deny-all
+    sandbox: the auto-reviewer may grant escalations (network, writes outside
+    the workspace). Measured on codex 2026-08: `-s workspace-write` alone or
+    with approval_policy="never" blocks EVERY write headless ("read-only
+    sandbox; rejected by user approval settings"), zeroing all agentic tasks
+    — --approve-for-me is the only combination that works non-interactively,
+    and `-s` cannot be combined with it (CLI arg conflict)."""
+
+    agent_harness = "codex-cli"
+
+    def _base(self, exe: str, cwd: str) -> list[str]:
+        cmd = [exe, "exec", "--json", "--ephemeral", "--skip-git-repo-check",
+               "--ignore-user-config", "-C", cwd, "-m", self.model.model]
+        if self.model.effort:
+            cmd += ["-c", f'model_reasoning_effort="{self.model.effort}"']
+        cmd += list(self.model.extra.get("cli_args", []))
+        return cmd
+
+    def chat(self, messages, system=None, tools=None, timeout_s=180) -> ChatResult:
+        import tempfile
+        if tools:
+            raise AdapterError("codex-cli adapter is single-turn text only "
+                               "(set supports_tools: false)", kind="api",
+                               retryable=False)
+        exe = _codex_exe()
+        if not exe:
+            raise AdapterError("codex CLI not found (PATH, CODEX_EXE, or the "
+                               "Codex app's bin/)", kind="connect",
+                               retryable=False)
+        prompt = "\n\n".join(m["content"] for m in messages if m["role"] == "user")
+        if system:
+            prompt = system + "\n\n" + prompt
+        with tempfile.TemporaryDirectory(prefix="llmtest-sandbox-",
+                                         ignore_cleanup_errors=True) as sandbox:
+            cmd = self._base(exe, sandbox) + [
+                "-s", "read-only",
+                "-c", 'shell_environment_policy.inherit="none"',
+                "-c", 'web_search="disabled"']
+            for feat in CODEX_TEXT_ONLY_DISABLED:
+                cmd += ["--disable", feat]
+            cmd.append("-")
+            t0 = now_ms()
+            data = _stream_codex_cli(cmd, prompt, sandbox, timeout_s)
+        if data.get("_commands_run"):
+            raise AdapterError(
+                f"codex executed {data['_commands_run']} shell command(s) in "
+                "the text-only lane — the subscription avenue is a text reply, "
+                "not an agent run", kind="tool_use", retryable=False)
+        return self._parse_result(data, now_ms() - t0)
+
+    def chat_agentic(self, prompt: str, workspace, max_turns: int,
+                     timeout_s: int) -> ChatResult:
+        exe = _codex_exe()
+        if not exe:
+            raise AdapterError("codex CLI not found (PATH, CODEX_EXE, or the "
+                               "Codex app's bin/)", kind="connect",
+                               retryable=False)
+        cmd = self._base(exe, str(workspace)) + ["--approve-for-me",
+                                                 "-c", 'web_search="disabled"']
+        for feat in ("browser_use", "browser_use_external", "computer_use",
+                     "image_generation", "apps", "multi_agent", "memories",
+                     "goals", "hooks"):
+            cmd += ["--disable", feat]
+        cmd.append("-")
+        t0 = now_ms()
+        data = _stream_codex_cli(cmd, prompt, str(workspace), timeout_s)
+        res = self._parse_result(data, now_ms() - t0)
+        res.turns = (data.get("_commands_run") or 0) + 1
+        return res
+
+    def _parse_result(self, data: dict, total_ms: float) -> ChatResult:
+        err = data.get("_error")
+        if err:
+            low = str(err).lower()
+            if any(p in low for p in _CODEX_LIMIT_PHRASES):
+                raise AdapterError(
+                    f"ChatGPT subscription usage limit reached — {str(err)[:200]}",
+                    kind="usage_limit", retryable=False,
+                    reset_hint=str(err)[:120])
+            if _is_auth_failure(str(err)):
+                raise AdapterError(
+                    f"codex CLI is not authenticated — sign in to the Codex "
+                    f"app / `codex login` and re-run this model "
+                    f"({str(err)[:200]})", kind="auth", retryable=False)
+            if _is_infra_failure(str(err)):
+                raise AdapterError(f"codex CLI failed: {str(err)[:300]}",
+                                   kind="infra", retryable=False)
+            raise AdapterError(f"codex CLI failed: {str(err)[:300]}",
+                               kind="api", retryable=True)
+        usage = data.get("usage") or {}
+        text = "\n\n".join(data.get("_texts") or [])
+        out_tok = usage.get("output_tokens")
+        stop = "end_turn"
+        over_cap = None
+        cap = getattr(getattr(self, "model", None), "max_tokens", None)
+        if cap and out_tok and out_tok > cap:
+            keep = max(0, len(text) - (out_tok - cap) * 4)
+            over_cap = out_tok
+            text, out_tok, stop = text[:keep], cap, "length"
+        return ChatResult(
+            text=text,
+            total_ms=total_ms,
+            ttft_ms=None,
+            first_text_ms=data.get("_first_text_ms"),
+            tokens_in=usage.get("input_tokens"),
+            tokens_out=out_tok,
+            over_cap_tokens=over_cap,
+            reasoning_tokens=usage.get("reasoning_output_tokens"),
+            cache_read_tokens=usage.get("cached_input_tokens") or None,
+            cache_write_tokens=usage.get("cache_write_input_tokens") or None,
+            stop_reason=stop,
+            served_by=None,
+            tool_attempts=((data.get("_commands_blocked") or 0)
+                           + (data.get("_commands_run") or 0)) or None,
+        )
+
+
+def _stream_codex_cli(cmd: list[str], prompt: str, cwd: str,
+                      timeout_s: int) -> dict:
+    import queue as _queue
+    import subprocess
+    import threading
+
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, cwd=cwd, text=True,
+        encoding="utf-8", errors="replace", bufsize=1,
+        env=_cli_env(), start_new_session=True)
+    lines: _queue.Queue = _queue.Queue()
+
+    def _pump():
+        try:
+            for line in proc.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=_pump, daemon=True).start()
+    try:
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+    except OSError:
+        pass
+
+    t0 = now_ms()
+    out: dict = {"_texts": [], "_commands_run": 0, "_commands_blocked": 0,
+                 "_first_text_ms": None, "usage": None, "_error": None}
+    tail: list[str] = []
+    saw_turn_end = False
+    try:
+        while True:
+            if (now_ms() - t0) / 1000 > timeout_s:
+                raise AdapterError(f"codex CLI exceeded the {timeout_s}s budget",
+                                   kind="timeout", retryable=True)
+            try:
+                line = lines.get(timeout=1.0)
+            except _queue.Empty:
+                continue
+            if line is None:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            tail.append(line[:200])
+            del tail[:-5]
+            ev = _safe_json(line)
+            if not ev:
+                if "exec_command failed" in line or "blocked by policy" in line:
+                    out["_commands_blocked"] += 1
+                continue
+            kind = ev.get("type")
+            if kind == "item.completed":
+                item = ev.get("item") or {}
+                itype = item.get("type")
+                if itype == "agent_message":
+                    txt = item.get("text") or ""
+                    if txt.strip() and out["_first_text_ms"] is None:
+                        out["_first_text_ms"] = now_ms() - t0
+                    out["_texts"].append(txt)
+                elif itype == "command_execution":
+                    if item.get("status") in ("failed", "declined", "rejected"):
+                        out["_commands_blocked"] += 1
+                    else:
+                        out["_commands_run"] += 1
+            elif kind == "turn.completed":
+                out["usage"] = ev.get("usage") or {}
+                saw_turn_end = True
+            elif kind in ("turn.failed", "error"):
+                e = ev.get("error") or ev.get("message") or ev
+                out["_error"] = (e.get("message") if isinstance(e, dict)
+                                 else str(e))
+                saw_turn_end = True
+    finally:
+        _terminate_tree(proc)
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+    if not saw_turn_end and not out["_error"]:
+        out["_error"] = ("codex CLI produced no turn.completed event: "
+                         + " | ".join(tail)[:300])
+    return out
 
 
 class MockAdapter(BaseAdapter):
@@ -796,13 +1093,25 @@ def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str,
     first_text_ms: float | None = None
     final: dict | None = None
     tail: list[str] = []
+    tools_used: list[str] = []
+    think_chars = 0
+    text_chars = 0
 
     try:
         while True:
             elapsed = (now_ms() - t0) / 1000
             if elapsed > timeout_s:
+                if think_chars or text_chars:
+                    raise AdapterError(
+                        f"still generating at the {timeout_s}s deadline — "
+                        f"{think_chars:,} chars of reasoning and "
+                        f"{text_chars:,} of answer; the model was working and "
+                        f"did not finish inside the budget every other model "
+                        f"was given",
+                        kind="think_timeout", retryable=False)
                 raise AdapterError(
-                    f"claude CLI exceeded the {timeout_s}s budget",
+                    f"claude CLI exceeded the {timeout_s}s budget — nothing "
+                    f"arrived at all (no answer, no reasoning)",
                     kind="timeout", retryable=True)
             try:
                 line = lines.get(timeout=1.0)
@@ -826,6 +1135,16 @@ def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str,
                     if not saw_text:
                         first_text_ms = now_ms() - t0
                     saw_text = True
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    btype = b.get("type")
+                    if btype == "tool_use":
+                        tools_used.append(str(b.get("name") or "?"))
+                    elif btype == "thinking":
+                        think_chars += len(b.get("thinking") or "")
+                    elif btype == "text":
+                        text_chars += len(b.get("text") or "")
             elif kind == "result":
                 final = ev
     finally:
@@ -840,6 +1159,7 @@ def _stream_claude_cli(cmd: list[str], prompt: str, cwd: str,
             "claude CLI produced no result event: " + " | ".join(tail)[:300],
             kind="api", retryable=True)
     final["_first_text_ms"] = first_text_ms
+    final["_tools_used"] = tools_used
     return final
 
 
@@ -870,6 +1190,7 @@ ADAPTERS = {
     "openai": OpenAICompatAdapter,
     "anthropic": AnthropicAdapter,
     "claude-cli": ClaudeCLIAdapter,
+    "codex-cli": CodexCLIAdapter,
     "mock": MockAdapter,
 }
 

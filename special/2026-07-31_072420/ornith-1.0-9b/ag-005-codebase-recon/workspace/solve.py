@@ -9,6 +9,7 @@ def load_module(name):
     spec.loader.exec_module(mod)
     return mod
 
+# Load entry to get START
 entry_mod = load_module("entry")
 start = entry_mod.START
 

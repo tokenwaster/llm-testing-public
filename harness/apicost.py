@@ -13,6 +13,7 @@ AVENUES = {
 
 PROVIDER_AVENUE = {
     "claude-cli": "cli",
+    "codex-cli": "cli",
     "anthropic": "api",
 }
 
@@ -96,7 +97,7 @@ def runnable(models=None) -> dict[str, dict[str, object]]:
 
 
 def _usable(model) -> bool:
-    if model.provider == "claude-cli":
+    if model.is_cli:
         return True
     return bool(model.api_key)
 

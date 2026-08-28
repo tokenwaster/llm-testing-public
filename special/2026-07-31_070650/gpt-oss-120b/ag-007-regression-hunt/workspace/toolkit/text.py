@@ -9,7 +9,9 @@ def title_case(s: str) -> str:
     def cap_word(word: str) -> str:
         if not word:
             return ''
+        # Preserve the original characters after the first one in lower case.
         return word[0].upper() + word[1:].lower()
+    # Split on whitespace to keep spacing consistent with typical title case.
     return ' '.join(cap_word(w) for w in s.split())
 
 

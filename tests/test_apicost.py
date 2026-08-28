@@ -670,7 +670,7 @@ def test_a_metered_model_still_reports_its_cost():
     full = set(rp.covered_models(td))
     priced = 0
     for m, rs in by.items():
-        if m not in full or m.startswith("claude-cli"):
+        if m not in full or m.startswith(("claude-cli", "codex-cli")):
             continue
         s = rp._summarize(rs)
         assert s["cost_basis"] == "as-run", m

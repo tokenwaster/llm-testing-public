@@ -81,6 +81,7 @@ def _load_dotenv() -> None:
 _load_dotenv()
 MODELS_DIR = ROOT / "models"
 TASKS_DIR = ROOT / "tasks"
+STAGING_DIR = ROOT / "tasks-staging"
 RUNS_DIR = ROOT / "runs"
 SCOUTS_DIR = ROOT / "scouts"
 SPECIAL_DIR = ROOT / "special"

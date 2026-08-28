@@ -22,6 +22,7 @@ class Model:
     temperature: float = config.DEFAULT_TEMPERATURE
     context_length: int = 0
     pricing: dict = field(default_factory=lambda: {"input_per_mtok": 0.0, "output_per_mtok": 0.0})
+    pricing_set: bool = False
     sampling: dict = field(default_factory=dict)
     sampling_profiles: dict = field(default_factory=dict)
     sampling_source: str = ""
@@ -55,17 +56,31 @@ class Model:
                      "repetition_penalty", "presence_penalty",
                      "frequency_penalty")
 
+    CLI_PROVIDERS = ("claude-cli", "codex-cli")
+
+    @property
+    def is_cli(self) -> bool:
+        return self.provider in self.CLI_PROVIDERS
+
     @property
     def sampling_settable(self) -> bool:
         if self.sampling_settable_yaml is not None:
             return bool(self.sampling_settable_yaml)
-        return self.provider != "claude-cli"
+        return not self.is_cli
 
     EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+    EFFORT_LEVELS_BY_PROVIDER = {
+        "claude-cli": ("low", "medium", "high", "xhigh", "max"),
+        "codex-cli": ("minimal", "low", "medium", "high", "xhigh"),
+    }
+
+    @property
+    def effort_levels(self) -> tuple:
+        return self.EFFORT_LEVELS_BY_PROVIDER.get(self.provider, ())
 
     @property
     def effort_settable(self) -> bool:
-        return self.provider == "claude-cli"
+        return self.is_cli
 
     @property
     def effort_as_tested(self) -> str:
@@ -95,6 +110,9 @@ class Model:
             return self.sampling_unsettable_reason.strip()
         if self.provider == "claude-cli":
             return ("the Claude CLI exposes no sampling flags, so nothing "
+                    "configured here would be transmitted")
+        if self.provider == "codex-cli":
+            return ("the Codex CLI exposes no sampling flags, so nothing "
                     "configured here would be transmitted")
         return "this model does not accept sampling parameters"
 
@@ -233,6 +251,7 @@ def _model_fields(f: Path) -> dict:
     if stamp is not None and hit is not None and hit[0] == stamp:
         return copy.deepcopy(hit[1])
     raw = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+    raw["pricing_set"] = "pricing" in raw
     if "sampling_settable" in raw:
         raw["sampling_settable_yaml"] = raw.pop("sampling_settable")
     if raw.pop("thinking_off", None) is not None:

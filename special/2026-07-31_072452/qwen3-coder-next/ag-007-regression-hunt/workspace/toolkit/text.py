@@ -10,6 +10,7 @@ def title_case(s: str) -> str:
             capitalize_next = False
         else:
             result.append(ch)
+            # Only set capitalize_next=True if this is not an apostrophe
             if ch != "'":
                 capitalize_next = True
     return "".join(result)

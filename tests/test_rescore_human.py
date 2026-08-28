@@ -24,7 +24,7 @@ def _run(tmp_path, monkeypatch, task_id="web-012-coin"):
                 timeout_s=5, max_retries=0, max_turns=1, checker_timeout_s=5,
                 content_hash="h")
     monkeypatch.setattr(rescore.config, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(rescore, "load_tasks", lambda: [task])
+    monkeypatch.setattr(rescore, "load_tasks", lambda **kw: [task])
     monkeypatch.setattr(rescore.scoring, "run_pytest_checker",
                         lambda t, ws: {"status": "scored", "score": 0.123,
                                        "scored_by": "checker", "summary": "x"})

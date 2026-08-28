@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Spreadsheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    margin: 0; padding: 16px; background: #f5f5f7; color: #1d1d1f;
+  }
+  #app {
+    min-width: 640px; min-height: 420px;
+    background: #fff; border: 1px solid #d1d1d6; border-radius: 8px;
+    padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.1);
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  #grid {
+    display: grid;
+    grid-template-columns: 50px repeat(10, minmax(56px, 1fr));
+    grid-auto-rows: 30px; gap: 1px;
+    background: #d1d1d6; border: 1px solid #d1d1d6; margin-bottom: 12px;
+  }
+  #grid > .corner { background:#e5e5ea; }
+  #grid > .colhdr, #grid > .rowhdr {
+    background:#e5e5ea; display:flex; align-items:center; justify-content:center;
+    font-weight:600; font-size:12px; color:#48484a;
+  }
+  #grid input.cell {
+    width:100%; height:100%; border:none; outline:none; padding:0 6px;
+    font-size:13px; background:#fff;
+  }
+  #grid input.cell:focus { background:#e8f0fe; box-shadow: inset 0 0 0 2px #2563eb; }
+  .controls { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap; }
+  button#export {
+    padding:8px 16px; font-size:14px; cursor:pointer;
+    background:#2563eb; color:#fff; border:none; border-radius:6px;
+  }
+  button#export:hover { background:#1d4ed8; }
+  textarea#csv {
+    width:100%; min-width:560px; height:120px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size:12px;
+    padding:8px; border:1px solid #d1d1d6; border-radius:6px; resize:vertical;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <div id="grid"></div>
+  <div class="controls">
+    <button id="export">Export CSV</button>
+    <textarea id="csv" placeholder="CSV output will appear here…"></textarea>
+  </div>
+</div>
+<script>
+(function(){
+  "use strict";
+  const COLS = "ABCDEFGHIJ"; // A..J (10 columns)
+  const ROWS = 10;
+  let store = {};      // id -> raw text
+  let computed = {};   // id -> {t:'num'|'str'|'err', v} memo during recalc
+  let visiting = new Set();
+  let activeCell = null;
+  const inputs = {};
+
+  function validRef(id){
+    const m = /^([A-Za-z]+)(\d+)$/.exec(id);
+    if(!m) return false;
+    const col = m[1].toUpperCase().charCodeAt(0) - 65;
+    const row = parseInt(m[2], 10);
+    return col >= 0 && col < COLS.length && row >= 1 && row <= ROWS;
+  }
+
+  function tokenize(s){
+    const tokens = [];
+    let i = 0;
+    while(i < s.length){
+      const ch = s[i];
+      if(ch === ' '){ i++; continue; }
+      if(ch==='+'||ch==='-'||ch==='*'||ch==='/'){ tokens.push({type:ch, value:ch}); i++; continue; }
+      if(ch==='('){ tokens.push({type:'lparen', value:'('}); i++; continue; }
+      if(ch===')'){ tokens.push({type:'rparen', value:')'}); i++; continue; }
+      if(ch >= '0' && ch <= '9'){
+        let j=i;
+        while(j<s.length && ((s[j]>='0'&&s[j]<='9')||s[j]==='.')) j++;
+        tokens.push({type:'num', value: parseFloat(s.slice(i,j))}); i=j; continue;
+      }
+      if((ch>='A'&&ch<='Z')||(ch>='a'&&ch<='z')){
+        let j=i;
+        while(j<s.length && ((s[j]>='A'&&s[j]<='Z')||(s[j]>='a'&&s[j]<='z'))) j++;
+        while(j<s.length && s[j]>='0'&&s[j]<='9') j++;
+        tokens.push({type:'ref', value: s.slice(i,j)}); i=j; continue;
+      }
+      throw {msg:'#ERR'}; // unknown character
+    }
+    return tokens;
+  }
+
+  function parse(tokens){
+    let pos = 0;
+    const peek = () => tokens[pos];
+    const next = () => tokens[pos++];
+    function parseExpr(){
+      let node = parseTerm();
+      while(peek() && (peek().type==='+'||peek().type==='-')){
+        const op = next().type;
+        node = {type:'binop', op:op, l:node, r:parseTerm()};
+      }
+      return node;
+    }
+    function parseTerm(){
+      let node = parseFactor();
+      while(peek() && (peek().type==='*'||peek().type==='/')){
+        const op = next().type;
+        node = {type:'binop', op:op, l:node, r:parseFactor()};
+      }
+      return node;
+    }
+    function parseFactor(){
+      const t = peek();
+      if(!t) throw {msg:'#ERR'};
+      if(t.type==='+'||t.type==='-'){ next(); return {type:'unary', op:t.type, operand:parseFactor()}; }
+      if(t.type==='lparen'){
+        next();
+        const e = parseExpr();
+        if(!peek() || peek().type!=='rparen') throw {msg:'#ERR'};
+        next();
+        return e;
+      }
+      next(); // consume atom token
+      if(t.type==='num') return {type:'num', v:t.value};
+      if(t.type==='ref') return {type:'ref', id:t.value};
+      throw {msg:'#ERR'}; // stray rparen / invalid atom
+    }
+    const node = parseExpr();
+    if(pos !== tokens.length) throw {msg:'#ERR'};
+    return node;
+  }
+
+  function toNum(v){
+    if(v.t==='num') return v.v;
+    if(v.t==='str'){
+      const s = v.v.trim();
+      if(/^[+-]?(\d+(\.\d*)?|\.\d+)$/.test(s)) return parseFloat(s);
+      return undefined;
+    }
+    return undefined;
+  }
+
+  function evalNode(node){
+    switch(node.type){
+      case 'num': return {t:'num', v:node.v};
+      case 'ref': {
+        if(!validRef(node.id)) throw {msg:'#ERR'};
+        const val = evalFormula(node.id); // may throw #CYCLE/#ERR
+        if(val.t==='str' && val.v==='') return {t:'num', v:0}; // empty -> 0
+        return val;
+      }
+      case 'unary': {
+        const n = toNum(evalNode(node.operand));
+        if(n===undefined) throw {msg:'#ERR'};
+        return {t:'num', v: node.op==='-' ? -n : n};
+      }
+      case 'binop': {
+        const lv = toNum(evalNode(node.l));
+        const rv = toNum(evalNode(node.r));
+        if(lv===undefined || rv===undefined) throw {msg:'#ERR'};
+        let res;
+        switch(node.op){
+          case '+': res=lv+rv; break;
+          case '-': res=lv-rv; break;
+          case '*': res=lv*rv; break;
+          case '/': res = rv===0 ? NaN : lv/rv; break;
+        }
+        if(!Number.isFinite(res)) throw {msg:'#ERR'}; // div by zero etc.
+        return {t:'num', v:res};
+      }
+    }
+    throw {msg:'#ERR'};
+  }
+
+  function evalFormula(id){
+    id = String(id).toUpperCase();
+    if(computed[id]) return computed[id];
+    if(visiting.has(id)) throw {msg:'#CYCLE'};
+    const raw = store[id] || '';
+    if(!raw.startsWith('=')){
+      const val = (raw==='') ? {t:'str', v:''} : {t:'str', v:raw};
+      computed[id] = val;
+      return val;
+    }
+    visiting.add(id);
+    try{
+      const node = parse(tokenize(raw.slice(1)));
+      const val = evalNode(node);
+      computed[id] = val;
+      return val;
+    }catch(e){
+      computed[id] = {t:'err', v: e.msg || '#ERR'};
+      throw e;
+    }finally{
+      visiting.delete(id);
+    }
+  }
+
+  function recalc(){
+    computed = {};
+    for(let r=1;r<=ROWS;r++){
+      for(let c=0;c<COLS.length;c++){
+        const id = COLS[c]+r;
+        try{ evalFormula(id); }catch(e){ /* error already stored */ }
+      }
+    }
+    updateDisplays();
+  }
+
+  function displayString(id){
+    const c = computed[id];
+    if(!c) return '';
+    if(c.t==='err') return c.v;
+    if(c.t==='num') return String(c.v);
+    return c.v; // str
+  }
+
+  function updateDisplays(){
+    for(let r=1;r<=ROWS;r++){
+      for(let c=0;c<COLS.length;c++){
+        const id = COLS[c]+r;
+        if(activeCell === id) continue;
+        inputs[id].value = displayString(id);
+      }
+    }
+  }
+
+  function commitActive(){
+    if(!activeCell) return;
+    const id = activeCell;
+    store[id] = inputs[id].value;
+    activeCell = null;
+    recalc(); // updateDisplays sets committed cell to its computed value
+  }
+
+  // Build grid
+  const grid = document.getElementById('grid');
+  const corner = document.createElement('div');
+  corner.className = 'corner';
+  grid.appendChild(corner);
+  for(let c=0;c<10;c++){
+    const h = document.createElement('div');
+    h.className = 'colhdr'; h.textContent = COLS[c];
+    grid.appendChild(h);
+  }
+  for(let r=1;r<=10;r++){
+    const rh = document.createElement('div');
+    rh.className = 'rowhdr'; rh.textContent = r;
+    grid.appendChild(rh);
+    for(let c=0;c<10;c++){
+      const id = COLS[c]+r;
+      const inp = document.createElement('input');
+      inp.type = 'text'; inp.className = 'cell';
+      inp.id = 'cell-'+id; inp.dataset.id = id;
+      grid.appendChild(inp); inputs[id] = inp;
+
+      inp.addEventListener('focus', function(){
+        const cid = this.dataset.id;
+        if(activeCell !== cid){
+          activeCell = cid;
+          this.value = store[cid] || ''; // show raw text for editing
+        }
+      });
+      inp.addEventListener('blur', function(){ commitActive(); });
+      inp.addEventListener('keydown', function(e){
+        if(e.key === 'Enter'){
+          e.preventDefault();
+          commitActive();
+          this.blur();
+        } else if(e.key === 'Escape'){
+          e.preventDefault();
+          const cid = this.dataset.id;
+          activeCell = null;
+          this.value = displayString(cid); // restore displayed value
+        }
+      });
+    }
+  }
+
+  recalc();
+
+  // Scripting API for automated grading
+  window.sheet = {
+    set: function(id, val){
+      id = String(id).toUpperCase();
+      if(!validRef(id)) return;
+      store[id] = val;
+      if(activeCell === id) activeCell = null;
+      recalc();
+    },
+    get: function(id){ return displayString(String(id).toUpperCase()); },
+    raw: function(id){ return store[String(id).toUpperCase()] || ''; }
+  };
+
+  // Export CSV of current computed values
+  document.getElementById('export').addEventListener('click', function(){
+    const rows = [];
+    for(let r=1;r<=ROWS;r++){
+      const cells = [];
+      for(let c=0;c<COLS.length;c++){
+        const id = COLS[c]+r;
+        let v = displayString(id);
+        if(/[",\n\r]/.test(v)) v = '"' + v.replace(/"/g,'""') + '"';
+        cells.push(v);
+      }
+      rows.push(cells.join(','));
+    }
+    document.getElementById('csv').value = rows.join('\n');
+  });
+})();
+</script>
+</body>
+</html>
