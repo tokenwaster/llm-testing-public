@@ -26,6 +26,14 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+### Comment and commit-metadata hygiene
+
+Authored YAML is comment-free, and the public exporter strips full-line YAML
+comments as a backstop while leaving hash-valued strings intact. Repository
+tests enforce the same rule outside immutable evidence trees. Commit messages
+now follow one rule in both repositories: no generated/co-authorship trailers;
+model names remain allowed when they are the actual subject of a change.
+
 ### Repository cleanup and public-release guardrails
 
 The private and public READMEs now describe the live 58-task v0.7 suite and

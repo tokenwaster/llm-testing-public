@@ -155,8 +155,9 @@ Three rules are enforced in code, not by discipline:
 
 1. **Private history can never travel.** `dist/public` is `git init`-ed fresh;
    publishing refuses if the private repo is ever a remote of it.
-2. **No AI co-authorship trailers in public commits.** Every commit in the
-   private repo carries one; the publisher rejects a message containing one.
+2. **No generated/co-authorship trailers in commit messages.** The public
+   publisher rejects a message containing one; the same rule applies to local
+   private commits.
 3. **Identity is set repo-locally** (`tokenwaster <tokenwaster@gmail.com>`), so a
    second GitHub account on the same machine cannot sign these commits.
 
