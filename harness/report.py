@@ -1031,7 +1031,7 @@ BASE_CSS = BASE_CSS.replace(
 
 _MATRIX_CSS = """
 .mx-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin-top:12px; padding-bottom:6px; }
-.mx { min-width:max-content; }
+.mx { min-width:0; }
 .mx-row { display:flex; align-items:stretch; }
 .mx-rail { flex:0 0 300px; display:grid; grid-template-columns:26px 1fr auto auto;
   align-items:center; column-gap:10px; padding:0 14px 0 2px; height:29px;
@@ -1058,12 +1058,13 @@ _MATRIX_CSS = """
   border:1px solid var(--warn); color:var(--warn); vertical-align:middle; }
 .mx-row.head .rk, .mx-row.head .nm, .mx-row.head .sc, .mx-row.head .gp { color:var(--muted);
   font-family:var(--mono); font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; }
-.mx-cells { display:flex; gap:14px; align-items:center; padding:0 8px; height:29px;
-  border-bottom:1px solid var(--hair); }
+.mx-cells { display:flex; gap:8px; flex:1 1 0; min-width:0; align-items:center;
+  padding:0 8px; height:29px; border-bottom:1px solid var(--hair); }
 .mx-row.head .mx-cells { align-items:end; height:auto; padding-bottom:7px;
   border-bottom:1px solid var(--rule); }
-.mx-grp { display:grid; grid-auto-flow:column; gap:3px; }
-.mx-cell { width:15px; height:15px; border-radius:2px; display:block;
+.mx-grp { display:flex; gap:2px; min-width:0; flex:1 1 0; }
+.mx-cell { flex:1 1 0; min-width:4px; max-width:15px; height:15px;
+  border-radius:2px; display:block;
   cursor:pointer; transition:transform .08s, box-shadow .08s; }
 .mx-cell:hover { transform:scale(1.28); box-shadow:0 0 0 1.5px var(--fg);
   position:relative; z-index:2; }
@@ -1304,17 +1305,17 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="mx-scroll"><div class="mx">
   <div class="mx-row head">
     <div class="mx-rail"><span class="rk"></span><span class="nm">Model</span><span class="sc">Score</span><span class="gp">Gap</span></div>
-    <div class="mx-cells">{% for c in matrix.cats %}<div class="mx-grp" style="grid-template-columns:repeat({{ c.n }},15px);gap:3px"><span class="mx-clabel" title="{{ c.key }}" style="grid-column:1/-1">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div>
+    <div class="mx-cells">{% for c in matrix.cats %}<div class="mx-grp" style="flex-grow:{{ c.n }}"><span class="mx-clabel" title="{{ c.key }}">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div>
   </div>
   {% for r in matrix.rows %}
   <div class="mx-row{% if r.lead %} lead{% endif %}{% if r.partial %} partial{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-frontier="{{ r.m_frontier }}" data-easy="{{ r.m_easy }}" data-nobias="{{ r.m_nobias }}" data-kind="{{ r.kind }}"{% if r.partial %} title="only {{ r.cover }} tasks run — ranked below every fully-tested model, because the mean of a partial row is not comparable to a full one"{% endif %}>
     <div class="mx-rail"><span class="rk">{{ r.rank }}</span><span class="nm">{{ r.model }}{% if r.partial %} <span class="pcov">{{ r.cover }}</span>{% endif %}</span><span class="sc">{{ r.score }}{% if r.ci %}<span class="ci" title="95% confidence band across tasks (±1.96·SE)">{{ r.ci }}</span>{% endif %}</span><span class="gp">{% if r.tied %}<span class="tie" title="within the leader's 95% band — not statistically distinguishable on this task set">≈</span>{% endif %}{{ r.gap }}</span></div>
-    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.v %} data-v="{{ cell.v }}"{% endif %}{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
+    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp" style="flex-grow:{{ g|length }}">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.v %} data-v="{{ cell.v }}"{% endif %}{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
   {% endfor %}
   <div class="mx-row foot">
     <div class="mx-rail"><span class="fl">fleet avg / task →</span></div>
-    <div class="mx-cells">{% for g in matrix.foot %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
+    <div class="mx-cells">{% for g in matrix.foot %}<div class="mx-grp" style="flex-grow:{{ g|length }}">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
 </div></div>
 <script>
@@ -1360,7 +1361,9 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
         c.style.display=showCell(c)?'':'none';
       });
       [].slice.call(r.querySelectorAll('.mx-grp')).forEach(function(g){
-        g.style.display=vis(g)?'':'none';
+        var n=vis(g);
+        g.style.display=n?'':'none';
+        g.style.flexGrow=n;
       });
     });
     refoot(live);
@@ -1369,7 +1372,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
       [].slice.call(head.querySelectorAll('.mx-grp')).forEach(function(hg,i){
         var n=src[i]?vis(src[i]):0;
         hg.style.display=n?'':'none';
-        hg.style.gridTemplateColumns='repeat('+n+',15px)';
+        hg.style.flexGrow=n;
         var cn=hg.querySelector('.cn'); if(cn) cn.textContent=n;
       });
     }
@@ -2190,7 +2193,10 @@ def _model_of(rs: list[dict]):
 
 def _is_subscription(rs: list[dict]) -> bool:
     mo = _model_of(rs)
-    return bool(mo and mo.is_cli)
+    if mo:
+        return mo.is_cli
+    name = str(rs[0].get("model") or "") if rs else ""
+    return name.startswith(("claude-cli-", "codex-cli-"))
 
 
 def _scaffold_total(rs: list[dict]) -> int:
@@ -3382,17 +3388,17 @@ excluded set live in <code>directives.yaml</code> · <code>assess:</code>.</div>
 <div class="mx-scroll"><div class="mx">
   <div class="mx-row head">
     <div class="mx-rail"><span class="rk"></span><span class="nm">Run</span><span class="sc">Avg</span><span class="gp">Cov</span></div>
-    <div class="mx-cells">{% for c in runmatrix.cats %}<div class="mx-grp" style="grid-template-columns:repeat({{ c.n }},15px);gap:3px"><span class="mx-clabel" title="{{ c.key }}" style="grid-column:1/-1">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div>
+    <div class="mx-cells">{% for c in runmatrix.cats %}<div class="mx-grp" style="flex-grow:{{ c.n }}"><span class="mx-clabel" title="{{ c.key }}">{{ c.code }} <span class="cn">{{ c.n }}</span></span></div>{% endfor %}</div>
   </div>
   {% for r in runmatrix.rows %}
   <div class="mx-row">
     <div class="mx-rail"><span class="rk"></span><span class="nm"><a href="../runs/{{ r.run_id }}.html">{{ r.run_short }}</a></span><span class="sc">{{ r.avg }}</span><span class="gp" title="tasks this run covered of the {{ r.cover.split('/')[1] }} this model has data on">{{ r.cover }}</span></div>
-    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
+    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp" style="flex-grow:{{ g|length }}">{% for cell in g %}<a class="mx-cell {{ cell.cls }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
   {% endfor %}
   <div class="mx-row foot">
     <div class="mx-rail"><span class="fl">aggregate / task →</span></div>
-    <div class="mx-cells">{% for g in runmatrix.foot %}<div class="mx-grp">{% for cell in g %}<a class="mx-cell {{ cell.cls }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
+    <div class="mx-cells">{% for g in runmatrix.foot %}<div class="mx-grp" style="flex-grow:{{ g|length }}">{% for cell in g %}<a class="mx-cell {{ cell.cls }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
 </div></div>
 <div class="mxlegend">
@@ -3601,25 +3607,6 @@ def _model_detail_rows(mo, mi: dict, fp, hosts: list,
                 + '<div class="note" style="font-size:11.5px;margin-top:2px">'
                 + note + " <a href=\"../info.html#effort\">How this is "
                 "decided</a>.</div>")
-        if (summary or {}).get("cost_basis") == "subscription":
-            from . import apicost as _ac
-            _oh = _ac.cli_overhead_for(mo)
-            _sc = int((summary or {}).get("scaffold_tokens") or 0)
-            add("Cost",
-                "<b>not reported</b> &mdash; subscription"
-                '<div class="note" style="font-size:11.5px;margin-top:2px">'
-                "Measured through the Claude Code CLI, which runs on a "
-                "subscription: there is no per-token price, so any figure here "
-                "would be invented. This model is also left out of the value and "
-                "cost-per-point views."
-                + (f" For scale, the CLI sent <b>{int(_oh):,}</b> input tokens of "
-                   f"its own instructions and tools per request "
-                   f"({_sc:,} across this model's cells) &mdash; but that is not a "
-                   f"deduction you can make, because the CLI is a different agent "
-                   f"doing more work, not a wrapper." if _oh else "")
-                + " Cost arrives when the full suite has been run through the API. "
-                "<a href=\"../info.html#costbasis\">Why, and what we measured</a>."
-                "</div>")
         if mo.sampling_source:
             src = html.escape(str(mo.sampling_source))
             add("Sampling reference",
@@ -3636,6 +3623,24 @@ def _model_detail_rows(mo, mi: dict, fp, hosts: list,
             if p.get("input_per_mtok") or p.get("output_per_mtok"):
                 add("List price", f"${p.get('input_per_mtok', 0)}/M tok in · "
                     f"${p.get('output_per_mtok', 0)}/M tok out")
+    if (summary or {}).get("cost_basis") == "subscription":
+        from . import apicost as _ac
+        _oh = _ac.cli_overhead_for(mo) if mo else None
+        _sc = int((summary or {}).get("scaffold_tokens") or 0)
+        add("Cost",
+            "<b>not reported</b> &mdash; subscription"
+            '<div class="note" style="font-size:11.5px;margin-top:2px">'
+            "Measured through a subscription CLI: there is no per-token price, "
+            "so any figure here would be invented. This model is also left out "
+            "of the value and cost-per-point views."
+            + (f" For scale, the CLI sent <b>{int(_oh):,}</b> input tokens of "
+               f"its own instructions and tools per request "
+               f"({_sc:,} across this model's cells) &mdash; but that is not a "
+               f"deduction you can make, because the CLI is a different agent "
+               f"doing more work, not a wrapper." if _oh else "")
+            + " Cost arrives when the full suite has been run through the API. "
+            "<a href=\"../info.html#costbasis\">Why, and what we measured</a>."
+            "</div>")
     if hosts:
         add("Served by (gateway host)", html.escape(", ".join(hosts)))
     return rows

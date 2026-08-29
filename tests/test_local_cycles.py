@@ -3,8 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from harness import runner
+from harness import config, runner
 from harness.registry import Model
+
+
+OPERATOR_ONLY = pytest.mark.skipif(
+    not config.is_operator_build(), reason="private operator surface is not exported")
 
 
 def _m(name="lm", local=True, provider="openai"):
@@ -230,6 +234,7 @@ def test_the_banner_load_count_is_the_plan_not_a_guess(monkeypatch):
     assert f"was {len(plan) * 3} loads" in line
 
 
+@OPERATOR_ONLY
 def test_no_caller_prints_a_cycle_promise_of_its_own():
     from harness import config
     for name in ("__main__.py", "jobs.py"):
@@ -293,6 +298,7 @@ def test_an_unscored_cell_counts_as_neither():
     assert rc["models"]["m"] == {"have": [], "todo": [], "unstable": []}
 
 
+@OPERATOR_ONLY
 def test_the_run_page_wires_both_badges_and_the_unstable_button():
     from harness import config
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")

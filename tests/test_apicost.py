@@ -2,9 +2,13 @@ import types
 
 import pytest
 
-from harness import apicost, report
+from harness import apicost, config, report
 from harness.registry import Model
 from harness.validate import validate_models
+
+
+OPERATOR_ONLY = pytest.mark.skipif(
+    not config.is_operator_build(), reason="private operator surface is not exported")
 
 
 def _m(name, provider, key=None, base=None, compare_key="k", **kw):
@@ -229,6 +233,7 @@ def test_the_anthropic_adapter_records_cache_traffic_like_the_cli():
         "without cache tokens the cost arithmetic cannot match the CLI's basis")
 
 
+@OPERATOR_ONLY
 def test_the_special_page_wires_the_new_probe():
     from harness import config
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
@@ -238,6 +243,7 @@ def test_the_special_page_wires_the_new_probe():
         assert hook in ui, hook
 
 
+@OPERATOR_ONLY
 def test_the_cheapest_selector_stays_inside_the_probe():
     from harness import config
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
@@ -248,6 +254,7 @@ def test_the_cheapest_selector_stays_inside_the_probe():
             f"{leaked} belongs to the api-cost probe, not the main run page")
 
 
+@OPERATOR_ONLY
 def test_the_probe_only_twin_stays_out_of_normal_runs():
     from harness.registry import load_models
     enabled = {m.name for m in load_models()}
@@ -350,6 +357,7 @@ def test_no_rejected_cell_in_the_dataset_ever_carries_a_score():
                      + "\n  ".join(bad[:10]))
 
 
+@OPERATOR_ONLY
 def test_a_capped_model_declares_its_real_ceiling():
     from harness.registry import load_models
     allm = {m.name: m for m in load_models(include_disabled=True)}
@@ -398,6 +406,7 @@ def test_the_probe_counter_reads_the_rows_own_trial_number():
         "avenue, not a min over whatever happens to be present")
 
 
+@OPERATOR_ONLY
 def test_the_top_up_counts_by_the_key_the_counter_actually_uses():
     from harness import config
     src = (config.ROOT / "harness" / "jobs.py").read_text(encoding="utf-8")
@@ -426,6 +435,7 @@ def test_the_server_counts_a_group_by_its_compare_key():
         assert anchor.compare_key in counts.get("apicost", {}) or True
 
 
+@OPERATOR_ONLY
 def test_a_greyed_cell_can_never_be_submitted_by_a_bulk_selector():
     from harness import config
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
@@ -440,6 +450,7 @@ def test_a_greyed_cell_can_never_be_submitted_by_a_bulk_selector():
     assert "if (!c.disabled)" in sel
 
 
+@OPERATOR_ONLY
 def test_every_bulk_selector_on_the_probe_page_guards_disabled():
     from harness import config
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
@@ -595,9 +606,9 @@ def test_the_rendered_claude_page_explains_the_missing_cost():
     assert "would be invented" in html
     assert "info.html#costbasis" in html
     from harness import apicost
-    mo = next(m for m in __import__("harness.registry", fromlist=["x"])
-              .load_models(include_disabled=True) if m.name == name)
-    if apicost.cli_overhead_for(mo):
+    mo = next((m for m in __import__("harness.registry", fromlist=["x"])
+               .load_models(include_disabled=True) if m.name == name), None)
+    if mo and apicost.cli_overhead_for(mo):
         assert "not a deduction you can make" in html, (
             "when the overhead IS measured the page must say it is not "
             "subtractable, or a reader will assume it is")
@@ -620,6 +631,7 @@ def test_the_rendered_metered_page_has_no_such_row():
     assert "not reported &mdash; subscription" not in html, name
 
 
+@OPERATOR_ONLY
 def test_a_probe_leg_announces_its_own_run_id():
     from harness import config
     src = (config.ROOT / "harness" / "jobs.py").read_text(encoding="utf-8")
@@ -657,6 +669,13 @@ def test_a_subscription_model_carries_no_cost_at_all():
         pytest.skip("no complete claude-cli model recorded")
 
 
+def test_public_receipt_names_preserve_the_subscription_cost_basis(monkeypatch):
+    monkeypatch.setattr(report, "_EQUIV_MODELS", {})
+    for name in ("claude-cli-opus-5", "codex-cli-gpt-5.6-sol"):
+        assert report._is_subscription([{"model": name}])
+    assert not report._is_subscription([{"model": "gpt-5.6-sol"}])
+
+
 def test_a_metered_model_still_reports_its_cost():
     from harness import report as rp
     runs = rp.load_all_runs()
@@ -679,6 +698,7 @@ def test_a_metered_model_still_reports_its_cost():
     assert priced, "removing the CLI cost must not blank every other model"
 
 
+@OPERATOR_ONLY
 def test_the_api_twins_are_scored_entries_and_the_gateway_twins_are_not():
     from harness.registry import load_models
     ms = {m.name: m for m in load_models(include_disabled=True)}
@@ -696,6 +716,7 @@ def test_the_api_twins_are_scored_entries_and_the_gateway_twins_are_not():
             f"would put a third Claude entry per model on the board")
 
 
+@OPERATOR_ONLY
 def test_the_cli_entries_are_a_different_agent_and_stay_that_way():
     from harness.registry import load_models
     ms = [m for m in load_models(include_disabled=True)
@@ -763,6 +784,7 @@ def test_the_two_coverage_denominators_are_known_to_differ():
         f"discovered when a new task lands")
 
 
+@OPERATOR_ONLY
 def test_saving_a_review_does_not_block_on_a_full_rebuild():
     from harness import config
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
@@ -778,6 +800,7 @@ def test_saving_a_review_does_not_block_on_a_full_rebuild():
     assert "_COST_NOTE = None" in body
 
 
+@OPERATOR_ONLY
 def test_the_regen_coalesces_instead_of_stacking():
     from harness import config
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
@@ -842,6 +865,7 @@ def test_a_task_never_repeated_is_not_offered_for_phase_three():
     assert rc["unstable_tasks"] == [], "0.05 is under the 0.125 threshold"
 
 
+@OPERATOR_ONLY
 def test_the_run_page_wires_all_three_phases_with_live_counts():
     from harness import config
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
@@ -1083,6 +1107,7 @@ def test_the_binding_limit_is_the_one_reported():
     assert b["binding"] == "key limit"
 
 
+@OPERATOR_ONLY
 def test_a_cost_refusal_reads_as_refused_not_crashed():
     from harness import config
     src = (config.ROOT / "harness" / "jobs.py").read_text(encoding="utf-8")

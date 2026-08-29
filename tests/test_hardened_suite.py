@@ -1,8 +1,16 @@
 
 from collections import Counter
 
+import pytest
+
 from harness import report
 from harness.tasks import load_tasks
+
+
+OPERATOR_ONLY = pytest.mark.skipif(
+    not report.config.is_operator_build(),
+    reason="private operator surface is not exported",
+)
 
 
 def _tasks():
@@ -111,6 +119,7 @@ def test_every_derivation_of_the_hardened_set_agrees():
     assert {t for t in tiers if report.is_hardened(t, tiers)} == from_tiers
 
 
+@OPERATOR_ONLY
 def test_the_run_page_uses_the_shared_helper_and_a_stable_order():
     from harness import config
     src = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")

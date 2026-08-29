@@ -1,5 +1,7 @@
 import re
 
+import pytest
+
 from harness import config
 
 SRC = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
@@ -287,8 +289,9 @@ def test_the_links_page_counts_match_the_leaderboard():
     assert f"<b>{len(tdefs)}</b> tasks" in html
 
 
-def test_both_readmes_carry_the_link_block():
-    for name in ("README.md", "README.public.md"):
+def test_every_shipped_readme_carries_the_link_block():
+    for name in (n for n in ("README.md", "README.public.md")
+                 if (config.ROOT / n).is_file()):
         txt = (config.ROOT / name).read_text(encoding="utf-8")
         assert "https://tokenwaster.ai/links" in txt, name
         for url in ("youtube.com/@TokenWaster", "x.com/tokenwaster",
@@ -297,9 +300,30 @@ def test_both_readmes_carry_the_link_block():
             assert url in txt, f"{name} missing {url}"
 
 
+@pytest.mark.skipif(not config.is_operator_build(),
+                    reason="the public exporter is operator-only")
 def test_the_public_readme_is_the_one_that_ships():
     export = (config.ROOT / "tools" / "export_public.py").read_text(encoding="utf-8")
     assert 'shutil.copy2(ROOT / "README.public.md", out / "README.md")' in export
+
+
+def test_current_readmes_match_the_live_task_inventory():
+    from collections import Counter
+
+    from harness.tasks import load_tasks
+
+    tasks = load_tasks()
+    counts = Counter(t.category for t in tasks)
+    for name in (n for n in ("README.md", "README.public.md")
+                 if (config.ROOT / n).is_file()):
+        txt = (config.ROOT / name).read_text(encoding="utf-8")
+        assert f"{len(tasks)} tasks" in txt, name
+        assert "latest result" not in txt, name
+        for category, count in counts.items():
+            assert re.search(
+                rf"\| (?:\*\*)?{re.escape(category)}(?:\*\*)? \| {count} \|",
+                txt,
+            ), f"{name}: {category} must say {count}"
 
 
 def test_the_nav_never_links_a_page_the_dataset_does_not_render():
@@ -387,7 +411,8 @@ def test_no_css_or_js_comments_survive_inside_page_strings():
     css = re.compile(r"/\*[^*\n]*\*/")
     js = re.compile(r"(?<=[;{},)])[ \t]+//[^\n]*$", re.M)
     found = []
-    for name in ("report.py", "review.py"):
+    for name in (n for n in ("report.py", "review.py")
+                 if (config.ROOT / "harness" / n).is_file()):
         p = config.ROOT / "harness" / name
         src = p.read_text(encoding="utf-8").replace("\r\n", "\n")
         for t in tokenize.generate_tokens(io.StringIO(src).readline):

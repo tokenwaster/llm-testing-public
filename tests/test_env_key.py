@@ -3,6 +3,10 @@ import pytest
 from harness import config, interfaces
 
 
+OPERATOR_ONLY = pytest.mark.skipif(
+    not config.is_operator_build(), reason="private operator surface is not exported")
+
+
 @pytest.fixture
 def envfile(tmp_path, monkeypatch):
     monkeypatch.setattr(interfaces.config, "ROOT", tmp_path)
@@ -86,6 +90,7 @@ def test_the_env_file_ends_with_exactly_one_newline(envfile):
     assert body.endswith("\n") and not body.endswith("\n\n")
 
 
+@OPERATOR_ONLY
 def test_anthropic_is_registered_so_the_page_offers_a_key_field():
     ifaces = interfaces.load_interfaces()
     by_name = {i.get("name"): i for i in ifaces}
@@ -123,6 +128,7 @@ def test_the_env_file_is_never_tracked_by_git():
     assert r.stdout.strip() == "", ".env is tracked — it holds live keys"
 
 
+@OPERATOR_ONLY
 def test_the_key_input_is_never_prefilled_with_a_real_key():
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
     i = ui.index('class="k-in"')
@@ -134,6 +140,7 @@ def test_the_key_input_is_never_prefilled_with_a_real_key():
     assert "paste key to replace" in field
 
 
+@OPERATOR_ONLY
 def test_the_api_never_returns_a_key_value_only_whether_it_is_set():
     ui = (config.ROOT / "harness" / "review.py").read_text(encoding="utf-8")
     assert "key_set" in ui

@@ -1,9 +1,9 @@
 # LLM Testing Suite
 
-A published benchmark of large language models — local models (LM Studio, Ollama,
-any OpenAI-compatible server) alongside cloud APIs (Anthropic, OpenAI,
-OpenRouter) — scored on 52 tasks with full timing, token, retry and cost
-accounting.
+A published benchmark of large language models — local models (LM Studio,
+Ollama, any OpenAI-compatible server), cloud APIs, and subscription CLIs
+(Claude Code and Codex) — scored on 58 tasks with full timing, token, retry and
+cost accounting.
 
 **This repo ships the results *and* the receipts.** Every number on the generated
 site is backed by the run data in `runs/` and `archive/`: complete transcripts,
@@ -87,15 +87,17 @@ contamination guards and the exact sample size behind every number.
 
 ## The task suite
 
-52 tasks across 10 categories (`SUITE_VERSION` 0.6.x):
+58 tasks across 10 categories (`SUITE_VERSION` 0.7.x). The generated `info.html`
+page is the canonical live catalog; this summary is checked against `tasks/` by
+the repository tests:
 
 | Category | Tasks | Lane | What it measures |
 |---|---|---|---|
 | agentic | 8 | pytest | multi-file navigation, self-verification, tool use in a real workspace |
-| one-shot-apps | 12 | webapp | large coherent one-shot builds, driven by headless Chromium |
-| long-context | 10 | answer | precision retrieval, recency, whole-window aggregation under distractors |
+| one-shot-apps | 13 | webapp | large coherent one-shot builds, driven by headless Chromium |
+| long-context | 12 | answer / response | precision retrieval, recency, whole-window aggregation and ledger reasoning under distractors |
 | coding-python | 6 | pytest | parsing, edge-case discipline, algorithmic correctness |
-| reasoning | 6 | answer | deduction and twisted classics that punish memorized answers |
+| reasoning | 9 | answer / response | deduction and adversarial state/graph traces that punish memorized shortcuts |
 | instruction-following | 2 | response | obeying precise output constraints |
 | hallucination | 2 | response | grounded QA — abstaining instead of inventing |
 | extraction | 2 | response | messy text into strict, normalized JSON |

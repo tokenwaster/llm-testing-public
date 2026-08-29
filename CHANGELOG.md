@@ -26,7 +26,25 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
-(nothing pending)
+### Repository cleanup and public-release guardrails
+
+The private and public READMEs now describe the live 58-task v0.7 suite and
+the actual aggregation rule (every scored run per model/task is meaned). A
+repository test derives the category counts from `tasks/`, so the summaries
+cannot silently lag the suite again. Root `pytest` is scoped to `tests/` through
+a public `pytest.ini`; it no longer tries to collect thousands of model-written
+checker files from `runs/`, `archive/`, and `special/`.
+
+The stale version-by-version work log was removed from the agent instruction
+files. `SUITE_VERSION`, the top of this changelog, and generated reports are now
+the explicit current-state sources; historical plans remain in `docs/`.
+
+The exported repository's own suite is green again: tests that inspect private
+operator files or registrations now skip only in the public build, while their
+public portions still run. Public report regeneration also infers Claude/Codex
+subscription cost basis from the immutable run model name when the deliberately
+private model registry is absent, so cloning and regenerating cannot invent a
+per-token subscription price.
 
 ## 0.7.15 — the cloud budget is actually the cloud budget
 
