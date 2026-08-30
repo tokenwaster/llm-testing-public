@@ -310,7 +310,7 @@ def fmt_cost(c) -> str:
 def fmt_tok(n) -> str:
     if n is None:
         return "—"
-    return f"{n:,}"
+    return f"{round(n):,}"
 
 
 def last_response_text(run_id: str, model: str, task: str, limit: int = 5000) -> str:
@@ -322,6 +322,18 @@ def last_response_text(run_id: str, model: str, task: str, limit: int = 5000) ->
     if len(text) > limit:
         text = text[:limit] + f"\n…[truncated, {len(text) - limit} more chars in transcript]"
     return text
+
+
+def _receipt_url(run_id: str, model: str, task: str = "") -> str:
+    parts = [quote(run_id), quote(model)] + ([quote(task)] if task else [])
+    if _PUBLIC_NAV:
+        try:
+            base = _RUNS_BASE.relative_to(config.ROOT).as_posix()
+        except ValueError:
+            base = "runs"
+        return ("https://github.com/tokenwaster/llm-testing-public/tree/main/"
+                + "/".join([base, *parts]))
+    return "/data/" + "/".join(parts) + "/"
 
 
 def score_state(s: dict) -> str:
@@ -617,15 +629,17 @@ def bar(value: float, vmax: float, width=140) -> str:
 
 BASE_CSS = """
 :root {
-  --plane:#0d0d0d; --surface:#1a1a19; --surface-2:#222220;
-  --ink:#ffffff; --ink-2:#c3c2b7; --ink-dim:#c3c2b7; --muted:#898781;
-  --grid:#2c2c2a; --border:rgba(255,255,255,.10);
-  --accent:#3987e5; --accent-soft:rgba(57,135,229,.16);
-  --good:#0ca30c; --warn:#fab219; --crit:#d03b3b;
+  --plane:#0b0e12; --surface:#151a21; --surface-2:#1d2430;
+  --ink:#f2f0e8; --ink-2:#cbd0d7; --ink-dim:#cbd0d7; --muted:#7f8996;
+  --grid:#29313d; --border:rgba(242,240,232,.12);
+  --accent:#4c8dff; --accent-soft:rgba(76,141,255,.16);
+  --good:#56d68b; --warn:#ffb547; --crit:#ff6174;
   --hair:rgba(255,255,255,.07); --rule:rgba(255,255,255,.15);
   --trap:#ffd60a; --miss:#d9600f; --cell-rgb:242,242,240;
   --cell-ink:#0b0b0b;
-  --mono:ui-monospace,"Cascadia Code","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --body:"Source Sans 3","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --display:"Barlow Condensed","Arial Narrow","Aptos Narrow","Segoe UI",sans-serif;
+  --mono:"Fragment Mono","Cascadia Code","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
   --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#008300;
   --s5:#9085e9; --s6:#e66767; --s7:#d55181; --s8:#d95926;
   color-scheme: dark;
@@ -646,10 +660,11 @@ BASE_CSS = """
 }
 * { box-sizing:border-box; }
 body { background:var(--plane); color:var(--ink);
-  font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  font:14px/1.55 var(--body); }
 a { color:var(--accent); text-decoration:none; }
 a:hover { text-decoration:underline; }
-h1 { font-size:21px; font-weight:650; letter-spacing:-.01em; margin:0; }
+h1 { font-family:var(--display); font-size:24px; font-weight:750;
+  letter-spacing:-.025em; margin:0; }
 .sub { color:var(--muted); font-size:12.5px; margin-top:4px; }
 .reflink { display:inline-block; margin-left:10px; padding:1px 7px; border-radius:10px;
   border:1px solid var(--border); font-size:11.5px; text-decoration:none; white-space:nowrap; }
@@ -664,7 +679,7 @@ __HEADER_CSS__
 .tag { display:inline-block; background:var(--accent-soft); color:var(--accent);
   border-radius:20px; padding:2px 11px; font-size:11.5px; font-weight:600;
   margin-left:10px; vertical-align:2px; }
-h2 { font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:.13em;
+h2 { font-family:var(--mono); font-size:11.5px; font-weight:600; letter-spacing:.105em;
   text-transform:uppercase; color:var(--muted); margin:34px 0 10px; }
 
 .tiles { display:flex; flex-wrap:wrap; align-items:flex-end; row-gap:14px;
@@ -720,6 +735,10 @@ th.lenscol, td.lensval { background:var(--accent-soft); font-weight:600; }
   box-shadow:0 6px 20px rgba(0,0,0,.35); max-width:300px; }
 .szttip b { color:var(--ink); }
 table.sortable th[data-type] { cursor:pointer; user-select:none; white-space:nowrap; }
+table.sortable th { position:sticky; top:0; z-index:4; background:var(--surface); }
+table.sticky-first th:first-child, table.sticky-first td:first-child {
+  position:sticky; left:0; z-index:3; background:var(--surface); }
+table.sticky-first th:first-child { z-index:5; }
 table.sortable th[data-type]:hover { color:var(--ink); }
 table.sortable th .caret { opacity:0; font-size:9px; margin-left:5px;
   vertical-align:1px; }
@@ -781,6 +800,9 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
   .cmp-pick .cmp-lead { display:none; }
   .cmp-swap { justify-self:start; }
 }
+
+:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+button:focus-visible, select:focus-visible { outline-offset:2px; }
 .cmp-swap:hover { border-color:var(--accent); color:var(--accent); }
 .cmp-head { margin:0 0 28px; overflow-x:auto; }
 .cmp-hrow { border-bottom:1px solid var(--rule); align-items:end;
@@ -839,8 +861,6 @@ a.mlink:hover { color:var(--accent); border-bottom-color:var(--accent);
   .topbar { flex-direction:column; align-items:flex-start; gap:8px; }
   .nav { display:flex; flex-wrap:wrap; row-gap:4px; }
   .nav a { margin-left:0; margin-right:15px; }
-  table { display:block; overflow-x:auto; -webkit-overflow-scrolling:touch;
-    max-width:100%; }
 }
 
 .grid, .scatter .grid { stroke:var(--grid); stroke-width:1; }
@@ -959,12 +979,103 @@ pre { background:var(--plane); border:1px solid var(--grid); padding:10px 12px;
   border-top:1px solid var(--grid); padding-top:14px; }
 code { background:var(--surface-2); border-radius:4px; padding:1px 6px;
   font-size:12px; }
+.finding { display:grid; grid-template-columns:minmax(0,1fr) minmax(280px,.7fr);
+  gap:28px; align-items:end; margin:18px 0 8px; padding:24px 0 22px;
+  border-top:1px solid var(--rule); border-bottom:2px solid var(--ink); }
+.finding .stamp, .activity .kind, .verdict .stamp, .evidence-card .stamp {
+  font-family:var(--mono); font-size:10px; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--accent); }
+.finding h2 { margin:5px 0 6px; color:var(--ink); font-family:var(--display);
+  font-size:clamp(30px,4vw,52px); line-height:.98; letter-spacing:-.035em;
+  text-transform:uppercase; }
+.finding p { margin:0; max-width:720px; color:var(--ink-2); font-size:15px; }
+.finding .actions { display:flex; gap:9px; flex-wrap:wrap; margin-top:15px; }
+.action { display:inline-flex; align-items:center; border:1px solid var(--border);
+  border-radius:5px; padding:7px 10px; color:var(--ink); font-size:12px;
+  font-weight:650; text-decoration:none; }
+.action.primary { color:var(--plane); border-color:var(--accent);
+  background:var(--accent); }
+.action:hover { border-color:var(--accent); text-decoration:none; }
+.etape { display:flex; align-items:center; gap:3px; min-width:0; }
+.etape a, .etape i { display:block; flex:1 1 0; min-width:3px; max-width:13px;
+  height:13px; border-radius:2px; background:var(--grid); }
+.etape .frontier { background:var(--crit); }
+.etape .hard { background:var(--warn); }
+.etape .easy { background:rgba(var(--cell-rgb),.92); }
+.etape .mid { background:var(--muted); }
+.etape .trap { background:var(--trap); }
+.etape .miss { background:var(--miss); }
+.etape .dnf { background:var(--crit); }
+.etape .na { background:transparent; box-shadow:inset 0 0 0 1px var(--grid); }
+.tape-key { display:flex; gap:12px; flex-wrap:wrap; margin-top:9px;
+  font:10px var(--mono); color:var(--muted); text-transform:uppercase; }
+.tape-key i { display:inline-block; width:8px; height:8px; border-radius:2px;
+  margin-right:4px; }
+.activity { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:8px; margin:10px 0 4px; }
+.activity a { display:block; min-height:92px; padding:12px 14px;
+  background:var(--surface); border:1px solid var(--hair); border-radius:5px;
+  color:inherit; text-decoration:none; }
+.activity a:hover { border-color:var(--accent); text-decoration:none; }
+.activity b { display:block; margin:4px 0 2px; font-size:13px; }
+.activity .meta { color:var(--muted); font-size:11px; }
+.verdict { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(260px,.7fr);
+  gap:26px; margin:18px 0 8px; padding:20px 22px; background:var(--surface);
+  border:1px solid var(--hair); border-left:3px solid var(--accent);
+  border-radius:6px; }
+.verdict h2 { margin:5px 0 6px; color:var(--ink); font-family:var(--display);
+  font-size:29px; line-height:1.04; letter-spacing:-.025em; text-transform:none; }
+.verdict p { margin:0; color:var(--ink-2); }
+.verdict .facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:10px; }
+.verdict .fact { border-top:1px solid var(--rule); padding-top:7px; }
+.verdict .fact b { display:block; font-size:15px; }
+.verdict .fact span { color:var(--muted); font:10px var(--mono);
+  text-transform:uppercase; letter-spacing:.08em; }
+.evidence-stage { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+  gap:12px; margin:12px 0 6px; }
+.evidence-card { background:var(--surface); border:1px solid var(--hair);
+  border-radius:6px; overflow:hidden; }
+.evidence-card .eh { padding:12px 14px; border-bottom:1px solid var(--hair); }
+.evidence-card .eh b { display:block; margin:3px 0; }
+.evidence-card .preview { width:100%; height:300px; border:0; background:#fff; }
+.evidence-card pre { margin:0; border:0; border-radius:0; max-height:300px; }
+.evidence-card .ea { display:flex; gap:9px; align-items:center; padding:9px 14px; }
+.protocol { margin-top:18px; }
+.evshade { position:fixed; inset:0; z-index:79; background:rgba(0,0,0,.62);
+  opacity:0; pointer-events:none; transition:opacity .14s; }
+.evdrawer { position:fixed; z-index:80; top:0; right:0; width:min(460px,94vw);
+  height:100vh; overflow:auto; transform:translateX(102%); transition:transform .18s;
+  background:var(--surface); border-left:1px solid var(--rule); padding:22px; }
+.evdrawer.open { transform:translateX(0); }
+.evshade.open { opacity:1; pointer-events:auto; }
+.evdrawer .close { float:right; border:1px solid var(--border); background:transparent;
+  color:var(--ink); border-radius:4px; width:32px; height:32px; cursor:pointer; }
+.evdrawer h2 { clear:both; margin:18px 0 4px; color:var(--ink);
+  font-family:var(--display); font-size:28px; text-transform:none; letter-spacing:-.02em; }
+.evdrawer dl { display:grid; grid-template-columns:120px 1fr; gap:7px 12px;
+  margin:18px 0; font-size:12.5px; }
+.evdrawer dt { color:var(--muted); font-family:var(--mono); }
+.evdrawer dd { margin:0; overflow-wrap:anywhere; }
+.cmp-verdict { margin:0 0 18px; padding:15px 18px; background:var(--surface);
+  border:1px solid var(--hair); border-left:3px solid var(--accent);
+  border-radius:6px; font-size:15px; }
+.cmp-filter { margin:-8px 0 18px; }
+@media (max-width:760px) {
+  .finding, .verdict { grid-template-columns:1fr; }
+  .finding { gap:18px; }
+  .evidence-stage { grid-template-columns:1fr; }
+  .evidence-card .preview { height:240px; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .evdrawer, .evshade { transition:none; }
+}
 """
 
 HEADER_CSS = """
 :root { --topbar-h:56px; --brand-h:32px; --shell-w:1480px; --shell-x:30px; }
 body { max-width:var(--shell-w); margin:0 auto;
-  padding:32px var(--shell-x) 72px; }
+  padding:32px var(--shell-x) 72px; overflow-x:hidden; }
 @media (max-width:760px) {
   body { padding:20px 15px 56px; }
 }
@@ -982,6 +1093,9 @@ body { max-width:var(--shell-w); margin:0 auto;
   gap:10px; }
 .topbar h1 { font-size:18px; font-weight:650; letter-spacing:-.01em; margin:0;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.topbar.taskbar { height:auto; min-height:var(--topbar-h); }
+.topbar.taskbar h1 { white-space:normal; overflow:visible; text-overflow:clip;
+  line-height:1.12; padding:10px 0; }
 .topbar .nav { flex:none; display:block; margin:0; white-space:nowrap; }
 .topbar .nav a { margin:0 0 0 16px; font-size:13px; color:var(--accent);
   text-decoration:none; }
@@ -997,11 +1111,9 @@ body { max-width:var(--shell-w); margin:0 auto;
 .pagebar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
   margin:0 0 20px; font-size:12.5px; color:var(--muted); }
 .pagebar .sub { margin:0; }
-.srail { position:fixed; z-index:30; top:50%; transform:translateY(-50%);
-  right:calc((100vw - var(--shell-w)) / 2 - 52px);
-  display:flex; flex-direction:column; gap:6px;
-  padding:7px 6px; border-radius:12px;
-  background:var(--surface); border:1px solid var(--hair); }
+.srail { position:static; display:flex; flex-direction:row; justify-content:flex-end;
+  gap:6px; margin:38px 0 0; padding:12px 0 0;
+  border-top:1px solid var(--hair); }
 .srail .sr-i { display:flex; align-items:center; justify-content:center;
   width:30px; height:30px; border-radius:8px; color:var(--muted);
   text-decoration:none; }
@@ -1012,12 +1124,8 @@ body { max-width:var(--shell-w); margin:0 auto;
   .srail .sr-i[title="X"]:hover, .srail .sr-i[title="GitHub"]:hover {
     color:var(--ink); }
 }
-@media (max-width:1609px) {
-  .srail { top:auto; bottom:18px; right:18px; transform:none;
-    flex-direction:row; box-shadow:0 4px 18px rgba(0,0,0,.28); }
-}
 @media (max-width:760px) {
-  .srail { bottom:12px; right:12px; gap:2px; padding:5px 4px; }
+  .srail { justify-content:flex-start; gap:2px; }
   .srail .sr-i { width:28px; height:28px; }
 }
 @media print { .srail { display:none; } }
@@ -1171,7 +1279,7 @@ generation time (excludes time-to-first-token).</div>
 TASK_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ task_id }} · LLM Testing</title><style>{{ css }}</style></head><body>
-<div class="topbar">{{ brand }}<div class="ttl"><h1>{{ title }}<span class="tag">{{ category }} · tier {{ tier }}</span>{% if lens %}<span class="tag lens-{{ lens.key }}" title="{{ lens.why }}">{{ lens.label }}</span>{% endif %}</h1></div>
+<div class="topbar taskbar">{{ brand }}<div class="ttl"><h1>{{ title }}<span class="tag">{{ category }} · tier {{ tier }}</span>{% if lens %}<span class="tag lens-{{ lens.key }}" title="{{ lens.why }}">{{ lens.label }}</span>{% endif %}</h1></div>
 <div class="nav">{{ nav }}</div></div>
 <div class="pagebar"><div class="sub">{{ task_id }} · scoring: {{ scoring_type }} ·
    task version {{ task_hash }}</div></div>
@@ -1185,8 +1293,19 @@ TASK_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="inner"><pre>{{ prompt }}</pre></div></details>
 {% endif %}
 
+{% if evidence %}
+<h2>Evidence stage <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· the artifact first, then the leaderboard</span></h2>
+<div class="evidence-stage">{% for e in evidence %}<article class="evidence-card">
+  <div class="eh"><span class="stamp">{{ e.label }}</span><b>{{ e.model }} · {{ e.chip }}</b>
+  <span class="small">{{ e.why }}</span></div>
+  {% if e.srcdoc %}<iframe class="preview" sandbox="allow-scripts" loading="lazy" srcdoc="{{ e.srcdoc }}" title="{{ e.model }} output preview"></iframe>
+  {% else %}<pre>{{ e.output }}</pre>{% endif %}
+  {% if e.files %}<div class="ea"><a class="action" href="{{ e.files }}">Browse full receipt</a></div>{% endif %}
+</article>{% endfor %}</div>
+{% endif %}
+
 <h2>Model comparison — every run per model, aggregated · click a header to sort</h2>
-<div class="card"><table class="sortable">
+<div class="card"><table class="sortable sticky-first">
 <tr><th class="num">#</th><th data-type="text">Model</th><th data-type="num">Score</th>
 <th data-type="text" title="the deciphered reason a non-passing result went the way it did (assess.classify) — attribution + category, full detail on hover">Why</th>
 <th class="num" data-type="num">Wall</th>
@@ -1264,6 +1383,19 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="card" style="border-left:3px solid var(--warn,#c90);background:var(--surface);
   margin:10px 0;padding:10px 14px;font-size:13px">⚠ {{ dataset_caveat }}</div>
 {% endif %}
+{% if finding %}
+<section class="finding">
+  <div><div class="stamp">{% if dataset_key == "live" %}Live{% else %}Dataset{% endif %} finding · derived from this dataset</div>
+    <h2>{{ finding.title }}</h2><p>{{ finding.body }}</p>
+    <div class="actions"><a class="action primary" href="discriminate.html">Inspect the frontier</a>
+    <a class="action" href="info.html#samplesize">How this is measured</a></div></div>
+  <div><div class="etape" aria-label="Task difficulty evidence tape">
+    {% for t in finding_tape %}<a class="{{ t.cls }}" href="tasks/{{ t.id }}.html" title="{{ t.id }} · {{ t.flag }}"></a>{% endfor %}
+    </div><div class="tape-key"><span><i style="background:var(--crit)"></i>frontier</span>
+    <span><i style="background:var(--warn)"></i>hard</span>
+    <span><i style="background:rgba(var(--cell-rgb),.92)"></i>easy</span></div></div>
+</section>
+{% endif %}
 <script>
 (async () => {
   const sel = document.getElementById('dsnav');
@@ -1289,6 +1421,14 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   {% endfor %}</div>
 </div>
 
+{% if activity %}
+<h2>What changed <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· newest measured activity, not editorial updates</span></h2>
+<div class="activity">
+{% for a in activity %}<a href="runs/{{ a.run }}.html"><span class="kind">{{ a.kind }}</span>
+  <b>{{ a.title }}</b><span class="meta">{{ a.meta }}</span></a>{% endfor %}
+</div>
+{% endif %}
+
 {% if matrix %}
 <h2>Every model, every task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· rows ranked by mean · ± is the 95% band across tasks · <span class="tie" style="color:var(--accent);font-weight:700">≈</span> marks models tied with the leader within noise · hover a cell for the task · <a href="info.html#fail">what the colors mean →</a></span></h2>
 <div class="seg" id="mxseg" title="narrow the grid to one end of the suite — rows re-rank by that subset's mean">
@@ -1310,7 +1450,7 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   {% for r in matrix.rows %}
   <div class="mx-row{% if r.lead %} lead{% endif %}{% if r.partial %} partial{% endif %}" data-all="{{ r.m_all }}" data-hard="{{ r.m_hard }}" data-frontier="{{ r.m_frontier }}" data-easy="{{ r.m_easy }}" data-nobias="{{ r.m_nobias }}" data-kind="{{ r.kind }}"{% if r.partial %} title="only {{ r.cover }} tasks run — ranked below every fully-tested model, because the mean of a partial row is not comparable to a full one"{% endif %}>
     <div class="mx-rail"><span class="rk">{{ r.rank }}</span><span class="nm">{{ r.model }}{% if r.partial %} <span class="pcov">{{ r.cover }}</span>{% endif %}</span><span class="sc">{{ r.score }}{% if r.ci %}<span class="ci" title="95% confidence band across tasks (±1.96·SE)">{{ r.ci }}</span>{% endif %}</span><span class="gp">{% if r.tied %}<span class="tie" title="within the leader's 95% band — not statistically distinguishable on this task set">≈</span>{% endif %}{{ r.gap }}</span></div>
-    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp" style="flex-grow:{{ g|length }}">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.v %} data-v="{{ cell.v }}"{% endif %}{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
+    <div class="mx-cells">{% for g in r.groups %}<div class="mx-grp" style="flex-grow:{{ g|length }}">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.v %} data-v="{{ cell.v }}"{% endif %}{% if cell.ev %} data-ev="{{ cell.ev }}"{% endif %}{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
   {% endfor %}
   <div class="mx-row foot">
@@ -1318,6 +1458,34 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     <div class="mx-cells">{% for g in matrix.foot %}<div class="mx-grp" style="flex-grow:{{ g|length }}">{% for cell in g %}<a class="mx-cell {{ cell.cls }}" data-sub="{{ cell.sub }}" data-fr="{{ cell.fr }}"{% if cell.cls == 'pass' %} style="--a:{{ cell.a }}"{% endif %} href="{{ cell.href }}" title="{{ cell.tip }}"></a>{% endfor %}</div>{% endfor %}</div>
   </div>
 </div></div>
+<div class="evshade" id="evshade"></div><aside class="evdrawer" id="evdrawer" role="dialog" aria-modal="true" aria-labelledby="evtitle">
+  <button class="close" id="evclose" aria-label="Close evidence">×</button>
+  <div class="stamp">Evidence receipt</div><h2 id="evtitle"></h2><p id="evlead" class="muted"></p>
+  <dl id="evfacts"></dl><div class="actions"><a class="action primary" id="evtask">Open task</a>
+  <a class="action" id="evfiles">Browse receipt</a></div></aside>
+<script type="application/json" id="evdata">{{ evidence_json|safe }}</script>
+<script>
+(() => {
+  const data=JSON.parse(document.getElementById('evdata').textContent), drawer=document.getElementById('evdrawer');
+  const shade=document.getElementById('evshade'), close=document.getElementById('evclose');
+  let last=null;
+  function shut(){ drawer.classList.remove('open'); shade.classList.remove('open'); if(last)last.focus(); }
+  function open(id){ const e=data[id]; if(!e) return;
+    document.getElementById('evtitle').textContent=e.model+' × '+e.task;
+    document.getElementById('evlead').textContent=e.reason;
+    const facts=[['Score',e.score],['Classification',e.classification],['Attempts',e.attempts],
+      ['Measured runs',e.runs],['Run',e.run],['Provider',e.provider],['Sampling',e.sampling],
+      ['Effort',e.effort],['Task hash',e.hash]];
+    const box=document.getElementById('evfacts'); box.replaceChildren();
+    facts.forEach(x=>{const dt=document.createElement('dt'),dd=document.createElement('dd');
+      dt.textContent=x[0]; dd.textContent=x[1]; box.append(dt,dd);});
+    document.getElementById('evtask').href=e.task_url; document.getElementById('evfiles').href=e.files;
+    drawer.classList.add('open'); shade.classList.add('open'); close.focus(); }
+  document.querySelectorAll('.mx-cell[data-ev]').forEach(c=>c.addEventListener('click',ev=>{
+    if(ev.metaKey||ev.ctrlKey||ev.shiftKey||ev.altKey) return; ev.preventDefault(); last=c; open(c.dataset.ev); }));
+  close.onclick=shut; shade.onclick=shut; addEventListener('keydown',e=>{if(e.key==='Escape')shut();});
+})();
+</script>
 <script>
 (function(){
   var seg=document.getElementById('mxseg'), coh=document.getElementById('mxcoh');
@@ -1482,7 +1650,7 @@ are shown last, marked <span class="pill" style="border-color:var(--warn);color:
   <option value="65536">64k</option><option value="131072">128k</option></select>
   context · <label><input type="checkbox" id="gpuhide"> hide models that don't fit</label>
 </div>
-<div class="card"><table class="sortable" id="standings">
+<div class="card"><table class="sortable sticky-first" id="standings">
 <tr><th data-type="num">#</th><th data-type="text">Model</th>
 <th class="num lenscol" data-type="num" id="lenshdr" title="the metric the active Rank-by lens sorts on — changes with the lens above"><span id="lenslabel">Score</span></th>
 <th data-type="text">Where</th><th data-type="num">Score</th>
@@ -3192,6 +3360,31 @@ def build_task_report(task_id: str, info: dict, tdef,
         "cost": fmt_cost(e.get("cost_usd")),
     } for e in reversed(info["history"])]
 
+    def _stage(entry, label):
+        row = next(r for r in rows if r["model"] == entry["model"])
+        app = (_RUNS_BASE / entry["run_id"] / entry["model"] / task_id
+               / "workspace" / "app.html")
+        srcdoc = ""
+        if tdef and tdef.scoring_type == "webapp" and app.is_file():
+            srcdoc = html.escape(app.read_text(encoding="utf-8", errors="replace"),
+                                 quote=True)
+        return {"label": label, "model": entry["model"], "chip": row["chip"],
+                "why": row["why_full"] or row["summary"], "srcdoc": srcdoc,
+                "output": row["output"],
+                "files": row["files"] if _RUNS_BASE == config.RUNS_DIR else ""}
+
+    evidence = []
+    if results:
+        evidence.append(_stage(results[0], "Best recorded build" if tdef and
+                               tdef.scoring_type == "webapp" else
+                               "Best recorded answer"))
+    failures = [e for e in results if e["score"].get("status") == "scored"
+                and (e["score"].get("score") or 0) < pass_thresh]
+    if failures:
+        evidence.append(_stage(min(failures,
+                                   key=lambda e: e["score"].get("score") or 0),
+                               "Representative failure"))
+
     return _compiled(TASK_TEMPLATE).render(
         cost_note=cost_note("../"),
         nav=_nav("../"), brand=_brand("../"),
@@ -3204,7 +3397,7 @@ def build_task_report(task_id: str, info: dict, tdef,
         scoring_type=(tdef.scoring_type if tdef else "?"),
         task_hash=(tdef.content_hash if tdef else info["history"][-1]["task_hash"]),
         prompt=html.escape(tdef.prompt) if tdef else "",
-        tiles=tiles, rows=rows, history=history)
+        tiles=tiles, rows=rows, history=history, evidence=evidence)
 
 
 def build_run_report(run: dict, tdefs: dict | None = None) -> str:
@@ -3306,20 +3499,27 @@ MODEL_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 {% for t in tiles %}<div class="tile"><div class="v">{{ t.v }}{% if t.sub %}<span class="vsub" title="{{ t.sub_tip }}">{{ t.sub }}</span>{% endif %}</div><div class="k">{{ t.k }}</div></div>
 {% endfor %}</div>
 
-{% if detail_rows %}
-<h2>Model details — what we tested</h2>
-<div class="card"><table>
-{% for d in detail_rows %}
-<tr><td class="small" style="width:230px;color:var(--muted)">{{ d.k }}</td><td>{{ d.v }}</td></tr>
-{% endfor %}
-</table></div>
+{% if verdict %}
+<section class="verdict"><div><div class="stamp">Measured verdict</div>
+  <h2>{{ verdict.title }}</h2><p>{{ verdict.body }}</p>
+  <div class="etape" style="margin-top:16px">{% for c in verdict_tape %}<a class="{{ c.cls }}"{% if c.cls == 'pass' %} style="background:rgba(var(--cell-rgb),{{ c.a }})"{% endif %} href="{{ c.href }}" title="{{ c.tip }}"></a>{% endfor %}</div>
+  </div><div class="facts">{% for f in verdict.facts %}<div class="fact"><b>{{ f.v }}</b><span>{{ f.k }}</span></div>{% endfor %}</div></section>
 {% endif %}
 
 <h2>Score by category</h2>
-<div class="card"><table>
+<div class="card"><table class="sticky-first">
 <tr>{% for c in cats %}<th class="num">{{ c.name }}</th>{% endfor %}</tr>
 <tr>{% for c in cats %}<td class="num">{{ c.chip }}</td>{% endfor %}</tr>
 </table></div>
+
+{% if detail_rows %}
+<details class="det protocol"><summary><b>Test conditions</b> — model id, sampling, pricing, host, availability and evidence</summary>
+<div class="inner"><div class="card"><table>
+{% for d in detail_rows %}
+<tr><td class="small" style="width:230px;color:var(--muted)">{{ d.k }}</td><td>{{ d.v }}</td></tr>
+{% endfor %}
+</table></div></div></details>
+{% endif %}
 
 <h2>Failure &amp; retry assessment <a href="../info.html#fail" class="small" style="font-weight:400">what these mean →</a></h2>
 <div class="rollup">
@@ -3350,7 +3550,7 @@ it estimates the model's own capability. <b>model</b> failures and
 excluded set live in <code>directives.yaml</code> · <code>assess:</code>.</div>
 
 <h2>Per-task — aggregated result · click a header to sort</h2>
-<div class="card"><table class="sortable">
+<div class="card"><table class="sortable sticky-first">
 <tr><th data-type="text">Task</th><th data-type="text">Category</th><th data-type="num">Score</th>
 <th class="num" data-type="num" title="how far this model's score on THIS task moved between repeat runs (population σ). '—' means the task has only been run once, so there is nothing to compare.">σ</th>
 <th data-type="text" title="the deciphered reason a non-passing result went the way it did (assess.classify) — attribution + category, full detail on hover">Why</th>
@@ -3850,13 +4050,10 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
          f"{s['avg_score_val']:.3f}", "k": "raw score",
          "sub": ("" if _ci is None else "±" + f"{_ci:.3f}".lstrip("0")),
          "sub_tip": "95% confidence band across tasks (±1.96·SE)"},
-        {"v": attr_disp, "k": "attributed score"},
         {"v": f"{npass}/{len(graded)}", "k": "tasks ≥ 0.80"},
         {"v": s["att_per_pass"], "k": "tries / pass (lower=better)"},
-        {"v": fmt_span(s["wall_ms_sum"]), "k": "total time"},
         {"v": s["tps"], "k": "gen tok/s"},
         {"v": s["cost"], "k": "cost / run"},
-        {"v": s["first_try"], "k": "first-try clean"},
     ]
     try:
         from .registry import get_model
@@ -3899,7 +4096,8 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
         sc = [e["score"]["score"] for tid, e in mine
               if tdefs[tid].category == cat
               and e["score"].get("status") == "scored"]
-        cats.append({"name": cat, "chip": _score_cell(_avg(sc))})
+        avg = _avg(sc)
+        cats.append({"name": cat, "chip": _score_cell(avg), "score": avg})
 
     task_rows = []
     for tid, e in sorted(mine):
@@ -3981,6 +4179,46 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
                   "rows": rm_rows, "foot": rm_foot}
                  if (rm_rows and rm_cats) else None)
 
+    ranked_cats = sorted((c for c in cats if c["score"] is not None),
+                         key=lambda c: c["score"], reverse=True)
+    strongest = ranked_cats[0] if ranked_cats else None
+    weakest = ranked_cats[-1] if ranked_cats else None
+    top_cats = ([c for c in ranked_cats
+                 if strongest and abs(c["score"] - strongest["score"]) < 0.0005]
+                if ranked_cats else [])
+    frontier_ids = set((dstats or {}).get("frontier_subset") or [])
+    frontier_vals = [e["score"]["score"] for tid, e in mine
+                     if tid in frontier_ids and e["score"].get("status") == "scored"]
+    low = min(((e["score"]["score"], tid) for tid, e in mine
+               if e["score"].get("status") == "scored"), default=(None, ""))
+    verdict = {
+        "title": ((f"Perfect in {len(top_cats)} categories; pressure point: "
+                   f"{weakest['name']}")
+                  if strongest and strongest["score"] >= 0.999 and len(top_cats) > 1
+                  else f"Strongest in {strongest['name']}; pressure point: {weakest['name']}"
+                  if strongest and weakest and strongest != weakest else
+                  "A complete measured profile"),
+        "body": (f"{npass} of {len(graded)} graded tasks clear the pass line. "
+                 + (f"On the frontier it clears {sum(v >= 0.8 for v in frontier_vals)} "
+                    f"of {len(frontier_vals)} measured task(s). " if frontier_vals else "")
+                 + (f"Its lowest result is {low[0]:.3f} on {low[1]}."
+                    if low[0] is not None else "No scored task is available.")),
+        "facts": [
+            {"v": attr_disp, "k": "attributed score"},
+            {"v": s["first_try"], "k": "first-try clean"},
+            {"v": fmt_span(s["wall_ms_sum"]), "k": "total measured time"},
+            {"v": (f"{sum(v >= 0.8 for v in frontier_vals)}/{len(frontier_vals)}"
+                   if frontier_vals else "—"), "k": "frontier record"},
+        ],
+    }
+    verdict_tape = []
+    for tid, e in sorted(mine):
+        cell = _mx_cell(e, tdefs[tid], acfg, suspect,
+                        f"../tasks/{tid}.html#m-{_slug_name(model)}")
+        verdict_tape.append({"id": tid, "href": cell["href"],
+                             "cls": cell["cls"], "a": cell.get("a", "0"),
+                             "tip": cell["tip"]})
+
     verscmp = ""
     if versions:
         payload = model_version_payload(model, versions)
@@ -3995,7 +4233,8 @@ def build_model_report(model: str, runs: list[dict], tdefs: dict,
         where=where, dataset_label=dataset_label, n_runs=len(my_runs),
         tiles=tiles, cats=cats, task_rows=task_rows, run_rows=run_rows,
         runmatrix=runmatrix,
-        detail_rows=detail_rows, model_links=model_links, asmt=asmt)
+        detail_rows=detail_rows, model_links=model_links, asmt=asmt,
+        verdict=verdict, verdict_tape=verdict_tape)
 
 
 def machine_only_score(entry: dict, tdef) -> float | None:
@@ -4029,6 +4268,8 @@ def machine_only_means(task_data: dict, tdefs: dict) -> dict[str, float]:
 def build_index(runs: list[dict], tasks_dir: Path | None = None,
                 dataset_label: str = "", dataset_key: str = "live",
                 versions: list[tuple] | None = None) -> str:
+    import json as _json
+
     run_ids = [r["run_id"] for r in runs]
     color_overrides, hidden = _model_prefs()
     all_models = sorted({res["model"] for r in runs for res in r["results"]}
@@ -4406,9 +4647,38 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         _cat_tids[_c].sort()
     _live_cats = [c for c in all_cats if _cat_tids.get(c)]
 
+    evidence: dict[str, dict] = {}
+
     def _mcell(entry, tdef, model=None):
         href = f"tasks/{tdef.id}.html" + (f"#m-{_slug_name(model)}" if model else "")
-        return _mx_cell(entry, tdef, _acfg, _suspect, href)
+        cell = _mx_cell(entry, tdef, _acfg, _suspect, href)
+        if entry is None or model is None:
+            return cell
+        dx = diagnose(entry, tdef, _acfg, _suspect) or {}
+        eid = str(len(evidence))
+        score = entry.get("score") or {}
+        value = score.get("score")
+        served = entry.get("served_by") or []
+        sampling = entry.get("sampling_used") or {}
+        evidence[eid] = {
+            "model": model,
+            "task": tdef.id,
+            "score": "—" if value is None else f"{value:.3f}",
+            "classification": dx.get("category") or entry.get("status") or "unknown",
+            "reason": dx.get("detail") or score.get("summary") or "No detail recorded.",
+            "attempts": entry.get("n_attempts") or len(entry.get("attempts") or []),
+            "runs": entry.get("n_scored") or entry.get("n_runs") or 1,
+            "run": entry.get("run_id") or "—",
+            "provider": ", ".join(str(x) for x in served) or "not recorded",
+            "sampling": (", ".join(f"{k}={v}" for k, v in sorted(sampling.items()))
+                         or "provider default / not settable"),
+            "effort": entry.get("effort_used") or "not recorded",
+            "hash": entry.get("task_hash") or "not recorded",
+            "task_url": href,
+            "files": _receipt_url(entry.get("run_id") or "", model, tdef.id),
+        }
+        cell["ev"] = eid
+        return cell
 
     _n_suite = len(tdefs) or 1
     _cover = {m: len(by_model.get(m, [])) for m in all_models}
@@ -4515,6 +4785,50 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                                if r["kind"] == "remote")}
               if (matrix_rows and _live_cats) else None)
 
+    finding = {
+        "title": ("The leaderboard is inside the noise"
+                  if _dstats["top_spread"] <= 0.05 else
+                  "The frontier is moving again"),
+        "body": (f"The top {_dstats['cohort_k']} models span only "
+                 f"{_dstats['top_spread']:.2f} in mean score. "
+                 f"{_dstats['n_frontier']} frontier task(s) still beat the top "
+                 f"cohort; {_dstats['n_ceiling']} are already ceiling tasks."),
+    } if _dstats.get("rows") else None
+    _tone = {"frontier": "frontier", "discriminator": "hard",
+             "floor-gate": "hard", "ceiling": "easy", "dead": "easy"}
+    finding_tape = [{"id": r["tid"], "flag": r["flag"],
+                     "cls": _tone.get(r["flag"], "mid")}
+                    for r in sorted(_dstats.get("rows") or [],
+                                    key=lambda x: x["tid"])]
+
+    first_run: dict[str, str] = {}
+    for r in runs:
+        for m in {x["model"] for x in r["results"]}:
+            first_run.setdefault(m, r["run_id"])
+    activity = []
+    seen_activity: set[str] = set()
+    for r in reversed(runs):
+        models = sorted({x["model"] for x in r["results"]})
+        if not models:
+            continue
+        new = [m for m in models if first_run.get(m) == r["run_id"]]
+        candidates = new or [m for m in models if m not in seen_activity]
+        if not candidates:
+            continue
+        focus = candidates[0]
+        seen_activity.add(focus)
+        stopped = r["manifest"].get("stopped_reason")
+        kind = "new model" if focus in new else "measured run"
+        title = (focus + " entered the benchmark" if focus in new
+                 else focus + " was measured")
+        activity.append({"kind": "paused" if stopped else kind,
+                         "title": title, "run": r["run_id"],
+                         "meta": (f"{len(r['results'])} result(s) · "
+                                  + (f"stopped: {stopped}" if stopped else
+                                     r["run_id"].split("_")[0]))})
+        if len(activity) == 4:
+            break
+
     mast_eyebrow = [
         dataset_label or f"Suite v{config.suite_version()}",
         f"{len(task_data)} tasks", f"{len(all_models)} models",
@@ -4558,6 +4872,8 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         sort_js=_SORT_JS,
         css=BASE_CSS, tiles=tiles, runs=runs_view, run_ids=run_ids,
         mast_eyebrow=mast_eyebrow, mast_stats=mast_stats, matrix=matrix,
+        finding=finding, finding_tape=finding_tape, activity=activity,
+        evidence_json=_json.dumps(evidence, separators=(",", ":")).replace("</", "<\\/"),
         podium=podium, standings=standings, task_rows=task_rows,
         frontier=frontier, bump=bump, bumps=bumps,
         cost_scatter=cost_scatter, speed_scatter=speed_scatter,
@@ -5740,7 +6056,8 @@ def discrimination_stats(runs: list[dict], tdefs: dict) -> dict:
         else:
             flag = "mixed"
         rows.append({
-            "tid": tid, "tier": t.tier, "lane": t.scoring_type,
+            "tid": tid, "tier": t.tier,
+            "lane": getattr(t, "scoring_type", "unknown"),
             "cat": t.category, "n": n, "mean": mean, "sd": sd,
             "pct1": pct1, "pct0": pct0, "gap": gap,
             "top_mean": top_mean, "bot_mean": bot_mean, "flag": flag,
@@ -6436,6 +6753,15 @@ COMPARE_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8"
   <select id="selB" class="cmp-sel"></select>
 </div>
 
+<div id="cmp-verdict" class="cmp-verdict"></div>
+<div class="seg cmp-filter" id="cmp-filter">
+  <button type="button" data-view="all" class="on">All tasks</button>
+  <button type="button" data-view="disagree">Disagreements</button>
+  <button type="button" data-view="frontier">Frontier</button>
+  <button type="button" data-view="hard">Hard</button>
+  <button type="button" data-view="fail">Failures</button>
+  <button type="button" id="copycmp">Copy comparison link</button>
+</div>
 <div id="cmp-head" class="cmp-head"></div>
 <h2>Per-task <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· swatch ink ramps with the score · Δ colors the winner · grouped by category</span></h2>
 <div id="cmp-grid"></div>
@@ -6456,6 +6782,7 @@ function sc(v){
 }
 function num(x){ return (x === null || x === undefined) ? null : x; }
 function fmtPct(v){ return v === null ? '\\u2014' : Math.round(v*100)+'%'; }
+let view = 'all';
 
 const METRICS = [
   ['Raw score', 'score', true, m => m.score===null?'\\u2014':m.score.toFixed(3)+(m.ci!==null?' \\u00b1'+m.ci.toFixed(3).replace(/^0/,''):'')],
@@ -6506,13 +6833,32 @@ function renderHead(a, b){
   }
   $('#cmp-head').innerHTML = h;
 }
+function verdict(a,b){
+  const A=D.data[a],B=D.data[b],parts=[];
+  if(A.score!==null&&B.score!==null){const d=A.score-B.score;
+    parts.push(Math.abs(d)<0.001?'quality is effectively tied':
+      (d>0?a:b)+' leads quality by '+Math.abs(d).toFixed(3));}
+  if(A.tps!==null&&B.tps!==null&&A.tps!==B.tps){const fast=A.tps>B.tps?a:b;
+    parts.push(fast+' generates '+Math.abs(A.tps-B.tps).toFixed(1)+' tok/s faster');}
+  if(A.wall!==null&&B.wall!==null&&A.wall!==B.wall){const quick=A.wall<B.wall?a:b;
+    parts.push(quick+' finishes '+Math.round(Math.abs(A.wall-B.wall)/60000)+' min sooner');}
+  parts.push(a+' passes '+A.pass+'/'+A.graded+'; '+b+' passes '+B.pass+'/'+B.graded);
+  $('#cmp-verdict').textContent=parts.join('. ')+'.';
+}
+function includeTask(tid,va,vb){
+  if(view==='disagree') return va!==null&&vb!==null&&Math.abs(va-vb)>0.001;
+  if(view==='frontier'||view==='hard') return D.tiers[tid]===view;
+  if(view==='fail') return (va!==null&&va<0.8)||(vb!==null&&vb<0.8);
+  return true;
+}
 function renderGrid(a, b){
   const A = D.data[a], B = D.data[b];
   let h = '';
   for (const cat of D.cats){
-    h += '<div class="cmp-cat"><div class="cmp-cath">'+cat.key+'</div>';
+    let rows='';
     for (const tid of cat.tids){
       const va = A.t[tid] ?? null, vb = B.t[tid] ?? null;
+      if(!includeTask(tid,va,vb)) continue;
       const A1 = sc(va), B1 = sc(vb);
       let d = '';
       if (va!==null && vb!==null && Math.abs(va-vb) > 1e-9){
@@ -6521,21 +6867,22 @@ function renderGrid(a, b){
           + (diff>0?'\\u25c0 ':'') + (diff>0?'+':'') + diff.toFixed(3)
           + (diff<0?' \\u25b6':'') + '</span>';
       } else if (va!==null && vb!==null){ d = '<span class="cmp-td tie">=</span>'; }
-      h += '<div class="cmp-row">'
+      rows += '<div class="cmp-row">'
          + '<a class="cmp-t" href="tasks/'+tid+'.html">'+tid+'</a>'
          + '<span class="scv '+A1.cls+' ra">'+A1.txt+A1.sw+'</span>'
          + '<span class="cmp-dc">'+d+'</span>'
          + '<span class="scv '+B1.cls+'">'+B1.sw+'<b>'+B1.txt+'</b></span>'
          + '</div>';
     }
-    h += '</div>';
+    if(rows) h += '<div class="cmp-cat"><div class="cmp-cath">'+cat.key+'</div>'+rows+'</div>';
   }
-  $('#cmp-grid').innerHTML = h;
+  $('#cmp-grid').innerHTML = h || '<p class="muted">No tasks match this view.</p>';
 }
 function render(){
   const a = $('#selA').value, b = $('#selB').value;
-  renderHead(a, b); renderGrid(a, b);
+  verdict(a,b); renderHead(a, b); renderGrid(a, b);
   const u = new URL(location); u.searchParams.set('a',a); u.searchParams.set('b',b);
+  u.searchParams.set('view',view);
   history.replaceState(null,'',u);
 }
 (function init(){
@@ -6546,6 +6893,14 @@ function render(){
   $('#selB').value = p.get('b') && D.data[p.get('b')] ? p.get('b')
                    : (D.models[1] || D.models[0]);
   $('#selA').onchange = render; $('#selB').onchange = render;
+  view = ['all','disagree','frontier','hard','fail'].includes(p.get('view')) ? p.get('view') : 'all';
+  document.querySelectorAll('#cmp-filter [data-view]').forEach(b=>{
+    b.classList.toggle('on',b.dataset.view===view);
+    b.onclick=()=>{view=b.dataset.view;
+      document.querySelectorAll('#cmp-filter [data-view]').forEach(x=>x.classList.toggle('on',x===b)); render();};
+  });
+  $('#copycmp').onclick=async()=>{await navigator.clipboard.writeText(location.href);
+    $('#copycmp').textContent='Link copied';};
   $('#swap').onclick = () => { const t=$('#selA').value;
     $('#selA').value=$('#selB').value; $('#selB').value=t; render(); };
   render();
@@ -7277,9 +7632,10 @@ def build_compare_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
     for tid in task_data:
         cats.setdefault(tdefs[tid].category, []).append(tid)
     cat_list = [{"key": c, "tids": sorted(cats[c])} for c in sorted(cats)]
+    tiers = task_tiers(runs, tdefs)
 
     payload = {"models": ranked, "names": sorted(ranked, key=str.lower),
-               "data": data, "cats": cat_list}
+               "data": data, "cats": cat_list, "tiers": tiers}
     data_json = _json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
     return _compiled(COMPARE_TEMPLATE).render(
         cost_note=cost_note(),

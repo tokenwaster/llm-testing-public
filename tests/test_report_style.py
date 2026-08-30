@@ -161,15 +161,13 @@ def test_every_social_icon_carries_real_path_data():
         assert path.count(".") > 8, f"{name} lacks sub-pixel detail"
 
 
-def test_the_rail_never_covers_the_reading_column():
+def test_the_social_links_flow_after_the_reading_column():
     from harness import report
     css = report.HEADER_CSS
-    assert ".srail { position:fixed" in css
-    assert "right:calc((100vw - var(--shell-w)) / 2 - 52px)" in css
-    assert "@media (max-width:1609px)" in css
-    i = css.index("@media (max-width:1609px)")
-    docked = css[i:i + 220]
-    assert "bottom:18px" in docked and "flex-direction:row" in docked
+    rail = re.search(r"\.srail \{[^}]+\}", css).group(0)
+    assert "position:static" in rail
+    assert "position:fixed" not in rail and "bottom:" not in rail
+    assert "border-top:1px solid var(--hair)" in rail
 
 
 def test_the_rail_is_injected_once_per_page():
@@ -438,6 +436,38 @@ def test_the_compare_dropdowns_are_alphabetical_not_ranked():
     assert '"names": sorted(ranked, key=str.lower)' in src
     assert "D.models[0]" in src and "D.models[1]" in src, (
         "the default pair should stay the top two by score")
+
+
+def test_compare_state_and_decision_are_shareable():
+    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    for hook in ("cmp-verdict", "data-view=\"disagree\"", "D.tiers[tid]",
+                 "u.searchParams.set('view',view)", "Copy comparison link"):
+        assert hook in src, hook
+
+
+def test_editorial_evidence_surfaces_render_from_live_data():
+    from harness import report as rp
+
+    runs = rp.load_all_runs()
+    tdefs = rp._task_defs()
+    td = rp.collect_task_data(runs)
+    idx = rp.build_index(runs)
+    for hook in ("Live finding", "What changed", "Evidence receipt", "evdata"):
+        assert hook in idx, hook
+    model = sorted(rp.covered_models(td))[0]
+    model_html = rp.build_model_report(model, runs, tdefs,
+                                       dstats=rp.discrimination_stats(runs, tdefs))
+    for hook in ("Measured verdict", "Test conditions", "etape"):
+        assert hook in model_html, hook
+    tid = "web-013-billiards"
+    task_html = rp.build_task_report(tid, td[tid], tdefs[tid])
+    assert "Evidence stage" in task_html and "Best recorded build" in task_html
+
+
+def test_token_averages_render_as_whole_tokens():
+    from harness import report
+
+    assert report.fmt_tok(7705.666666666667) == "7,706"
 
 
 def test_the_swap_button_sits_in_the_same_grid_column_as_the_divider():

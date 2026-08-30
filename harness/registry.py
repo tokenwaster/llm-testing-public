@@ -242,15 +242,16 @@ def reset_cache() -> None:
 
 def _model_fields(f: Path) -> dict:
     import copy
+    text = f.read_text(encoding="utf-8")
     try:
         st = f.stat()
-        stamp = (st.st_mtime_ns, st.st_size)
+        stamp = (st.st_mtime_ns, st.st_size, hash(text))
     except OSError:
         stamp = None
     hit = _YAML_CACHE.get(f)
     if stamp is not None and hit is not None and hit[0] == stamp:
         return copy.deepcopy(hit[1])
-    raw = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+    raw = yaml.safe_load(text) or {}
     raw["pricing_set"] = "pricing" in raw
     if "sampling_settable" in raw:
         raw["sampling_settable_yaml"] = raw.pop("sampling_settable")

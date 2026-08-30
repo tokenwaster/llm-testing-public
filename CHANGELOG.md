@@ -26,6 +26,33 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+### Evidence-led report redesign
+
+The static site now opens with a derived live finding and a task-difficulty
+evidence tape, followed by a deduplicated recent-measurement rail. Every
+overview matrix cell opens an in-page receipt with score, classification,
+attempts, provider, sampling, task hash, and direct evidence links; modifier
+clicks still navigate normally.
+
+Model pages lead with a measured verdict, strongest/weakest category, frontier
+record, and compact evidence tape; protocol details are collapsed under Test
+conditions. Task pages put the artifact first: web-app tasks render the best
+recorded build in a sandboxed live preview beside a representative failure,
+while text tasks surface the best and failing answer excerpts. Compare pages
+state the quality/speed/time decision in plain language, filter to disagreements,
+frontier, hard, or failing tasks, and persist the complete comparison in the URL.
+
+The shared visual system uses a carbon/graphite evidence-lab palette, condensed
+display hierarchy, stronger keyboard focus, sticky data headers/first columns,
+whole-token aggregate formatting, wrapping task titles, and social links that
+flow after the content instead of obscuring it. Mobile pages keep wide tables
+inside their own scrollers and never widen the document.
+
+The model-registry cache key now includes the YAML text as well as modification
+time and size. Two same-size edits made inside one filesystem timestamp tick can
+no longer leave the live backend serving the older config; unchanged files still
+skip repeated YAML parsing.
+
 ### Comment and commit-metadata hygiene
 
 Authored YAML is comment-free, and the public exporter strips full-line YAML
