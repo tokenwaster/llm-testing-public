@@ -20,7 +20,12 @@ def test_single_member_family_renders_a_full_card(monkeypatch):
 
     page = report.build_family_page([], {})
 
-    assert '<div class="famcard">' in page
+    assert 'class="famcard"' in page
     assert "Solo" in page
     assert "only-model" in page
     assert "Single-model families" not in page
+    for hook in ("Family briefing", "family-filter", "Portrait receipt",
+                 "family-inspector", "<details"):
+        assert hook in page
+    assert "querySelector('summary').addEventListener('click'" in page
+    assert "addEventListener('toggle'" not in page

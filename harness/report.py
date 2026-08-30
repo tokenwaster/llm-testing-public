@@ -1370,6 +1370,33 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 .stat .k { font-family:var(--mono); font-size:10px; letter-spacing:.11em; text-transform:uppercase;
   color:var(--muted); margin-top:7px; }
 .stat .d { font-size:11.5px; color:var(--ink-2); margin-top:2px; }
+.lab-notes { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+.lab-note { border:1px solid var(--border); border-radius:10px; padding:15px;
+  background:var(--surface); display:flex; flex-direction:column; min-height:220px; }
+.lab-note .stamp { color:var(--accent); font:10px var(--mono); letter-spacing:.15em;
+  text-transform:uppercase; }
+.lab-note h3 { font-family:var(--display); font-size:22px; line-height:1.05;
+  margin:12px 0 8px; letter-spacing:-.01em; }
+.lab-note p { color:var(--ink-2); font-size:12px; }
+.lab-note .receipt { border-top:1px solid var(--hair); padding-top:9px;
+  margin-top:auto; color:var(--ink); font:11px var(--mono); }
+.lab-note .caveat { color:var(--muted); font-size:10.5px; }
+.lab-note .actions { margin-top:10px; }
+.lab-brand { display:none; }
+body.receipt { min-height:100vh; }
+body.receipt > * { display:none!important; }
+body.receipt > .lab-notes { display:block!important; width:min(540px,100%); margin:0 auto;
+  padding:28px; }
+body.receipt .lab-note { display:none; }
+body.receipt .lab-note.on { display:flex; min-height:900px; justify-content:center;
+  border-width:2px; padding:34px; }
+body.receipt .lab-note.on .lab-brand { display:block; color:var(--muted);
+  font:11px var(--mono); letter-spacing:.12em; text-transform:uppercase;
+  margin-bottom:auto; }
+body.receipt .lab-note.on h3 { font-size:42px; }
+body.receipt .lab-note.on .actions { margin-bottom:auto; }
+body.receipt .lab-note.on .actions .action:last-child { display:none; }
+@media (max-width:760px) { .lab-notes { grid-template-columns:1fr; } }
 </style></head><body>
 <div class="topbar">{{ brand }}<div class="ttl"><h1>LLM Testing</h1></div>
 <div class="nav">{{ nav }}</div></div>
@@ -1420,6 +1447,22 @@ INDEX_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   {% for s in mast_stats %}<div class="stat"><div class="n{% if s.up %} up{% endif %}{% if s.warn %} warn{% endif %}">{{ s.n }}</div><div class="k">{{ s.k }}</div>{% if s.d %}<div class="d">{{ s.d }}</div>{% endif %}</div>
   {% endfor %}</div>
 </div>
+
+{% if lab_notes %}
+<h2>Current field notes <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· editorial findings derived from the live receipts</span></h2>
+<div class="lab-notes" id="lab">
+{% for n in lab_notes %}<article class="lab-note" data-note="{{ loop.index0 }}">
+  <div class="lab-brand">Token Waster · LLM Testing</div><div class="stamp">{{ n.kind }}</div>
+  <h3>{{ n.title }}</h3><p>{{ n.body }}</p><div class="receipt">{{ n.receipt }}</div>
+  <p class="caveat">{{ n.caveat }}</p><div class="actions"><a class="action primary" href="{{ n.href }}">Inspect receipt</a>
+  <a class="action" href="?receipt={{ loop.index0 }}#lab">Portrait receipt</a></div></article>{% endfor %}
+</div>
+<script>
+(() => { const n=new URLSearchParams(location.search).get('receipt'); if(n===null)return;
+  const card=document.querySelector(`.lab-note[data-note="${n}"]`); if(!card)return;
+  card.classList.add('on'); document.body.classList.add('receipt'); })();
+</script>
+{% endif %}
 
 {% if activity %}
 <h2>What changed <span class="small muted" style="text-transform:none;letter-spacing:0;font-weight:400">· newest measured activity, not editorial updates</span></h2>
@@ -4801,6 +4844,96 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
                     for r in sorted(_dstats.get("rows") or [],
                                     key=lambda x: x["tid"])]
 
+    lab_notes = []
+    recent_runs = runs[-8:]
+    recent_run_ids = {run["run_id"] for run in recent_runs}
+    recent_models = {res["model"] for run in recent_runs for res in run["results"]}
+    repeat_candidates = []
+    for tid, info in task_data.items():
+        histories: dict[str, list[dict]] = {}
+        current_hash = getattr(tdefs[tid], "content_hash", "")
+        for entry in info["history"]:
+            score = entry.get("score") or {}
+            if (score.get("status") == "scored"
+                    and score.get("score") is not None
+                    and entry.get("run_id") in recent_run_ids
+                    and (not current_hash or entry.get("task_hash") == current_hash)):
+                histories.setdefault(entry["model"], []).append(entry)
+        for model, entries in histories.items():
+            if len(entries) < 3:
+                continue
+            values = [e["score"]["score"] for e in entries]
+            repeat_candidates.append((max(values) - min(values), model, tid, values,
+                                      entries[-1].get("task_hash") or "not recorded"))
+    if repeat_candidates:
+        spread, model, tid, values, task_hash = max(repeat_candidates)
+        shown = " → ".join(f"{v:.3f}" for v in values[-5:])
+        lab_notes.append({
+            "kind": "Repeatability",
+            "title": f"Same task. A {spread:.3f} swing.",
+            "body": (f"{model} answered {tid} {len(values)} times under the "
+                     "current task hash. The score did not settle on one result."),
+            "receipt": f"{shown} · task {tid}",
+            "caveat": f"n={len(values)} · task hash {task_hash} · every scored run remains in the mean.",
+            "href": f"tasks/{tid}.html#m-{_slug_name(model)}",
+        })
+
+    shape_candidates = []
+    for model in recent_models:
+        if _cover.get(model, 0) < _n_suite:
+            continue
+        cat_values: dict[str, list[float]] = {}
+        for entry in by_model.get(model, []):
+            score = entry.get("score") or {}
+            if score.get("status") == "scored" and score.get("score") is not None:
+                cat_values.setdefault(entry["category"], []).append(score["score"])
+        means = [(sum(values) / len(values), cat) for cat, values in cat_values.items()]
+        if len(means) >= 3:
+            best, worst = max(means), min(means)
+            shape_candidates.append((best[0] - worst[0], model, best, worst))
+    if shape_candidates:
+        gap, model, best, worst = max(shape_candidates)
+        best_name, worst_name = best[1].replace("-", " "), worst[1].replace("-", " ")
+        lab_notes.append({
+            "kind": "Capability shape",
+            "title": f"{model} is not one score.",
+            "body": (f"Its strongest measured category is {best_name} at {best[0]:.3f}; "
+                     f"its pressure point is {worst_name} at {worst[0]:.3f}."),
+            "receipt": f"{best_name} {best[0]:.3f} · {worst_name} {worst[0]:.3f} · gap {gap:.3f}",
+            "caveat": "Category means describe this suite's measured tasks, not every possible use.",
+            "href": f"models/{_slug_name(model)}.html",
+        })
+
+    family_members: dict[str, list[tuple[str, float, bool]]] = {}
+    for model in all_models:
+        family = fam_of.get(model)
+        score = summaries[model].get("avg_score_val")
+        if family and score is not None and _cover.get(model, 0) >= _n_suite:
+            family_members.setdefault(family, []).append(
+                (model, score, summaries[model]["local"]))
+    local_candidates = []
+    for family, members in family_members.items():
+        locals_ = [m for m in members if m[2]]
+        hosted = [m for m in members if not m[2]]
+        if locals_ and hosted:
+            best_local = max(locals_, key=lambda m: m[1])
+            best_hosted = max(hosted, key=lambda m: m[1])
+            local_candidates.append((best_hosted[1] - best_local[1], family,
+                                     best_hosted, best_local))
+    if local_candidates:
+        gap, family, hosted, local = max(local_candidates)
+        lab_notes.append({
+            "kind": "Local tradeoff",
+            "title": f"The {family} local gap is {gap:.3f}.",
+            "body": (f"{hosted[0]} leads the hosted side at {hosted[1]:.3f}. "
+                     f"{local[0]} is the strongest fully measured local member at {local[1]:.3f}."),
+            "receipt": f"hosted {hosted[1]:.3f} · local {local[1]:.3f} · gap {gap:.3f}",
+            "caveat": "Capability is only half the decision; the Families page adds VRAM and speed.",
+            "href": f"family.html?family={quote(family)}",
+        })
+    if dataset_key != "live":
+        lab_notes = []
+
     first_run: dict[str, str] = {}
     for r in runs:
         for m in {x["model"] for x in r["results"]}:
@@ -4872,7 +5005,8 @@ def build_index(runs: list[dict], tasks_dir: Path | None = None,
         sort_js=_SORT_JS,
         css=BASE_CSS, tiles=tiles, runs=runs_view, run_ids=run_ids,
         mast_eyebrow=mast_eyebrow, mast_stats=mast_stats, matrix=matrix,
-        finding=finding, finding_tape=finding_tape, activity=activity,
+        finding=finding, finding_tape=finding_tape, lab_notes=lab_notes,
+        activity=activity,
         evidence_json=_json.dumps(evidence, separators=(",", ":")).replace("</", "<\\/"),
         podium=podium, standings=standings, task_rows=task_rows,
         frontier=frontier, bump=bump, bumps=bumps,
@@ -6447,15 +6581,16 @@ def family_stats(runs: list[dict], tdefs: dict) -> dict:
     td = {tid: info for tid, info in collect_task_data(runs).items()
           if tid in tdefs}
     n_suite = len(tdefs) or 1
-    ent: dict[str, list[dict]] = {}
-    for info in td.values():
+    ent: dict[str, list[tuple[str, dict]]] = {}
+    for tid, info in td.items():
         for m, e in info["agg"].items():
             if m not in hidden and e["score"].get("status") == "scored":
-                ent.setdefault(m, []).append(e)
+                ent.setdefault(m, []).append((tid, e))
 
     _fp: dict[str, dict | None] = {}
     fams: dict[str, list[dict]] = {}
-    for m, es in ent.items():
+    for m, cells in ent.items():
+        es = [e for _tid, e in cells]
         mo = reg.get(m)
         fam = mo.family_name if mo else infer_family(m)
         if not fam:
@@ -6477,6 +6612,13 @@ def family_stats(runs: list[dict], tdefs: dict) -> dict:
         if fp:
             vram_ref = (fp["weights_gb"] + fp["kv_fixed_gb"]
                         + fp["kv_per_tok_gb"] * VRAM_REF_CTX)
+        cat_values: dict[str, list[float]] = {}
+        for tid, e in cells:
+            cat_values.setdefault(tdefs[tid].category, []).append(
+                e["score"]["score"])
+        sigmas = [e["score_sigma"] for e in es
+                  if e.get("n_scored", 1) > 1
+                  and e.get("score_sigma") is not None]
         fams.setdefault(fam, []).append({
             "model": m, "score": sum(e["score"]["score"] for e in es) / len(es),
             "n": len(es), "coverage": len(es) / n_suite, "local": local,
@@ -6484,6 +6626,10 @@ def family_stats(runs: list[dict], tdefs: dict) -> dict:
             "native_ctx": (fp or {}).get("native_ctx"),
             "quant": (fp or {}).get("quant"),
             "tps": (sum(tps_vals) / len(tps_vals)) if tps_vals else None,
+            "categories": {c: sum(v) / len(v) for c, v in cat_values.items()},
+            "trials": sum(e.get("n_scored", 1) for e in es),
+            "repeat_cells": sum(e.get("n_scored", 1) > 1 for e in es),
+            "stability": (sum(sigmas) / len(sigmas)) if sigmas else None,
         })
     for f in fams:
         fams[f].sort(key=lambda x: -x["score"])
@@ -6544,21 +6690,94 @@ def _size_score_svg(points: list[dict], colors: dict, width=1000, height=360) ->
 FAMILY_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LLM Testing · Families</title><style>{{ css }}
-.famcard { border:1px solid var(--border); border-radius:10px; padding:12px 16px;
+html { overflow-x:clip; }
+.family-wrap { max-width:1180px; margin:0 auto; padding:0 20px 64px; overflow-x:hidden; }
+.family-intro { max-width:820px; }
+.analysis-block { border:1px solid var(--border); border-radius:10px;
   margin:12px 0; background:var(--surface); }
-.famcard .h { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;
-  margin-bottom:6px; }
-.famcard .h b { font-size:15px; }
+.analysis-block > summary { cursor:pointer; padding:12px 16px; font-weight:700; }
+.analysis-body { padding:0 16px 16px; }
+.family-stage { display:grid; grid-template-columns:minmax(0,1fr) 310px;
+  align-items:start; gap:18px; margin-top:22px; }
+.family-list { min-width:0; }
+.family-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+  margin-bottom:10px; }
+.family-controls input, .family-controls select, #family-focus {
+  background:var(--surface); color:var(--ink); border:1px solid var(--border);
+  border-radius:7px; padding:7px 9px; font:inherit; font-size:12px; }
+.family-controls input { flex:1 1 190px; }
+.family-filter { display:flex; gap:5px; flex-wrap:wrap; }
+.family-filter button { background:var(--surface); color:var(--ink-2);
+  border:1px solid var(--border); border-radius:999px; padding:6px 9px;
+  font:inherit; font-size:11px; cursor:pointer; }
+.family-filter button.on { border-color:var(--accent); color:var(--ink); }
+.famcard { border:1px solid var(--border); border-radius:10px; margin:10px 0;
+  max-width:100%;
+  background:var(--surface); overflow:hidden; }
+.famcard[hidden] { display:none; }
+.famcard.selected { border-color:color-mix(in srgb,var(--accent) 70%,var(--border)); }
+.famcard > summary { display:grid; grid-template-columns:minmax(150px,1fr) minmax(180px,1.2fr) auto;
+  gap:14px; align-items:center; padding:12px 14px; cursor:pointer; list-style:none; }
+.famcard > summary::-webkit-details-marker { display:none; }
+.famcard > summary:hover { background:var(--surface-2); }
+.fam-name { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+.fam-name b { font-size:15px; }
+.fam-mini { display:flex; gap:4px; align-items:end; height:22px; }
+.fam-mini i { display:block; flex:1; min-width:7px; height:calc(4px + 18px * var(--score));
+  background:var(--warn); opacity:calc(.22 + .78 * var(--score));
+  border-radius:2px 2px 0 0; }
+.fam-open { color:var(--muted); transition:transform .16s ease; }
+.famcard[open] .fam-open { transform:rotate(90deg); }
+.fam-body { border-top:1px solid var(--hair); padding:4px 14px 12px; overflow-x:auto;
+  contain:inline-size; }
+.family-inspector { position:sticky; top:14px; border:1px solid var(--border);
+  border-radius:12px; padding:16px; background:var(--surface); min-height:420px; }
+.family-inspector .stamp, .lab-note .stamp { font-family:var(--mono); font-size:10px;
+  letter-spacing:.16em; text-transform:uppercase; color:var(--accent); }
+.family-inspector h2 { font-family:var(--display); font-size:30px; line-height:1;
+  margin:14px 0 8px; text-transform:none; letter-spacing:-.02em; }
+.family-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px;
+  margin:14px 0; }
+.family-fact { border-top:1px solid var(--hair); padding-top:7px; }
+.family-fact b { display:block; font-size:15px; }
+.family-fact span { color:var(--muted); font:10px var(--mono); text-transform:uppercase;
+  letter-spacing:.08em; }
+.lineage, .fingerprint { display:grid; gap:7px; margin-top:14px; }
+.lineage-row, .fingerprint-row { display:grid; grid-template-columns:minmax(88px,1fr) minmax(70px,1.4fr) 38px;
+  gap:8px; align-items:center; font-size:11px; }
+.lineage-row span, .fingerprint-row span { overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; }
+.lineage-row b, .fingerprint-row b { font:11px var(--mono); text-align:right; }
+.lineage-rail { height:5px; background:var(--surface-2); border-radius:999px; overflow:hidden; }
+.lineage-rail i { display:block; height:100%; width:calc(var(--score) * 100%);
+  background:var(--accent); border-radius:inherit; }
+.fingerprint .lineage-rail i { background:var(--warn); }
+.portrait-link { display:inline-flex; margin-top:16px; }
 .note { color:var(--ink-dim); font-size:13px; line-height:1.6; }
 .pill2 { font-size:11px; border:1px solid var(--accent); color:var(--accent);
   border-radius:999px; padding:1px 8px; }
+body.portrait { min-height:100vh; }
+body.portrait > * { display:none!important; }
+body.portrait > .family-wrap { display:block!important; max-width:540px; padding:28px; }
+body.portrait .family-wrap > * { display:none!important; }
+body.portrait .family-stage { display:block!important; margin:0; }
+body.portrait .family-list { display:none!important; }
+body.portrait .family-inspector { display:flex!important; position:static; min-height:900px;
+  flex-direction:column; justify-content:center; border-width:2px; padding:34px; }
+body.portrait .portrait-link { display:none; }
+@media (max-width:820px) {
+  .family-wrap { padding:0 12px 48px; }
+  .family-stage { grid-template-columns:1fr; }
+  .family-inspector { position:static; grid-row:1; }
+  .famcard > summary { grid-template-columns:minmax(130px,1fr) minmax(100px,1fr) auto; }
+}
 </style></head><body>
 <div class="topbar">{{ brand }}<div class="ttl"><h1>LLM Testing</h1></div>
 <div class="nav">{{ nav }}</div></div>
 <div class="pagebar"><div class="sub">{% if dataset_label %}{{ dataset_label }} · {% endif %}model
   families · suite v{{ suite_version }}</div></div>
-<div class="wrap">
-<p class="note">Models grouped by lineage — so you can read a family's
+<div class="family-wrap">
+<p class="note family-intro">Models grouped by lineage — so you can read a family's
 <b>size↔capability ladder</b> and see how a small local model stacks up against
 its larger hosted sibling. A <span class="pill2">local + hosted</span> tag marks
 a family you can compare across that line. Family is set on the
@@ -6566,8 +6785,9 @@ a family you can compare across that line. Family is set on the
 name — a model placed in <b>No-family</b> doesn't appear here.</p>
 
 {% if verscmp %}
-<h2>Version-over-version</h2>
-<div class="card vc-wrap">
+<details class="analysis-block">
+<summary>Compare families across suite versions</summary>
+<div class="analysis-body vc-wrap">
   <div class="vc-pick">
     <label>family<select id="vc-fam"></select></label>
     <label>from<select id="vc-a"></select></label>
@@ -6578,10 +6798,13 @@ name — a model placed in <b>No-family</b> doesn't appear here.</p>
 </div>
 <script type="application/json" id="vc-data">{{ verscmp }}</script>
 {{ verscmp_js }}
+</details>
 {% endif %}
 
 {% if size_chart %}
-<h2>Capability vs VRAM — local models</h2>
+<details class="analysis-block">
+<summary>Inspect the local capability versus VRAM frontier</summary>
+<div class="analysis-body">
 <div class="chartkey"><span class="k-dot"></span> a local model
   <span class="k-line"></span> <b>Pareto frontier</b> — best score per VRAM</div>
 <div class="card chartcard">{{ size_chart }}</div>
@@ -6591,37 +6814,113 @@ cache</b> at 32k context. Hover anywhere near a dot to see <b>every</b> model
 under the cursor (overlapping dots all list). The dashed line is the <b>Pareto
 frontier</b> — the best score reachable at each VRAM budget; a dot below it is
 beaten by something that needs less VRAM.</div>
+</div></details>
 {% endif %}
 
-<h2>Best of each family</h2>
-<div class="card"><table class="sortable">
-<tr><th data-type="text">Family</th><th data-type="num">Members</th>
-<th data-type="num">Best score</th><th data-type="text">Leader</th></tr>
-{% for c in champs %}
-<tr><td class="model">{{ c.name }}</td><td class="num">{{ c.n }}</td>
-<td class="num" data-sort="{{ c.best }}">{{ c.best }}</td>
-<td class="nowrap">{{ c.leader }}</td></tr>
-{% endfor %}</table></div>
-
-<h2>Within each family</h2>
+<div class="family-stage">
+<section class="family-list">
+<div class="family-controls">
+  <input id="family-search" type="search" placeholder="Find a family or model" aria-label="Find a family or model">
+  <select id="family-sort" aria-label="Sort families"><option value="score">Best score</option>
+    <option value="apps">Strongest for apps</option><option value="speed">Fastest</option>
+    <option value="stable">Most consistent</option><option value="name">Name</option></select>
+  <select id="family-vram" aria-label="Local VRAM limit"><option value="">Any VRAM</option>
+    <option value="8">Fits 8 GB</option><option value="16">Fits 16 GB</option>
+    <option value="24">Fits 24 GB</option><option value="32">Fits 32 GB</option></select>
+</div>
+<div class="family-filter" id="family-filter" aria-label="Filter families">
+  <button type="button" data-kind="all" class="on">All</button>
+  <button type="button" data-kind="local">Has local</button>
+  <button type="button" data-kind="mixed">Local + hosted</button>
+  <button type="button" data-kind="hosted">Hosted only</button>
+</div>
+<div id="family-cards">
 {% for f in fam_cards %}
-<div class="famcard">
-<div class="h"><b>{{ f.name }}</b>
-  <span class="note">{{ f.n }} models · {{ f.span }}</span>
-  {% if f.both %}<span class="pill2">local + hosted</span>{% endif %}</div>
+<details class="famcard" data-name="{{ f.name }}" data-models="{{ f.model_names }}"
+  data-kind="{{ f.kind }}" data-local="{{ '1' if f.has_local else '0' }}"
+  data-minvram="{{ f.min_vram }}" data-score="{{ f.best_v }}"
+  data-apps="{{ f.apps_v }}" data-speed="{{ f.speed_v }}"
+  data-stable="{{ f.stability_v }}"{% if loop.first %} open{% endif %}>
+<summary><span class="fam-name"><b>{{ f.name }}</b>
+  <span class="note">{{ f.n }} model{{ '' if f.n == 1 else 's' }} · {{ f.span }}</span>
+  {% if f.both %}<span class="pill2">local + hosted</span>{% endif %}</span>
+  <span class="fam-mini" aria-label="category fingerprint">
+    {% for c in f.cats %}<i style="--score:{{ c.score_v }}" title="{{ c.name }} · {{ c.score }}"></i>{% endfor %}
+  </span><span class="fam-open">›</span></summary>
+<div class="fam-body">
 <table class="sortable"><tr><th data-type="text">Model</th>
 <th data-type="text">Where</th><th data-type="num">Score</th><th></th>
 <th data-type="num" title="VRAM to run at 32k = weights + KV cache">VRAM @32k</th>
-<th data-type="num">tok/s</th></tr>
+<th data-type="num">tok/s</th><th data-type="num">Trials</th>
+<th data-type="num" title="mean score spread across the member's repeated tasks">Repeat σ</th></tr>
 {% for r in f.rows %}
 <tr><td class="nowrap">{{ r.model }}</td><td class="small">{{ r.where }}</td>
 <td class="num" data-sort="{{ r.score_v }}">{{ r.score }}{{ r.cov }}</td>
 <td>{{ r.bar }}</td><td class="num" data-sort="{{ r.size_v }}">{{ r.size }}</td>
-<td class="num" data-sort="{{ r.tps_v }}">{{ r.tps }}</td></tr>
-{% endfor %}</table></div>
+<td class="num" data-sort="{{ r.tps_v }}">{{ r.tps }}</td>
+<td class="num">{{ r.trials }}</td><td class="num" data-sort="{{ r.stability_v }}">{{ r.stability_disp }}</td></tr>
+{% endfor %}</table></div></details>
 {% endfor %}
+</div></section>
+<aside class="family-inspector" id="family-inspector">
+  <div class="stamp">Family briefing</div>
+  <select id="family-focus" aria-label="Family briefing"></select>
+  <h2 id="family-title"></h2><p class="note" id="family-verdict"></p>
+  <div class="family-facts" id="family-facts"></div>
+  <div class="lineage" id="family-lineage"></div>
+  <div class="fingerprint" id="family-fingerprint"></div>
+  <p class="note" id="family-change"></p>
+  <a class="action portrait-link" id="family-portrait">Portrait receipt</a>
+</aside></div>
 
 </div>
+<script type="application/json" id="family-data">{{ family_json|safe }}</script>
+<script>
+(() => {
+  const families=JSON.parse(document.getElementById('family-data').textContent);
+  const cards=[...document.querySelectorAll('.famcard')], focus=document.getElementById('family-focus');
+  const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  focus.innerHTML=families.map(f=>`<option>${esc(f.name)}</option>`).join('');
+  function show(name, update=true){
+    const f=families.find(x=>x.name===name)||families[0]; if(!f)return;
+    focus.value=f.name; document.getElementById('family-title').textContent=f.name;
+    document.getElementById('family-verdict').textContent=f.verdict;
+    document.getElementById('family-facts').innerHTML=f.facts.map(x=>
+      `<div class="family-fact"><b>${esc(x.v)}</b><span>${esc(x.k)}</span></div>`).join('');
+    document.getElementById('family-lineage').innerHTML='<div class="stamp">Capability lineage</div>'+f.members.map(m=>
+      `<div class="lineage-row"><span title="${esc(m.name)}">${esc(m.name)}</span><div class="lineage-rail"><i style="--score:${m.score}"></i></div><b>${m.score.toFixed(3)}</b></div>`).join('');
+    document.getElementById('family-fingerprint').innerHTML='<div class="stamp">Category fingerprint</div>'+f.cats.map(c=>
+      `<div class="fingerprint-row"><span title="${esc(c.name)}">${esc(c.name)}</span><div class="lineage-rail"><i style="--score:${c.score}"></i></div><b>${c.score.toFixed(2)}</b></div>`).join('');
+    document.getElementById('family-change').textContent=f.change;
+    document.getElementById('family-portrait').href=`?family=${encodeURIComponent(f.name)}&receipt=1`;
+    cards.forEach(c=>c.classList.toggle('selected',c.dataset.name===f.name));
+    if(update){ const u=new URL(location.href); u.searchParams.set('family',f.name); u.searchParams.delete('receipt'); history.replaceState(null,'',u); }
+  }
+  let kind='all';
+  function filter(){
+    const q=document.getElementById('family-search').value.trim().toLowerCase();
+    const cap=Number(document.getElementById('family-vram').value||0);
+    cards.forEach(c=>{ const kindOk=kind==='all'||(kind==='local'&&c.dataset.local==='1')||c.dataset.kind===kind;
+      const v=Number(c.dataset.minvram||0), vramOk=!cap||(v>0&&v<=cap);
+      c.hidden=!(kindOk&&vramOk&&(!q||(c.dataset.name+' '+c.dataset.models).toLowerCase().includes(q))); });
+  }
+  function sort(){
+    const key=document.getElementById('family-sort').value, box=document.getElementById('family-cards');
+    cards.sort((a,b)=>key==='name'?a.dataset.name.localeCompare(b.dataset.name):
+      (Number(b.dataset[key])||-1)-(Number(a.dataset[key])||-1)).forEach(c=>box.appendChild(c));
+  }
+  document.getElementById('family-filter').addEventListener('click',e=>{ if(!e.target.dataset.kind)return;
+    kind=e.target.dataset.kind; document.querySelectorAll('#family-filter button').forEach(b=>b.classList.toggle('on',b===e.target)); filter(); });
+  document.getElementById('family-search').addEventListener('input',filter);
+  document.getElementById('family-vram').addEventListener('change',filter);
+  document.getElementById('family-sort').addEventListener('change',sort);
+  focus.addEventListener('change',()=>show(focus.value));
+  cards.forEach(c=>c.querySelector('summary').addEventListener('click',()=>show(c.dataset.name)));
+  const p=new URLSearchParams(location.search), initial=p.get('family')||families[0]?.name;
+  show(initial,false); sort();
+  if(p.get('receipt')==='1')document.body.classList.add('portrait');
+})();
+</script>
 {{ scatter_js }}
 {{ sort_js }}
 </body></html>"""
@@ -6649,15 +6948,26 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
             size = "—" if mm["local"] else "hosted"
             size_v = "0"
         return {
+            "raw": mm["model"],
             "model": _mlink(mm["model"]),
             "where": "local ⚡" if mm["local"] else "hosted",
             "kind": "local" if mm["local"] else "hosted",
+            "local": mm["local"],
+            "score_num": mm["score"],
             "score": f"{mm['score']:.3f}", "score_v": f"{mm['score']:.4f}",
             "bar": bar(mm["score"], 1.0, width=90),
             "size": size, "size_v": size_v,
+            "vram_num": mm.get("vram_ref_gb"),
             "tps": (f"{mm['tps']:.0f}" if mm["tps"] else "—"),
             "tps_v": f"{mm['tps'] or 0:.1f}",
             "cov": ("" if mm["coverage"] >= 0.999 else " partial"),
+            "trials": mm.get("trials", mm.get("n", 1)),
+            "repeat_cells": mm.get("repeat_cells", 0),
+            "stability": mm.get("stability"),
+            "stability_disp": (f"±{mm['stability']:.3f}"
+                               if mm.get("stability") is not None else "—"),
+            "stability_v": (f"{mm['stability']:.6f}"
+                            if mm.get("stability") is not None else ""),
         }
 
     def _full(v):
@@ -6672,26 +6982,73 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
 
     for f in sorted(grouped, key=_card_key):
         members = grouped[f]
-        has_both = len({x["local"] for x in members}) > 1
+        has_local = any(x["local"] for x in members)
+        has_hosted = any(not x["local"] for x in members)
+        has_both = has_local and has_hosted
         got = _full(members)
-        fam_cards.append({
-            "name": f, "n": len(members),
-            "span": (f"{min(x['score'] for x in got):.3f}–"
-                     f"{max(x['score'] for x in got):.3f}" if got else "—"),
-            "both": has_both, "rows": [fmt(x) for x in members],
-        })
-
-    champs = []
-    for f, v in fams.items():
-        got = _full(v)
         if not got:
             continue
-        top = max(got, key=lambda x: x["score"])
-        champs.append({"name": f, "best": top["score"],
-                       "leader": _mlink(top["model"]), "n": len(got)})
-    champs.sort(key=lambda c: -c["best"])
-    for c in champs:
-        c["best"] = f"{c['best']:.3f}"
+        ranked = got
+        rows = [fmt(x) for x in members]
+        leader = max(ranked, key=lambda x: x["score"])
+        local_members = [x for x in ranked if x["local"]]
+        best_local = max(local_members, key=lambda x: x["score"]) if local_members else None
+        fastest = max((x for x in members if x.get("tps")),
+                      key=lambda x: x["tps"], default=None)
+        cat_values: dict[str, list[float]] = {}
+        for member in ranked:
+            for cat, score in member.get("categories", {}).items():
+                cat_values.setdefault(cat, []).append(score)
+        cats = [{"name": cat, "score": sum(values) / len(values)}
+                for cat, values in sorted(cat_values.items())]
+        for cat in cats:
+            cat["score_v"] = f"{cat['score']:.4f}"
+            cat["score"] = f"{cat['score']:.2f}"
+        app_values = cat_values.get("one-shot-apps") or []
+        min_vram = min((x["vram_ref_gb"] for x in local_members
+                        if x.get("vram_ref_gb")), default=0)
+        stability_values = [x["stability"] for x in members
+                            if x.get("stability") is not None]
+        if has_both and best_local:
+            verdict = (f"{leader['model']} leads at {leader['score']:.3f}. "
+                       f"The best local option, {best_local['model']}, trails by "
+                       f"{leader['score'] - best_local['score']:.3f}.")
+        elif len(ranked) > 1:
+            verdict = (f"{leader['model']} leads at {leader['score']:.3f}; the "
+                       f"family spans {max(x['score'] for x in ranked) - min(x['score'] for x in ranked):.3f}.")
+        else:
+            verdict = (f"{leader['model']} is the only measured member, at "
+                       f"{leader['score']:.3f}. Treat this as a baseline, not a ladder.")
+        fam_cards.append({
+            "name": f, "n": len(members),
+            "span": ((f"{ranked[0]['score']:.3f}" if len(ranked) == 1 else
+                      f"{min(x['score'] for x in ranked):.3f}–"
+                      f"{max(x['score'] for x in ranked):.3f}")),
+            "both": has_both, "has_local": has_local,
+            "kind": "mixed" if has_both else "local" if has_local else "hosted",
+            "rows": rows, "cats": cats,
+            "model_names": " ".join(x["model"] for x in members),
+            "min_vram": f"{min_vram:.2f}" if min_vram else "0",
+            "best_v": f"{leader['score']:.6f}",
+            "apps_v": f"{sum(app_values) / len(app_values):.6f}" if app_values else "-1",
+            "speed_v": f"{fastest['tps']:.6f}" if fastest else "-1",
+            "stability_v": (f"{1 - sum(stability_values) / len(stability_values):.6f}"
+                            if stability_values else "-1"),
+            "verdict": verdict,
+            "facts": [
+                {"v": leader["model"], "k": "leader"},
+                {"v": (best_local["model"] if best_local else
+                       f"{len(members)} measured"), "k": "best local" if best_local else "members"},
+                {"v": (f"{fastest['tps']:.0f} tok/s" if fastest else "—"), "k": "fastest pace"},
+                {"v": (f"{sum(x.get('trials', x.get('n', 1)) for x in members)} / "
+                       f"{sum(x.get('repeat_cells', 0) for x in members)}"),
+                 "k": "trials / repeated cells"},
+            ],
+            "members": [{"name": x["model"], "score": x["score"]} for x in members],
+            "cats_json": [{"name": cat, "score": sum(values) / len(values)}
+                          for cat, values in sorted(cat_values.items())],
+            "change": "No like-for-like version change is available yet.",
+        })
 
     pts = []
     for v in fams.values():
@@ -6719,15 +7076,31 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
             p = family_version_payload(fam, members, versions)
             if len(p["versions"]) >= 2 and p["pairs"]:
                 blob[fam] = p
+                a, b = p["versions"][-2:]
+                latest = p["pairs"].get(f"{a}|{b}")
+                overall = (latest or {}).get("overall") or {}
+                delta = overall.get("delta")
+                if delta is not None:
+                    direction = "+" if delta > 0 else ""
+                    for card in fam_cards:
+                        if card["name"] == fam:
+                            card["change"] = (f"v{a} → v{b}: {direction}{delta:.3f} "
+                                              f"across {overall.get('n_tasks', 0)} "
+                                              "like-for-like task scores.")
         if blob:
             import json as _json
             verscmp = _json.dumps({k: blob[k] for k in sorted(blob)}
                                   ).replace("</", "<\\/")
+    import json as _json
+    family_json = _json.dumps([
+        {"name": f["name"], "verdict": f["verdict"], "facts": f["facts"],
+         "members": f["members"], "cats": f["cats_json"], "change": f["change"]}
+        for f in fam_cards], separators=(",", ":")).replace("</", "<\\/")
     return _compiled(FAMILY_TEMPLATE).render(
         nav=_nav(""), brand=_brand(""),
         sort_js=_SORT_JS, scatter_js=_SCATTER_HOVER_JS,
         verscmp=verscmp, verscmp_js=_VERSCMP_JS,
-        css=BASE_CSS, fam_cards=fam_cards, champs=champs,
+        css=BASE_CSS, fam_cards=fam_cards, family_json=family_json,
         size_chart=size_chart,
         dataset_label=dataset_label, dataset_key=dataset_key,
         suite_version=config.suite_version())

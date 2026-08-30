@@ -100,8 +100,9 @@ def test_the_version_compare_wrapper_insets_its_content_horizontally():
 
 def test_every_version_compare_section_uses_the_padded_wrapper():
     plain = len(re.findall(r'<div class="card">\s*\n\s*<div class="vc-pick">', SRC))
-    padded = len(re.findall(r'<div class="card vc-wrap">\s*\n\s*<div class="vc-pick">',
-                            SRC))
+    padded = len(re.findall(
+        r'<div class="(?:card|analysis-body) vc-wrap">\s*\n\s*<div class="vc-pick">',
+        SRC))
     assert plain == 0, f"{plain} version-compare section(s) on a bare card"
     assert padded == 2, f"expected the model and family pages, found {padded}"
 
@@ -452,7 +453,8 @@ def test_editorial_evidence_surfaces_render_from_live_data():
     tdefs = rp._task_defs()
     td = rp.collect_task_data(runs)
     idx = rp.build_index(runs)
-    for hook in ("Live finding", "What changed", "Evidence receipt", "evdata"):
+    for hook in ("Live finding", "Current field notes", "Portrait receipt",
+                 "What changed", "Evidence receipt", "evdata"):
         assert hook in idx, hook
     model = sorted(rp.covered_models(td))[0]
     model_html = rp.build_model_report(model, runs, tdefs,

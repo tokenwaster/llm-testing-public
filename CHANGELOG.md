@@ -26,6 +26,20 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+### Family briefings and current field notes
+
+The Families page now uses the full desktop canvas for a selectable lineage
+briefing, category fingerprints, model score rails, local/hosted and VRAM
+filters, useful sorting, collapsible detail tables, and like-for-like version
+movement. Family briefings and overview field notes can open as clean portrait
+receipts for Short capture.
+
+The overview now derives three editorial field notes from live evidence: the
+largest current repeat swing, the sharpest capability-category split among
+recent fully measured models, and the largest local-versus-hosted family gap.
+The private content backlog carries the seven resulting Short concepts with
+their current run or changelog receipts.
+
 ### Family organizer persistence
 
 Family creation, membership moves, renames, colors, and deletion now save

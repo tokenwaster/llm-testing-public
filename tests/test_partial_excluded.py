@@ -117,7 +117,7 @@ def test_a_family_leader_must_have_run_the_whole_suite():
     i = SRC.index("def _full(v):")
     seg = SRC[i:i + 1200]
     assert 'x.get("coverage", 0) >= 0.999' in seg
-    assert "got = _full(v)" in seg
+    assert "got = _full(members)" in seg
     assert "if not got:" in seg
 
 
