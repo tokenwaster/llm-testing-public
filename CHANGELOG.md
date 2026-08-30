@@ -26,6 +26,13 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+### Family organizer persistence
+
+Family creation, membership moves, renames, colors, and deletion now save
+automatically, with an explicit retry button and an unsaved-navigation warning.
+The Families report now renders one-model families as full cards instead of
+hiding them in a footnote.
+
 ### Evidence-led report redesign
 
 The static site now opens with a derived live finding and a task-difficulty

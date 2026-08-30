@@ -6621,11 +6621,6 @@ beaten by something that needs less VRAM.</div>
 {% endfor %}</table></div>
 {% endfor %}
 
-{% if singles %}
-<div class="note" style="margin-top:14px"><b>Single-model families</b> (no
-within-family comparison yet): {{ singles }}. Set a shared <code>family:</code>
-in their yamls to cluster them.</div>
-{% endif %}
 </div>
 {{ scatter_js }}
 {{ sort_js }}
@@ -6668,16 +6663,15 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
     def _full(v):
         return [x for x in v if x.get("coverage", 0) >= 0.999] or []
 
-    multi = {f: v for f, v in fams.items() if len(v) > 1}
-    singles = sorted(f for f, v in fams.items() if len(v) == 1)
+    grouped = {f: v for f, v in fams.items() if v}
     fam_cards = []
 
     def _card_key(f):
-        got = _full(multi[f])
+        got = _full(grouped[f])
         return -max((x["score"] for x in got), default=-1)
 
-    for f in sorted(multi, key=_card_key):
-        members = multi[f]
+    for f in sorted(grouped, key=_card_key):
+        members = grouped[f]
         has_both = len({x["local"] for x in members}) > 1
         got = _full(members)
         fam_cards.append({
@@ -6734,7 +6728,7 @@ def build_family_page(runs: list[dict], tdefs: dict, dataset_label: str = "",
         sort_js=_SORT_JS, scatter_js=_SCATTER_HOVER_JS,
         verscmp=verscmp, verscmp_js=_VERSCMP_JS,
         css=BASE_CSS, fam_cards=fam_cards, champs=champs,
-        size_chart=size_chart, singles=", ".join(singles),
+        size_chart=size_chart,
         dataset_label=dataset_label, dataset_key=dataset_key,
         suite_version=config.suite_version())
 
