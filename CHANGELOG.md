@@ -26,6 +26,8 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+## 0.7.16 — family briefings and current field notes
+
 ### Family briefings and current field notes
 
 The Families page now uses the full desktop canvas for a selectable lineage
