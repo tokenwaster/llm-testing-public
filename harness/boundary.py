@@ -19,7 +19,7 @@ def guard_tree(root: Path) -> None:
     failures = []
     for path in root.rglob('*'):
         rel = path.relative_to(root)
-        if '.git' in rel.parts:
+        if {'.git', '__pycache__', '.pytest_cache'} & set(rel.parts):
             continue
         if path.is_symlink() or (hasattr(path, 'is_junction') and path.is_junction()):
             failures.append(f'{rel}: linked path')
@@ -75,7 +75,7 @@ PUBLIC_FILES = ["CHANGELOG.md", "LICENSE", "requirements.txt",
 PUBLIC_DOCS = ["docs/PUBLIC-RELEASE.md"]
 
 
-NEVER = {".env", "interfaces.yaml", "CONTENT-PLAN.md", "watch", "scouts",
+NEVER = {".git", ".env", "interfaces.yaml", "CONTENT-PLAN.md", "watch", "scouts",
          "models", "__pycache__", ".pytest_cache", "private",
          "settings.local.json", "secrets.local.json", "mirror.json",
          "test_watch.py", "test_studio.py", "test_jobs.py", "test_hardening.py",
@@ -156,5 +156,3 @@ def _scrub(data: bytes) -> tuple[bytes, int]:
         data, k = pat.subn(repl, data)
         n += k
     return data, n
-
-

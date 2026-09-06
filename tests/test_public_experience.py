@@ -27,6 +27,13 @@ def test_final_byte_guard_catches_nested_credentials_and_links(tmp_path):
         boundary.guard_tree(tmp_path)
 
 
+def test_nonpublished_bytecode_does_not_trigger_the_content_gate(tmp_path):
+    cache = tmp_path / '__pycache__'
+    cache.mkdir()
+    (cache / 'fixture.pyc').write_bytes(('sk-' + 'aZ19' * 12).encode())
+    boundary.guard_tree(tmp_path)
+
+
 def test_generated_content_cannot_become_report_markup_or_raw_active_html():
     dangerous = '</script><img src=x onerror=alert(1)>'
     encoded = security.json_for_script({'name': dangerous})

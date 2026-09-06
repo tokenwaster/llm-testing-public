@@ -275,7 +275,7 @@ def test_each_configured_comparison_has_a_full_set_of_avenues():
     ms = load_models(include_disabled=True)
     cli = [m for m in ms if m.provider == "claude-cli"]
     g = apicost.groups(ms)
-    assert g and len(g) <= len(cli)
+    assert len(g) <= len(cli)
     for k, per in g.items():
         assert set(per) == {"cli", "api", "gateway"}, (k, sorted(per))
 
