@@ -67,11 +67,6 @@ Seventeen presentation assets were extracted from the report module. Regex comme
 removal no longer rewrites generated HTML: it corrupted JavaScript strings holding
 verbatim model output. Generated-script syntax checks cover this boundary.
 
-Three recovery/compatibility/source-precedence candidates remain in staging. Each
-scores 1.0 on its reference and 0.0 on empty and trap submissions. Receipts are in
-`docs/EXPERIENCE-CANDIDATE-VERIFICATION.json`. They do not enter public scores until
-a separate calibration and dataset-admission release.
-
 ## 0.7.16 — family briefings and current field notes
 
 ### Family briefings and current field notes

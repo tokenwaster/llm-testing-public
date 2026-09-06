@@ -115,15 +115,3 @@ def test_viewer_preserves_a_published_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(viewer.report, 'generate_all', unexpected)
     viewer.serve(9001)
 
-
-def test_candidate_verification_receipts_match_current_tasks():
-    from harness.tasks import load_tasks
-    evidence_path = report.config.ROOT / 'docs/EXPERIENCE-CANDIDATE-VERIFICATION.json'
-    if not evidence_path.exists():
-        pytest.skip('private staging evidence is not part of the public dataset')
-    tasks = {t.id: t for t in load_tasks(include_staging=True) if t.staging}
-    records = json.loads(evidence_path.read_text(encoding='utf-8'))
-    assert len(records) == 9
-    for rec in records:
-        assert tasks[rec['task']].content_hash == rec['hash']
-        assert rec['result']['score'] == rec['expected']
