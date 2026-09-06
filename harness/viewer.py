@@ -33,6 +33,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "SAMEORIGIN")
+            self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
             self.end_headers()
             self.wfile.write(body)
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
@@ -44,9 +48,11 @@ class Handler(BaseHTTPRequestHandler):
         if not target.is_relative_to(root) or not target.is_file():
             self._send(404, b"not found")
             return
-        self._send(200, target.read_bytes())
+        import mimetypes
+        self._send(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream")
 
-    CTYPES = {".html": "text/html; charset=utf-8",
+    CTYPES = {".html": "text/plain; charset=utf-8",
+              ".svg": "text/plain; charset=utf-8",
               ".json": "text/plain; charset=utf-8",
               ".jsonl": "text/plain; charset=utf-8",
               ".md": "text/plain; charset=utf-8",
@@ -108,6 +114,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file("family.html")
         elif path in ("/compare", "/compare/", "/compare.html"):
             self._send_file("compare.html")
+        elif path.startswith('/compare--') and path.endswith('.html'):
+            self._send_file(path.lstrip('/'))
+        elif path in ("/choose", "/choose/", "/choose.html"):
+            self._send_file("choose.html")
+        elif path in ("/stories", "/stories/", "/stories.html"):
+            self._send_file("stories.html")
+        elif path.startswith(("/assets/", "/downloads/", "/stories/", "/comparisons/")):
+            self._send_file(path.lstrip("/"))
         elif path in ("/special", "/special/", "/special.html"):
             self._send_file("special.html")
         elif path == "/feed.xml":
@@ -158,7 +172,10 @@ class QuietServer(ThreadingHTTPServer):
 
 def serve(port: int | None = None) -> None:
     port = config.serve_port() if port is None else port
-    report.generate_all(public_nav=True)
+    index = config.REPORTS_DIR / 'index.html'
+    published = index.is_file() and b'<meta name="evidence-commit"' in index.read_bytes()
+    if not published:
+        report.generate_all(public_nav=True)
     server = QuietServer(("127.0.0.1", port), Handler)
     print(f"LLM Testing Suite  v{config.suite_version()}  (read-only viewer)")
     print(f"Results:  http://127.0.0.1:{port}")

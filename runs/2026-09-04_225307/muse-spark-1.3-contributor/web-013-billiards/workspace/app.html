@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Top-Down Billiards</title>
+<style>
+  body{margin:0;background:#111;color:#eee;font-family:Arial,Helvetica,sans-serif;text-align:center}
+  h1{margin:12px 0 4px;font-size:22px}
+  #instructions{max-width:880px;margin:8px auto;padding:8px 12px;background:#222;border:1px solid #444;border-radius:8px;font-size:14px;line-height:1.4}
+  #bar{margin:8px}
+  #resetBtn{font-size:16px;padding:8px 18px;border-radius:8px;border:0;background:#f5c542;color:#111;cursor:pointer;font-weight:bold}
+  #resetBtn:hover{background:#ffe27a}
+  #power{margin-left:12px;font-size:14px;color:#f5c542}
+  #wrap{display:flex;justify-content:center;padding:8px}
+  canvas{background:#000;border-radius:12px;cursor:crosshair;max-width:96vw}
+</style>
+</head>
+<body>
+<h1>Billiards — Top-Down Pool</h1>
+<div id="instructions"><b>How to shoot:</b> Press on the <b>white cue ball</b>, <b>drag back</b> away from your target to set direction and power (longer drag = harder shot), then <b>release to strike</b>. Aim line shows direction while dragging. Use <b>Reset / Rack</b> to return balls to the starting layout.</div>
+<div id="bar"><button id="resetBtn">Reset / Rack</button><span id="power"></span></div>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+(function(){
+"use strict";
+var W=800, H=400, R=12, RAIL=42;
+var CAPTURE=24;
+var WALL_E=0.90;
+var BALL_E=0.97;
+var SHOT_SCALE=4.0;
+var MAX_SHOT=1600;
+var POCKETS=[
+  {x:0,y:0},{x:W/2,y:0},{x:W,y:0},
+  {x:0,y:H},{x:W/2,y:H},{x:W,y:H}
+];
+var PALETTE=["#f6c90e","#1e90ff","#e33e2b","#6a2fb3","#ff7f0e","#0fa968","#a02020","#222222","#f6c90e","#1e90ff","#e33e2b","#6a2fb3","#ff7f0e","#0fa968","#a02020"];
+var canvas=document.getElementById("game");
+canvas.width=W+RAIL*2;
+canvas.height=H+RAIL*2;
+var ctx=canvas.getContext("2d");
+var balls=[];
+var running=true, rafId=null, lastT=0;
+var aiming=false, aimMouse={x:0,y:0};
+
+function assignColor(i,isCue){
+  if(isCue) return "#ffffff";
+  return PALETTE[(i-1)%PALETTE.length]||"#cc0000";
+}
+function physics(dt){
+  if(!(dt>0)) return;
+  if(!isFinite(dt)) return;
+  var sub=1/240;
+  var n=Math.ceil(dt/sub);
+  if(n<1) n=1;
+  if(n>2000) n=2000;
+  var h=dt/n;
+  for(var s=0;s<n;s++){
+    var i,j,k;
+    for(i=0;i<balls.length;i++){
+      var b=balls[i];
+      if(b.potted) continue;
+      var sp=Math.sqrt(b.vx*b.vx+b.vy*b.vy);
+      if(sp>0){
+        var damp=Math.exp(-0.5*h);
+        var nvx=b.vx*damp, nvy=b.vy*damp;
+        var sp2=sp*damp;
+        var ns=sp2-70*h;
+        if(ns<=6){ b.vx=0; b.vy=0; }
+        else{ var f=ns/sp2; b.vx=nvx*f; b.vy=nvy*f; }
+      }
+      b.x+=b.vx*h;
+      b.y+=b.vy*h;
+    }
+    for(i=0;i<balls.length;i++){
+      var b2=balls[i];
+      if(b2.potted) continue;
+      for(k=0;k<POCKETS.length;k++){
+        var p=POCKETS[k];
+        var dx=b2.x-p.x, dy=b2.y-p.y;
+        if(dx*dx+dy*dy<CAPTURE*CAPTURE){ b2.potted=true; b2.vx=0; b2.vy=0; break; }
+      }
+    }
+    for(i=0;i<balls.length;i++){
+      var w=balls[i];
+      if(w.potted) continue;
+      if(w.x<R){ w.x=R; if(w.vx<0) w.vx=-w.vx*WALL_E; }
+      else if(w.x>W-R){ w.x=W-R; if(w.vx>0) w.vx=-w.vx*WALL_E; }
+      if(w.y<R){ w.y=R; if(w.vy<0) w.vy=-w.vy*WALL_E; }
+      else if(w.y>H-R){ w.y=H-R; if(w.vy>0) w.vy=-w.vy*WALL_E; }
+    }
+    for(i=0;i<balls.length;i++){
+      var a=balls[i];
+      if(a.potted) continue;
+      for(j=i+1;j<balls.length;j++){
+        var c=balls[j];
+        if(c.potted) continue;
+        var ddx=c.x-a.x, ddy=c.y-a.y;
+        var d2=ddx*ddx+ddy*ddy;
+        var minD=2*R;
+        if(d2>0&&d2<minD*minD){
+          var d=Math.sqrt(d2);
+          var nx=ddx/d, ny=ddy/d;
+          var ov=minD-d;
+          a.x-=nx*ov/2; a.y-=ny*ov/2;
+          c.x+=nx*ov/2; c.y+=ny*ov/2;
+          var rel=(a.vx-c.vx)*nx+(a.vy-c.vy)*ny;
+          if(rel>0){
+            var imp=rel*(1+BALL_E)/2;
+            a.vx-=imp*nx; a.vy-=imp*ny;
+            c.vx+=imp*nx; c.vy+=imp*ny;
+          }
+        } else if(d2===0){
+          a.x-=0.5; c.x+=0.5;
+        }
+      }
+    }
+    for(i=0;i<balls.length;i++){
+      var w2=balls[i];
+      if(w2.potted) continue;
+      if(w2.x<R){ w2.x=R; if(w2.vx<0) w2.vx=-w2.vx*WALL_E; }
+      else if(w2.x>W-R){ w2.x=W-R; if(w2.vx>0) w2.vx=-w2.vx*WALL_E; }
+      if(w2.y<R){ w2.y=R; if(w2.vy<0) w2.vy=-w2.vy*WALL_E; }
+      else if(w2.y>H-R){ w2.y=H-R; if(w2.vy>0) w2.vy=-w2.vy*WALL_E; }
+    }
+    for(i=0;i<balls.length;i++){
+      var b3=balls[i];
+      if(b3.potted) continue;
+      for(k=0;k<POCKETS.length;k++){
+        var p2=POCKETS[k];
+        var dx2=b3.x-p2.x, dy2=b3.y-p2.y;
+        if(dx2*dx2+dy2*dy2<CAPTURE*CAPTURE){ b3.potted=true; b3.vx=0; b3.vy=0; break; }
+      }
+    }
+  }
+}
+function allStopped(){
+  for(var i=0;i<balls.length;i++){ if(!balls[i].potted&&(balls[i].vx!==0||balls[i].vy!==0)) return false; }
+  return true;
+}
+function findCue(){ for(var i=0;i<balls.length;i++) if(balls[i].cue) return balls[i]; return null; }
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle="#3d1f0a";
+  roundRect(0,0,canvas.width,canvas.height,18); ctx.fill();
+  ctx.fillStyle="#5a2f12";
+  roundRect(6,6,canvas.width-12,canvas.height-12,14); ctx.fill();
+  ctx.save();
+  ctx.translate(RAIL,RAIL);
+  ctx.fillStyle="#0b6b2e";
+  ctx.fillRect(-8,-8,W+16,H+16);
+  ctx.fillStyle="#0e7d36";
+  ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle="rgba(255,255,255,0.12)";
+  ctx.lineWidth=1;
+  for(var g=0;g<6;g++){ ctx.beginPath(); ctx.moveTo(g*W/5,0); ctx.lineTo(g*W/5,H); ctx.stroke(); }
+  ctx.strokeStyle="#d8b25a"; ctx.lineWidth=2;
+  ctx.strokeRect(0,0,W,H);
+  ctx.fillStyle="#d8b25a";
+  for(var d=0;d<5;d++){ diamond(d*W/4, -14); diamond(d*W/4, H+14); }
+  for(var e=0;e<3;e++){ diamond(-14, e*H/2); diamond(W+14, e*H/2); }
+  var pi;
+  for(pi=0;pi<POCKETS.length;pi++){
+    var p=POCKETS[pi];
+    var corner=( (p.x===0||p.x===W)&&(p.y===0||p.y===H) );
+    var pr=corner?20:18;
+    ctx.fillStyle="#000";
+    ctx.beginPath(); ctx.arc(p.x,p.y,pr,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle="#8a6a2a"; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.arc(p.x,p.y,pr,0,Math.PI*2); ctx.stroke();
+  }
+  var cue=findCue();
+  if(aiming&&cue&&!cue.potted){
+    var dx=cue.x-aimMouse.x, dy=cue.y-aimMouse.y;
+    var dist=Math.sqrt(dx*dx+dy*dy);
+    if(dist>2){
+      var nx=dx/dist, ny=dy/dist;
+      var pw=Math.min(dist*SHOT_SCALE,MAX_SHOT);
+      var len=Math.min(80+dist*1.4,380);
+      ctx.strokeStyle="rgba(255,255,255,0.9)";
+      ctx.lineWidth=2;
+      ctx.setLineDash([8,6]);
+      ctx.beginPath();
+      ctx.moveTo(cue.x+nx*(R+2),cue.y+ny*(R+2));
+      ctx.lineTo(cue.x+nx*len,cue.y+ny*len);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle="#8b5a2b"; ctx.lineWidth=7; ctx.lineCap="round";
+      var back=R+6+dist*0.6;
+      ctx.beginPath();
+      ctx.moveTo(cue.x-nx*back,cue.y-ny*back);
+      ctx.lineTo(cue.x-nx*(back+110),cue.y-ny*(back+110));
+      ctx.stroke();
+      ctx.strokeStyle="#e8c87a"; ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.moveTo(cue.x-nx*back,cue.y-ny*back);
+      ctx.lineTo(cue.x-nx*(back+110),cue.y-ny*(back+110));
+      ctx.stroke();
+      var el=document.getElementById("power");
+      if(el) el.textContent="Power: "+Math.round(pw/16)+"%";
+    }
+  } else {
+    var el2=document.getElementById("power");
+    if(el2) el2.textContent="";
+  }
+  for(var i=0;i<balls.length;i++){
+    var b=balls[i];
+    if(b.potted) continue;
+    ctx.beginPath(); ctx.arc(b.x+1.5,b.y+2,R,0,Math.PI*2);
+    ctx.fillStyle="rgba(0,0,0,0.35)"; ctx.fill();
+    var grad=ctx.createRadialGradient(b.x-4,b.y-4,2,b.x,b.y,R);
+    grad.addColorStop(0,"#ffffff");
+    grad.addColorStop(0.25,b.color);
+    grad.addColorStop(1,shade(b.color));
+    ctx.fillStyle=b.cue?"#ffffff":grad;
+    ctx.beginPath(); ctx.arc(b.x,b.y,R,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle="rgba(0,0,0,0.5)"; ctx.lineWidth=1; ctx.stroke();
+    if(!b.cue){
+      ctx.fillStyle="#fff";
+      ctx.beginPath(); ctx.arc(b.x,b.y,R*0.5,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle="#111"; ctx.font="bold "+(R)+"px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.fillText(String(i),b.x,b.y+0.5);
+    } else {
+      ctx.fillStyle="rgba(200,0,0,0.7)";
+      ctx.beginPath(); ctx.arc(b.x-3,b.y-3,1.6,0,Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+function shade(hex){
+  if(hex==="#ffffff") return "#cccccc";
+  if(hex==="#222222") return "#000000";
+  return "rgba(0,0,0,0.55)";
+}
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function diamond(x,y){ ctx.save(); ctx.translate(x,y); ctx.rotate(Math.PI/4); ctx.fillRect(-3,-3,6,6); ctx.restore(); }
+function rackLayout(){
+  var arr=[];
+  var cx=W*0.22, cy=H/2;
+  arr.push({x:cx,y:cy,vx:0,vy:0,cue:true});
+  var ax=W*0.62, ay=H/2;
+  var step=2*R+2;
+  var idx=1;
+  for(var row=0;row<5;row++){
+    for(var k=0;k<=row;k++){
+      var x=ax+row*step;
+      var y=ay+(k-row/2)*step;
+      arr.push({x:x,y:y,vx:0,vy:0,cue:false});
+      idx++;
+    }
+  }
+  return arr;
+}
+function loop(t){
+  if(!running) return;
+  if(!lastT) lastT=t;
+  var dt=(t-lastT)/1000;
+  lastT=t;
+  if(dt>0.05) dt=0.05;
+  if(dt>0) physics(dt);
+  var c=findCue();
+  if(c&&c.potted&&allStopped()){
+    var hx=W*0.22, hy=H/2;
+    var placed=false;
+    var cand=[{x:hx,y:hy}];
+    for(var r=0;r<5&&!placed;r++) for(var a=0;a<8&&!placed;a++){
+      var px=hx+r*8, py=hy+(a-4)*8;
+      if(px<R||px>W-R||py<R||py>H-R) continue;
+      var ok=true;
+      for(var i=0;i<balls.length;i++){ if(balls[i].potted) continue; var dx=balls[i].x-px,dy=balls[i].y-py; if(dx*dx+dy*dy<(2*R+1)*(2*R+1)){ok=false;break;} }
+      if(ok){ c.x=px;c.y=py;c.vx=0;c.vy=0;c.potted=false;placed=true; }
+    }
+    if(!placed){ c.x=hx;c.y=hy;c.vx=0;c.vy=0;c.potted=false; }
+  }
+  draw();
+  rafId=requestAnimationFrame(loop);
+}
+function toPlay(e){
+  var r=canvas.getBoundingClientRect();
+  var sx=canvas.width/r.width, sy=canvas.height/r.height;
+  return {x:(e.clientX-r.left)*sx-RAIL, y:(e.clientY-r.top)*sy-RAIL};
+}
+canvas.addEventListener("mousedown",function(e){
+  var m=toPlay(e);
+  var cue=findCue();
+  if(!cue||cue.potted) return;
+  if(!allStopped()) return;
+  var dx=m.x-cue.x, dy=m.y-cue.y;
+  if(Math.sqrt(dx*dx+dy*dy)<=R+12){
+    aiming=true; aimMouse=m;
+    e.preventDefault();
+  }
+});
+canvas.addEventListener("mousemove",function(e){
+  if(!aiming) return;
+  aimMouse=toPlay(e);
+  draw();
+});
+function endAim(e){
+  if(!aiming) return;
+  var m=e?toPlay(e):aimMouse;
+  var cue=findCue();
+  aiming=false;
+  if(!cue||cue.potted){ draw(); return; }
+  var dx=cue.x-m.x, dy=cue.y-m.y;
+  var dist=Math.sqrt(dx*dx+dy*dy);
+  if(dist<5){ draw(); return; }
+  var vx=dx*SHOT_SCALE, vy=dy*SHOT_SCALE;
+  var sp=Math.sqrt(vx*vx+vy*vy);
+  if(sp>MAX_SHOT){ vx*=MAX_SHOT/sp; vy*=MAX_SHOT/sp; }
+  cue.vx=vx; cue.vy=vy;
+  draw();
+}
+canvas.addEventListener("mouseup",endAim);
+canvas.addEventListener("mouseleave",function(){ if(aiming){ aiming=false; draw(); } });
+document.getElementById("resetBtn").addEventListener("click",function(){
+  window.sim.reset(rackLayout());
+});
+window.sim={
+  W:W, H:H, R:R,
+  reset:function(arr){
+    balls=(arr||[]).map(function(b,i){
+      return {x:+b.x, y:+b.y, vx:+(b.vx||0), vy:+(b.vy||0), cue:!!b.cue, potted:false, color:assignColor(i,!!b.cue)};
+    });
+    aiming=false;
+    draw();
+  },
+  step:function(dt){ physics(+dt); draw(); },
+  state:function(){ return balls.map(function(b){ return {x:b.x,y:b.y,vx:b.vx,vy:b.vy,potted:!!b.potted,cue:!!b.cue}; }); },
+  shoot:function(vx,vy){
+    var c=findCue();
+    if(!c) return;
+    if(c.potted) return;
+    c.vx=+vx; c.vy=+vy;
+  },
+  pause:function(){ running=false; if(rafId) cancelAnimationFrame(rafId); rafId=null; lastT=0; },
+  resume:function(){ if(running) return; running=true; lastT=0; rafId=requestAnimationFrame(loop); }
+};
+window.sim.reset(rackLayout());
+rafId=requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

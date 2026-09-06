@@ -265,7 +265,7 @@ def test_a_throttled_model_still_loses_its_score():
 
 def test_the_uptime_column_and_row_are_on_the_pages():
     from harness import config
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     assert ">Uptime</th>" in src
     assert "{{ r.avail }}" in src and "{{ r.avail_why }}" in src
     assert "def _availability_row" in src

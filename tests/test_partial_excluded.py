@@ -86,7 +86,7 @@ def test_task_fit_without_counts_keeps_its_old_behaviour():
     assert [m for m, _ in row["top"]] == ["part"]
 
 
-SRC = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+SRC = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
 
 
 def test_the_efficiency_frontier_plots_only_complete_models():

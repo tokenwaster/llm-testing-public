@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Spreadsheet</title>
+    <style>
+        :root {
+            --border-color: #ccc;
+            --header-bg: #f0f0f0;
+            --primary-color: #007bff;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        #app {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-width: 600px;
+            min-height: 400px;
+        }
+
+        #spreadsheet {
+            display: grid;
+            grid-template-columns: 30px repeat(10, 1fr);
+            grid-auto-rows: 30px;
+            border: 1px solid var(--border-color);
+            padding: 2px;
+        }
+
+        .header {
+            background: var(--header-bg);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 12px;
+            border: 1px solid var(--border-color);
+            color: #555;
+        }
+
+        .cell {
+            border: 1px solid var(--border-color);
+            background: white;
+            padding: 0;
+            outline: none;
+            font-size: 13px;
+        }
+
+        .cell:focus {
+            border: 2px solid var(--primary-color);
+            z-index: 10;
+        }
+
+        #controls {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            min-width: 550px;
+        }
+
+        textarea {
+            width: 100%;
+            height: 80px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <div id="spreadsheet"></div>
+    <div id="controls">
+        <button id="export">Export CSV</button>
+        <textarea id="csv" readonly></textarea>
+    </div>
+</div>
+
+<script>
+    const cols = ['A','B','C','D','E','F','G','H','I','J'];
+    const rows = [1,2,3,4,5,6,7,8,9,10];
+    const sheet = document.getElementById('spreadsheet');
+    const rawValues = {};
+
+    function buildGrid() {
+        // Top-left corner
+        const corner = document.createElement('div');
+        corner.className = 'header';
+        sheet.appendChild(corner);
+
+        // Column headers
+        cols.forEach(c => {
+            const el = document.createElement('div');
+            el.className = 'header';
+            el.innerText = c;
+            sheet.appendChild(el);
+        });
+
+        // Rows
+        rows.forEach(r => {
+            // Row header
+            const rh = document.createElement('div');
+            rh.className = 'header';
+            rh.innerText = r;
+            sheet.appendChild(rh);
+
+            // Cells
+            cols.forEach(c => {
+                const id = `${c}${r}`;
+                const input = document.createElement('input');
+                input.className = 'cell';
+                input.id = `cell-${id}`;
+                input.dataset.id = id;
+                
+                // Initialize with empty value in state
+                rawValues[id] = '';
+
+                // Events
+                input.addEventListener('focus', () => {
+                    input.value = rawValues[id];
+                });
+
+                input.addEventListener('blur', () => {
+                    const computed = getComputedValue(id, new Set());
+                    input.value = computed;
+                    // On blur, we consider the raw value committed from the input
+                    if(rawValues[id] !== input.value) {
+                        // Store what was entered BEFORE computing, but since value changed,
+                        // if user didn't type, it keeps old value. 
+                        // We need to distinguish raw vs computed in UI.
+                        // When focused, rawValues matches input. When blurred, value is computed.
+                    }
+                    // Sync rawValues to input if it was just edited (focus/blur cycle)
+                    // If value is raw, it is already set. If it's computed, it was calculated.
+                });
+
+                input.addEventListener('input', (e) => {
+                    rawValues[id] = e.target.value;
+                    recalculate();
+                });
+
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        input.blur();
+                        input.focus(); // Keep focus but trigger blur logic
+                    }
+                });
+
+                sheet.appendChild(input);
+            });
+        });
+    }
+
+    function isRef(str) {
+        return /^[A-J][1-9][0-9]?$/i.test(str);
+    }
+
+    function computeCell(id, visited) {
+        if (visited.has(id)) return '#CYCLE';
+        
+        const raw = rawValues[id] || '';
+        
+        if (!raw) return '';
+
+        if (!raw.startsWith('=')) {
+            // Plain text
+            return raw;
+        }
+
+        // Formula
+        const expr = raw.substring(1);
+        let replacedExpr = expr;
+        
+        // Find all potential cell references in the formula
+        const refs = expr.match(/[A-J][1-9][0-9]?/gi);
+        
+        const visitedNext = new Set(visited);
+        visitedNext.add(id);
+
+        let hasError = false;
+
+        if (refs) {
+            refs.forEach(ref => {
+                if (isRef(ref)) {
+                    const val = computeCell(ref, visitedNext);
+                    if (val === '#CYCLE' || val === '#ERR') {
+                        hasError = true;
+                    } else {
+                        // Replace occurrences of this ref (case insensitive)
+                        // Use split/join or regex with word boundaries to avoid partial replacement
+                        const regex = new RegExp(`\\b${ref}\\b`, 'gi');
+                        replacedExpr = replacedExpr.replace(regex, val);
+                    }
+                }
+            });
+        }
+
+        if (hasError) {
+            // Cycle detected during dependency check
+            if (replacedExpr.includes('#CYCLE')) return '#CYCLE';
+            return '#ERR';
+        }
+
+        try {
+            // Empty strings in formula context count as 0
+            replacedExpr = replacedExpr.replace(/''/g, '0');
+            
+            // Handle non-numeric text in formula (e.g. if a referenced cell is "abc")
+            // We need to ensure the expression is valid JS math.
+            // If rawValue("abc") returned "abc", replacedExpr might have "abc".
+            // The spec: "Non-numeric plain text displays as itself; empty cells count as 0 inside formulas".
+            // If a referenced cell is "Hello", in =A1+B2, A1 should be treated as 0?
+            // Our computeCell returns "Hello" for non-formula text.
+            // JS evaluates: +0 + "Hello" -> "Hello"? No, we need numbers.
+            
+            const result = new Function(`return ${replacedExpr}`)();
+            return result.toString();
+        } catch (e) {
+            return '#ERR';
+        }
+    }
+
+    function recalculate() {
+        cols.forEach(c => {
+            rows.forEach(r => {
+                const id = `${c}${r}`;
+                const input = document.getElementById(`cell-${id}`);
+                if (!input || input === document.activeElement) return;
+                
+                // Re-evaluate computed value
+                const val = computeCell(id, new Set());
+                input.value = val;
+            });
+        });
+    }
+
+    function getComputedValue(id, visited) {
+        return computeCell(id, visited);
+    }
+
+    // API
+    window.sheet = {
+        set: (id, val) => {
+            const input = document.getElementById(`cell-${id}`);
+            if (input) {
+                rawValues[id] = val;
+                // If not focused, show computed immediately. If focused, update raw.
+                const isFocused = (input === document.activeElement);
+                if (!isFocused) {
+                    input.value = getComputedValue(id, new Set());
+                } else {
+                    input.value = val;
+                }
+                recalculate();
+            }
+        },
+        get: (id) => {
+            // Displayed string
+            const input = document.getElementById(`cell-${id}`);
+            return input ? input.value : '';
+        },
+        raw: (id) => {
+            // Raw text
+            return rawValues[id] || '';
+        }
+    };
+
+    // CSV Export
+    document.getElementById('export').addEventListener('click', () => {
+        const csvLines = [];
+        rows.forEach(r => {
+            const rowValues = [];
+            cols.forEach(c => {
+                const id = `${c}${r}`;
+                const input = document.getElementById(`cell-${id}`);
+                rowValues.push(input.value);
+            });
+            csvLines.push(rowValues.join(','));
+        });
+        document.getElementById('csv').value = csvLines.join('\n');
+    });
+
+    // Initialize
+    buildGrid();
+</script>
+</body>
+</html>

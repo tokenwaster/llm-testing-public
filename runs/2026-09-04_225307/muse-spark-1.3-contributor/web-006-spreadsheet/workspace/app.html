@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mini Spreadsheet</title>
+<style>
+  html,body{margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;background:#f4f4f4;}
+  #app{min-width:600px;min-height:400px;background:#fff;padding:12px;box-sizing:border-box;}
+  h1{font-size:18px;margin:0 0 10px 0;}
+  #grid{border-collapse:collapse;table-layout:fixed;}
+  #grid th,#grid td{border:1px solid #999;padding:0;text-align:center;}
+  #grid th{background:#e8e8e8;font-weight:bold;font-size:13px;min-width:28px;height:24px;padding:2px 6px;}
+  #grid td{padding:0;}
+  #grid input{width:72px;height:26px;border:0;outline:none;text-align:left;padding:2px 4px;font-size:13px;box-sizing:border-box;background:#fff;}
+  #grid input:focus{background:#fff8c4;}
+  #controls{margin:10px 0;}
+  #export{padding:6px 14px;font-size:14px;cursor:pointer;}
+  #csv{width:100%;min-width:580px;min-height:120px;box-sizing:border-box;font-family:monospace;font-size:12px;margin-top:8px;}
+  .hint{font-size:12px;color:#555;margin:6px 0;}
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Mini Spreadsheet</h1>
+  <div class="hint">Click a cell to edit raw text. Enter or click away to commit. Formulas start with =.</div>
+  <table id="grid" aria-label="spreadsheet"></table>
+  <div id="controls">
+    <button id="export" type="button">Export CSV</button>
+  </div>
+  <textarea id="csv" aria-label="csv output" placeholder="CSV output"></textarea>
+</div>
+<script>
+(function(){
+  var COLS = ["A","B","C","D","E","F","G","H","I","J"];
+  var ROWS = [1,2,3,4,5,6,7,8,9,10];
+  var raws = {};
+  var computed = {};
+  var inputs = {};
+
+  function cellId(c,r){ return c + r; }
+  function normCell(s){
+    if(typeof s!=="string") return null;
+    s = s.trim().toUpperCase();
+    if(/^[A-J]([1-9]|10)$/.test(s)) return s;
+    return null;
+  }
+  function allIds(){
+    var a=[];
+    for(var r=0;r<ROWS.length;r++) for(var c=0;c<COLS.length;c++) a.push(COLS[c]+ROWS[r]);
+    return a;
+  }
+  allIds().forEach(function(id){ raws[id]=""; computed[id]=""; });
+
+  // Build grid
+  var table = document.getElementById("grid");
+  var tr = document.createElement("tr");
+  var corner = document.createElement("th");
+  corner.textContent = "";
+  tr.appendChild(corner);
+  COLS.forEach(function(c){
+    var th=document.createElement("th");
+    th.textContent=c;
+    th.setAttribute("scope","col");
+    tr.appendChild(th);
+  });
+  table.appendChild(tr);
+  ROWS.forEach(function(r){
+    var row=document.createElement("tr");
+    var rh=document.createElement("th");
+    rh.textContent=r;
+    rh.setAttribute("scope","row");
+    row.appendChild(rh);
+    COLS.forEach(function(c){
+      var id=c+r;
+      var td=document.createElement("td");
+      var inp=document.createElement("input");
+      inp.type="text";
+      inp.id="cell-"+id;
+      inp.setAttribute("data-cell",id);
+      inp.value="";
+      inp.autocomplete="off";
+      inp.spellcheck=false;
+      (function(cell){
+        inp.addEventListener("focus",function(){
+          inp.value = raws[cell] !== undefined ? raws[cell] : "";
+          // select all for easy editing? keep cursor at end
+          // do not recalc on focus
+        });
+        inp.addEventListener("blur",function(){
+          var v = inp.value;
+          // commit only if changed? always commit + recalc
+          raws[cell]=v;
+          recalcAll();
+        });
+        inp.addEventListener("keydown",function(e){
+          if(e.key==="Enter"){
+            e.preventDefault();
+            inp.blur();
+          }
+        });
+        // live commit on change not needed; blur handles it
+      })(id);
+      td.appendChild(inp);
+      row.appendChild(td);
+      inputs[id]=inp;
+    });
+    table.appendChild(row);
+  });
+
+  function isNumericString(s){
+    if(s==="" ) return false;
+    // Use Number, but reject hex? Allow normal decimal + exponent
+    // Trim already done
+    // Empty, Infinity, NaN strings should be treated as non-numeric text
+    if(/^([+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?)$/.test(s)) return true;
+    return false;
+  }
+
+  function makeErr(){ var e=new Error("#ERR"); e.__err=true; return e; }
+  function makeCycle(){ var e=new Error("#CYCLE"); e.__cycle=true; return e; }
+
+  var memo, visiting;
+
+  function evalCell(id){
+    if(memo[id]!==undefined) return memo[id];
+    if(visiting.has(id)){
+      return {t:"cycle", display:"#CYCLE"};
+    }
+    visiting.add(id);
+    var res;
+    try{
+      var raw = raws[id];
+      if(raw===undefined||raw===null) raw="";
+      if(raw===""){
+        res={t:"empty", display:"", num:0};
+      } else if(raw[0]!=="="){
+        var trimmed = raw.trim();
+        if(trimmed===""){
+          res={t:"empty", display:raw, num:0};
+          // display raw whitespace? but for consistency keep raw
+          // for ref purposes treat as 0
+          res.display=raw;
+        } else if(isNumericString(trimmed)){
+          var n=Number(trimmed);
+          res={t:"number", value:n, display:raw.trim()===raw? raw : raw};
+          // Keep display as raw? Normalize? Use trimmed to avoid spaces?
+          // Use trimmed for cleaner display but spec says displays as itself.
+          // We'll display raw exactly.
+          res.display=raw;
+          // But ensure numeric value correct; display raw preserves typing.
+          // For get() consistency with input.value after recalc, input will show raw.
+        } else {
+          res={t:"string", display:raw};
+        }
+      } else {
+        var body=raw.slice(1);
+        if(body.trim()==="") throw makeErr();
+        var v=parseAndEval(body);
+        if(v && typeof v==="object" && v.__isString){
+          res={t:"string", display:v.value};
+        } else {
+          var num=v;
+          if(typeof num!=="number"||!isFinite(num)||isNaN(num)){
+            // NaN or Infinity from arithmetic -> treat div0 etc as ERR
+            // But allow? If non-finite, return ERR
+            if(typeof num==="number" && !isFinite(num)) throw makeErr();
+            if(typeof num==="number" && isNaN(num)) throw makeErr();
+          }
+          // Normalize -0 to 0
+          if(Object.is(num,-0)) num=0;
+          res={t:"number", value:num, display:String(num)};
+        }
+      }
+    }catch(e){
+      if(e && e.__cycle) res={t:"cycle", display:"#CYCLE"};
+      else res={t:"err", display:"#ERR"};
+    }
+    visiting.delete(id);
+    memo[id]=res;
+    return res;
+  }
+
+  function resolveRef(refId){
+    var dep=evalCell(refId);
+    if(dep.t==="cycle") throw makeCycle();
+    if(dep.t==="err") throw makeErr();
+    if(dep.t==="empty") return 0;
+    if(dep.t==="number") return dep.value;
+    if(dep.t==="string") return {__isString:true, value:dep.display};
+    throw makeErr();
+  }
+
+  function parseAndEval(s){
+    var i=0, n=s.length;
+    function skip(){ while(i<n && /\s/.test(s[i])) i++; }
+    function peek(){ skip(); return i<n? s[i]:null; }
+    function parseExpr(){
+      var v=parseTerm();
+      while(true){
+        skip();
+        if(i<n && (s[i]==="+"||s[i]==="-")){
+          var op=s[i]; i++;
+          var rhs=parseTerm();
+          v=applyPlusMinus(v,op,rhs);
+        } else break;
+      }
+      return v;
+    }
+    function parseTerm(){
+      var v=parseFactor();
+      while(true){
+        skip();
+        if(i<n && (s[i]==="*"||s[i]==="/")){
+          var op=s[i]; i++;
+          var rhs=parseFactor();
+          v=applyMulDiv(v,op,rhs);
+        } else break;
+      }
+      return v;
+    }
+    function parseFactor(){
+      skip();
+      if(i>=n) throw makeErr();
+      var ch=s[i];
+      if(ch==="+"||ch==="-"){
+        var sign=ch; i++;
+        var v=parseFactor();
+        if(v && typeof v==="object" && v.__isString) throw makeErr();
+        return sign==="+"? v : -v;
+      }
+      if(ch==="("){
+        i++;
+        var v=parseExpr();
+        skip();
+        if(i>=n||s[i]!==")") throw makeErr();
+        i++;
+        return v;
+      }
+      if(/[0-9.]/.test(ch)){
+        return parseNumber();
+      }
+      if(/[A-Za-z]/.test(ch)){
+        return parseRef();
+      }
+      throw makeErr();
+    }
+    function parseNumber(){
+      skip();
+      var start=i;
+      // match number
+      var numStr="";
+      // Use regex on remaining
+      var rest=s.slice(i);
+      var m=rest.match(/^(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?/);
+      if(!m) throw makeErr();
+      numStr=m[0];
+      i+=numStr.length;
+      var val=Number(numStr);
+      if(isNaN(val)) throw makeErr();
+      return val;
+    }
+    function parseRef(){
+      skip();
+      if(i>=n||!/[A-Za-z]/.test(s[i])) throw makeErr();
+      var lstart=i;
+      while(i<n&&/[A-Za-z]/.test(s[i])) i++;
+      var letters=s.slice(lstart,i);
+      var dstart=i;
+      while(i<n&&/[0-9]/.test(s[i])) i++;
+      var digits=s.slice(dstart,i);
+      if(letters.length===0||digits.length===0) throw makeErr();
+      var ref=(letters+digits).toUpperCase();
+      if(!/^[A-J]([1-9]|10)$/.test(ref)) throw makeErr();
+      var v=resolveRef(ref);
+      return v;
+    }
+    function isStr(v){ return v&&typeof v==="object"&&v.__isString; }
+    function applyPlusMinus(a,op,b){
+      if(isStr(a)||isStr(b)) throw makeErr();
+      if(typeof a!=="number"||typeof b!=="number") throw makeErr();
+      return op==="+"? a+b : a-b;
+    }
+    function applyMulDiv(a,op,b){
+      if(isStr(a)||isStr(b)) throw makeErr();
+      if(typeof a!=="number"||typeof b!=="number") throw makeErr();
+      if(op==="*") return a*b;
+      else{
+        if(b===0) throw makeErr();
+        return a/b;
+      }
+    }
+    var result=parseExpr();
+    skip();
+    if(i!==n) throw makeErr();
+    return result;
+  }
+
+  function recalcAll(){
+    memo={};
+    visiting=new Set();
+    var ids=allIds();
+    for(var k=0;k<ids.length;k++){
+      evalCell(ids[k]);
+    }
+    for(var j=0;j<ids.length;j++){
+      var id=ids[j];
+      var r=memo[id];
+      var disp="";
+      if(!r) disp="";
+      else disp=r.display;
+      computed[id]=disp;
+    }
+    // update DOM, skip focused element to preserve editing
+    var active=document.activeElement;
+    for(var t=0;t<ids.length;t++){
+      var cid=ids[t];
+      var inp=inputs[cid];
+      if(inp!==active){
+        var want=computed[cid];
+        if(inp.value!==want) inp.value=want;
+      }
+    }
+  }
+
+  function csvEscape(v){
+    if(v===null||v===undefined) v="";
+    v=String(v);
+    if(v.indexOf(",")>=0||v.indexOf('"')>=0||v.indexOf("\n")>=0||v.indexOf("\r")>=0){
+      return '"'+v.replace(/"/g,'""')+'"';
+    }
+    return v;
+  }
+
+  document.getElementById("export").addEventListener("click",function(){
+    var lines=[];
+    for(var r=1;r<=10;r++){
+      var row=[];
+      for(var ci=0;ci<COLS.length;ci++){
+        var id=COLS[ci]+r;
+        row.push(csvEscape(computed[id]!==undefined?computed[id]:""));
+      }
+      lines.push(row.join(","));
+    }
+    document.getElementById("csv").value=lines.join("\n");
+  });
+
+  window.sheet={
+    set:function(cell,text){
+      var id=normCell(cell);
+      if(!id) return;
+      if(text===null||text===undefined) text="";
+      text=String(text);
+      raws[id]=text;
+      recalcAll();
+      // if the target input is focused, update its editing? keep raw? For programmatic set, ensure display updated if not focused
+      // recalcAll already updated non-focused. If focused on same cell, keep focus value as raw for consistency
+      var inp=inputs[id];
+      if(document.activeElement===inp){
+        // show raw while editing? keep raw
+        // but to avoid confusion, set to raw
+        inp.value=text;
+      }
+    },
+    get:function(cell){
+      var id=normCell(cell);
+      if(!id) return "";
+      if(computed[id]!==undefined) return computed[id];
+      return "";
+    },
+    raw:function(cell){
+      var id=normCell(cell);
+      if(!id) return "";
+      if(raws[id]!==undefined) return raws[id];
+      return "";
+    }
+  };
+
+  recalcAll();
+})();
+</script>
+</body>
+</html>

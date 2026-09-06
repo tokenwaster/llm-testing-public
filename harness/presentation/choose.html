@@ -1,0 +1,68 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Find a model for your work · Token Waster</title><style>{{ css }}{{ experience_css }}</style></head><body>
+<div class="topbar">{{ brand }}<div class="nav">{{ nav }}</div></div>
+<main class="experience"><div class="intro"><h1>Find a model<br>for your work.</h1>
+<p>A shortlist from measured results, with the tradeoffs attached. Choose your work and constraints to see which models have the evidence to fit.</p>
+<p class="fine">Suite {{ version }} · measured through {{ asof }}{% if label %} · {{ label }}{% endif %}</p></div>
+<form class="decision-form" id="decision" aria-label="Model preferences">
+<label>Your work<select name="work"><option value="coding">Writing and fixing code</option><option value="documents">Understanding documents</option><option value="apps">Building interactive apps</option><option value="all">Across the whole suite</option></select></label>
+<label>Run it<select name="where"><option value="all">Anywhere</option><option value="local">On my computer</option><option value="api">Through an API</option><option value="cli">Through a CLI subscription</option></select></label>
+<label id="memory-label" hidden>GPU memory<select name="vram"><option value="any">Any / unknown</option><option value="8">8 GB</option><option value="12">12 GB</option><option value="16">16 GB</option><option value="24">24 GB</option><option value="32">32 GB</option><option value="48">48 GB</option></select></label>
+<label>Prefer<select name="prefer"><option value="quality">Higher measured quality</option><option value="speed">Faster completion</option><option value="cost">Lower API cost</option></select></label>
+</form>
+<div class="selection-summary"><p id="result-count" role="status" aria-live="polite"></p><button id="reset" type="button">Reset preferences</button></div>
+<div class="shortlist" id="shortlist"></div>
+<div class="actions"><button id="copy-selection" type="button">Copy this shortlist link</button><button id="csv" type="button">Download selected CSV</button><button id="json" type="button">Download selected JSON</button></div>
+<p class="copy-status" id="copy-status" role="status"></p>
+<details><summary>How this shortlist is made</summary><p>Each candidate must have a scored result for every task in your selected work. Scores average every scored run per task, then average those tasks equally. Speed and API-cost picks require a mean score of at least 0.80 and complete timing or price evidence. Subscription and local costs do not compete with metered API prices.</p>
+<p>GPU memory is the recorded peak for the tested setup, not a minimum hardware requirement or a fit guarantee. Context size and offload settings affect it. Models with no memory measurement are excluded when you set a memory limit. Repeated trials are disclosed, not assumed.</p>
+<a href="info.html">Read the methodology</a></details>
+<noscript><p>The interactive shortlist needs JavaScript. <a href="downloads/results.csv">Download all results as CSV</a> or <a href="index.html">browse the overview</a>.</p></noscript>
+</main><script>{{ shared_js }}</script><script>const D={{ data_json }};</script><script>
+(() => {
+ const {el,link}=Experience, form=document.getElementById('decision'), box=document.getElementById('shortlist'), status=document.getElementById('copy-status');
+ const profiles={coding:['coding-python','agentic'],documents:['long-context','extraction','hallucination'],apps:['one-shot-apps']};
+ const defaults={work:'coding',where:'all',vram:'any',prefer:'quality'}; let selected=[], taskIds=[];
+ function state(){return Object.fromEntries(Object.keys(defaults).map(k=>[k,form.elements[k].value]));}
+ function read(){const p=new URLSearchParams(location.search);for(const [k,v] of Object.entries(defaults)){const value=p.get(k);form.elements[k].value=Array.from(form.elements[k].options).some(o=>o.value===value)?value:v;}}
+ function render(){const s=state();document.getElementById('memory-label').hidden=s.where!=='local';form.classList.toggle('local',s.where==='local');
+   const noApiPrice=s.where==='local'||s.where==='cli';form.elements.prefer.querySelector('option[value="cost"]').disabled=noApiPrice;
+   if(noApiPrice&&s.prefer==='cost'){form.elements.prefer.value='quality';s.prefer='quality';}
+   taskIds=Object.keys(D.tasks).filter(t=>s.work==='all'||profiles[s.work].includes(D.tasks[t].category));
+   const eligible=[];
+   for(const [id,m] of Object.entries(D.models)){
+     if(s.where!=='all'&&m.kind!==s.where)continue;
+     if(s.where==='local'&&s.vram!=='any'&&(m.vram===null||m.vram>Number(s.vram)))continue;
+     const cells=taskIds.map(t=>m.cells[t]);if(!cells.length||cells.some(c=>!c||c.score===null))continue;
+     const score=cells.reduce((v,c)=>v+c.score,0)/cells.length;
+     const wall=cells.every(c=>c.wall!==null)?cells.reduce((v,c)=>v+c.wall,0)/cells.length:null;
+     const cost=m.kind==='api'&&cells.every(c=>c.cost!==null)?cells.reduce((v,c)=>v+c.cost,0)/cells.length:null;
+     if(s.prefer!=='quality'&&score<0.8)continue;
+     if(s.prefer==='speed'&&wall===null||s.prefer==='cost'&&cost===null)continue;
+     eligible.push({id,...m,score,wall,cost,repeated:cells.filter(c=>c.n>1).length});
+   }
+   eligible.sort((a,b)=>s.prefer==='quality'?b.score-a.score||a.id.localeCompare(b.id):a[s.prefer==='speed'?'wall':'cost']-b[s.prefer==='speed'?'wall':'cost']||b.score-a.score||a.id.localeCompare(b.id));
+   selected=eligible.slice(0,3);box.replaceChildren();
+   document.getElementById('result-count').textContent=`${eligible.length} models meet your preferences across ${taskIds.length} tasks. ${selected.length?'Showing up to three.':''}`;
+   for(const m of selected){const card=el('article',undefined,'choice');card.append(el('h2',m.name),el('span',m.id,'identity'));
+     const score=el('div',m.score.toFixed(3),'choice-score');score.append(el('small',' / 1.000'));card.append(score);
+     card.append(el('p',s.prefer==='quality'?'Among the highest measured means for this work.':s.prefer==='speed'?`Average completion: ${(m.wall/1000).toFixed(1)} seconds per task.`:`Average API cost: $${m.cost.toFixed(4)} per task.`));
+     const weakest=taskIds.reduce((a,b)=>m.cells[a].score<=m.cells[b].score?a:b);
+     card.append(link(m.cells[weakest].score===1?'All selected tasks scored 1.000. Inspect an example.':`Inspect weakest result: ${D.tasks[weakest].name} (${m.cells[weakest].score.toFixed(3)})`,`tasks/${weakest}.html#m-${m.slug}`,''));
+     card.append(el('p',`${m.repeated}/${taskIds.length} tasks repeated. `+(m.repeated===taskIds.length?'Every selected task has repeat evidence.':`${taskIds.length-m.repeated} measured once; their repeatability is unknown.`),'evidence-line'));
+     if(m.kind==='local')card.append(el('p',m.vram===null?'GPU memory was not recorded.':`Recorded GPU peak: ${m.vram} GB. Check test conditions before choosing hardware.`,'fine'));
+     const actions=el('div',undefined,'actions');actions.append(link('Inspect model',`models/${m.slug}.html`));
+     if(selected.length>1){const other=selected.find(x=>x.id!==m.id);actions.append(link('Compare',`compare.html?a=${encodeURIComponent(m.id)}&b=${encodeURIComponent(other.id)}&scope=${s.work}&view=disagree`));}card.append(actions);box.append(card);
+   }
+   if(!selected.length){const empty=el('div',undefined,'empty');empty.append(el('h2','No measured model meets these preferences.'),el('p','Try a larger memory limit, another deployment option, or higher-quality picks. Missing measurements are not treated as a pass or a free result.'));box.append(empty);}
+   const u=new URL(location);for(const [k,v] of Object.entries(s))u.searchParams.set(k,v);history.replaceState(null,'',u);
+ }
+ form.addEventListener('submit',e=>e.preventDefault());form.addEventListener('change',render);
+ document.getElementById('reset').onclick=()=>{for(const [k,v] of Object.entries(defaults))form.elements[k].value=v;render();};
+ document.getElementById('copy-selection').onclick=()=>Experience.copy(location.href,status);
+ const exportData=()=>({version:D.version,asof:D.asof,preferences:state(),tasks:taskIds,models:selected.map(m=>({model:m.id,score:m.score,mean_wall_ms:m.wall,mean_api_cost_usd:m.cost,cells:Object.fromEntries(taskIds.map(t=>[t,m.cells[t]]))}))});
+ document.getElementById('json').onclick=()=>Experience.download('model-shortlist.json',JSON.stringify(exportData(),null,2),'application/json');
+ document.getElementById('csv').onclick=()=>Experience.download('model-shortlist.csv',Experience.csv([['version','asof','model','task','score','scored_runs','wall_ms','api_cost_usd','receipt'],...selected.flatMap(m=>taskIds.map(t=>[D.version,D.asof,m.id,t,m.cells[t].score,m.cells[t].n,m.cells[t].wall,m.cells[t].cost,m.cells[t].receipt]))]),'text/csv;charset=utf-8');
+ window.addEventListener('popstate',()=>{read();render();});read();render();
+})();
+</script></body></html>

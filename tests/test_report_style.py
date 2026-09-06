@@ -4,7 +4,7 @@ import pytest
 
 from harness import config
 
-SRC = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+SRC = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
 
 THEMES = {
     "dark":  dict(cell=(242, 242, 240), surface=(0x1a, 0x1a, 0x19),
@@ -136,7 +136,7 @@ def test_the_shared_shell_carries_its_own_narrow_override():
 
 
 def test_the_mobile_block_does_not_restate_the_body_padding():
-    base = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    base = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     j = base.index(".topbar { flex-direction:column")
     window = base[max(0, j - 400):j]
     assert "body { padding:20px 15px 56px; }" not in window, (
@@ -172,14 +172,14 @@ def test_the_social_links_flow_after_the_reading_column():
 
 
 def test_the_rail_is_injected_once_per_page():
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     assert 'class="srail"\' not in html' in src, (
         "the write hook must not double-inject when a page already has a rail")
     assert 'html.replace("</body>", _social_rail() + "</body>", 1)' in src
 
 
 def test_a_tie_lists_every_model_not_just_the_first():
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     assert "_tied_disclosure" in src
     i = src.index("def _tied_disclosure")
     body = src[i:i + 700]
@@ -430,8 +430,8 @@ def test_no_css_or_js_comments_survive_inside_page_strings():
 
 
 def test_the_compare_dropdowns_are_alphabetical_not_ranked():
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
-    assert "D.names.map(m =>" in src, (
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
+    assert "for(const m of D.names)" in src, (
         "the option list must come from the alphabetical D.names, not the "
         "score-ranked D.models")
     assert '"names": sorted(ranked, key=str.lower)' in src
@@ -440,7 +440,7 @@ def test_the_compare_dropdowns_are_alphabetical_not_ranked():
 
 
 def test_compare_state_and_decision_are_shareable():
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     for hook in ("cmp-verdict", "data-view=\"disagree\"", "D.tiers[tid]",
                  "u.searchParams.set('view',view)", "Copy comparison link"):
         assert hook in src, hook
@@ -463,7 +463,7 @@ def test_editorial_evidence_surfaces_render_from_live_data():
         assert hook in model_html, hook
     tid = "web-013-billiards"
     task_html = rp.build_task_report(tid, td[tid], tdefs[tid])
-    assert "Evidence stage" in task_html and "Best recorded build" in task_html
+    assert "See what happened" in task_html and "Best recorded build" in task_html
 
 
 def test_token_averages_render_as_whole_tokens():
@@ -473,7 +473,7 @@ def test_token_averages_render_as_whole_tokens():
 
 
 def test_the_swap_button_sits_in_the_same_grid_column_as_the_divider():
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     row = re.search(r"\n\.cmp-row \{[^}]*grid-template-columns:([^;]+);", src)
     pick = re.search(r"\n\.cmp-pick \{[^}]*grid-template-columns:([^;]+);", src)
     assert pick, ".cmp-pick must be a grid to line up with the data rows"
@@ -487,7 +487,7 @@ def test_the_swap_button_sits_in_the_same_grid_column_as_the_divider():
 
 
 def test_the_picker_stacks_on_a_narrow_screen():
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     i = src.index(".cmp-swap:hover")
     window = src[max(0, i - 500):i]
     assert "@media (max-width:760px)" in window
@@ -499,7 +499,7 @@ def test_the_picker_stacks_on_a_narrow_screen():
 
 def test_the_matrix_has_a_cohort_selector():
     from harness import config
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     assert 'id="mxcoh"' in src
     for coh in ("all", "local", "remote"):
         assert f'data-coh="{coh}"' in src, coh
@@ -511,7 +511,7 @@ def test_the_matrix_has_a_cohort_selector():
 
 def test_the_two_matrix_axes_are_independent():
     from harness import config
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     i = src.index("var sub='all', cohort='all';")
     seg = src[i:i + 4000]
     assert "function inCohort(r)" in seg and "function showCell(c)" in seg, (
@@ -525,7 +525,7 @@ def test_the_two_matrix_axes_are_independent():
 
 def test_the_matrix_average_row_recomputes_per_cohort():
     from harness import config
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     assert "function refoot(live)" in src
     i = src.index("function refoot(live)")
     seg = src[i:i + 1400]
@@ -560,7 +560,7 @@ def test_a_scored_cell_carries_its_value_whatever_it_looks_like():
 
 def test_the_matrix_footer_label_names_the_cohort():
     from harness import config
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     i = src.index("var fl=foot&&foot.querySelector('.fl');")
     seg = src[i:i + 260]
     for word in ("fleet", "local", "API/CLI"):
@@ -594,7 +594,7 @@ def test_a_task_that_splits_the_fleet_counts_as_hard():
 
 def test_the_spread_rule_is_reached_before_floor_gate():
     from harness import config
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     i = src.index('flag = "dead"')
     ladder = src[i:i + 700]
     spread = ladder.index("sd >= 0.28")

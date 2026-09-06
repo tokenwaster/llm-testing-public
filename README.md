@@ -13,6 +13,16 @@ request that produced it.
 
 ## Browsing the results
 
+Start with **Find a model** for a shortlist based on your work, deployment and
+measured constraints. **Stories** pairs saved model submissions with the behavior
+required and the checker's actual observations. **Compare** preserves your selected
+work and offers task-matched uncertainty where the recorded conditions support it.
+
+Each report provides a citation and a downloadable share image. CSV/JSON downloads
+keep the evidence links, task hashes, measurement counts and dataset version.
+Unmeasured prices and repeatability remain explicitly unknown. Public receipts
+may redact sensitive strings; the benchmark's local originals remain intact.
+
 ### Prerequisite: Python 3.11 or newer
 
 Install it first — the commands below won't run without it.

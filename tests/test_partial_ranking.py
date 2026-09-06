@@ -2,7 +2,7 @@ import re
 
 from harness import config
 
-SRC = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+SRC = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
 
 
 def _block(start: str, length: int = 1400) -> str:

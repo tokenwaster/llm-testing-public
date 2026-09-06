@@ -1,9 +1,34 @@
 # Public release — the boundary
 
 We develop everything in one private repo and **export an allowlisted subset** to
-a separate public GitHub repo. The export is a *whitelist*: a new file is private
-by default and only becomes public if it's deliberately added to the allowlist.
-A leak therefore requires a mistake of commission, never one of omission.
+a separate public GitHub repo. Instrument modules and top-level files are explicitly
+allowlisted in `harness/boundary.py`. The selected evidence trees (`runs/`,
+`archive/`, `special/`) are recursive: new receipts inside them are public by
+default. Private files, linked paths and credential-shaped content are checked
+before release. Generated reports are rebuilt rather than copied from local output.
+
+## Current browser and publication safeguards
+
+Reports enforce a CSP based on the final inline-script bytes. The hosting headers
+also provide a stricter report-only policy for evaluating future tightening.
+Generated apps run in sandboxed previews without same-origin access or network
+access. A temporary storage adapter allows interaction; it does not reproduce
+persistence across reloads. The raw-data viewer serves HTML/SVG as plain text.
+
+Export scrubbing applies to both copied receipts and regenerated report bytes.
+The credential scanner recognizes common token/private-key shapes; it is a
+backstop, not a proof that no possible secret exists. Original local receipts
+remain unchanged; public redactions are disclosed in export logs.
+
+Publishing first commits the outgoing public evidence, then pins report and
+download links to that public commit in a second commit. This avoids circular
+self-references and gives citations an immutable evidence target. No private
+commit ID or history is used. A local publish does not push; `--push` still
+requires explicit operator authorization.
+
+The model finder, three evidence stories and comparison downloads all use the
+same scored-run aggregate. Featured comparisons have individual social images;
+arbitrary selected comparisons can download a share image in the browser.
 
 ## What's public — the instrument + the receipts
 

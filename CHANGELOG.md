@@ -26,6 +26,52 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+### Public decisions, evidence stories and safer sharing
+
+The public site now includes a model finder for coding, documents and interactive
+apps, with deployment, recorded GPU-memory, quality, completion-time and API-cost
+preferences. Shortlists require complete evidence for their selected tasks and
+disclose single measurements. Their comparisons retain the selected work scope.
+
+Three evidence stories pair individual attempts with expected behavior, recorded
+checker failures and selectable saved artifacts. Previews load on request with
+parent access and network access blocked; temporary storage permits interaction
+without granting origin access. Replay limitations are explicit.
+
+Navigation and model names are readable without losing exact run identities.
+Cost disclosures distinguish API, subscription and local measurements. Missing
+prices stay unavailable, including comparisons and run totals. Eight authentication
+failure cells in `2026-09-04_185154/claude-cli-fable-5-1` were corrected to unscored
+with operator approval; adjacent audits preserve original score records and hashes.
+
+The overview describes measured gaps without claiming a statistical tie from a
+fixed threshold. Comparisons offer deterministic paired task bootstrap intervals
+only for matching task hashes and recorded conditions, with explicit exclusions
+and limits. Task spread and repeatability remain distinct.
+
+Reports provide citations, selected-view CSV/JSON and downloadable share images.
+Page-specific social previews include dataset and evidence dates; three featured
+comparison pages have permanent URLs. Local publishing commits an evidence
+snapshot before pinning report receipts to its public commit hash.
+
+### Export boundary and presentation maintenance
+
+Exporter, publisher and tests share `harness/boundary.py`. Reports regenerate
+instead of copying the local report/debug tree. Final output is scrubbed and
+scanned for credential-shaped content, private files and linked paths; raw local
+receipts remain unchanged. The public viewer serves raw HTML/SVG as text, and
+generated reports use CSP hashes calculated after final transformations. A stricter
+report-only hosting policy supports further tightening without breaking the UI.
+
+Seventeen presentation assets were extracted from the report module. Regex comment
+removal no longer rewrites generated HTML: it corrupted JavaScript strings holding
+verbatim model output. Generated-script syntax checks cover this boundary.
+
+Three recovery/compatibility/source-precedence candidates remain in staging. Each
+scores 1.0 on its reference and 0.0 on empty and trap submissions. Receipts are in
+`docs/EXPERIENCE-CANDIDATE-VERIFICATION.json`. They do not enter public scores until
+a separate calibration and dataset-admission release.
+
 ## 0.7.16 — family briefings and current field notes
 
 ### Family briefings and current field notes

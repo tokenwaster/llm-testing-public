@@ -33,6 +33,7 @@ class _T:
         self.category = "reasoning"
         self.tier = 1
         self.title = tid
+        self.content_hash = tid
 
 
 def _tdefs():

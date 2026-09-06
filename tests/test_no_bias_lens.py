@@ -78,7 +78,7 @@ def test_the_lens_is_wired_into_the_overview():
     from pathlib import Path
 
     from harness import config
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     assert 'data-f="nobias"' in src
     assert "nobias:  {label:'No Bias'" in src
     assert 'data-nobias="{{ r.nobias_v }}"' in src
@@ -113,7 +113,7 @@ def test_the_ambient_default_is_read_from_settings_not_invented():
 
 def test_the_effort_section_and_row_are_wired():
     from harness import config
-    src = (config.ROOT / "harness" / "report.py").read_text(encoding="utf-8")
+    src = ((config.ROOT / "harness" / "report.py").read_text(encoding="utf-8") + "\n" + "\n".join(p.read_text(encoding="utf-8") for p in sorted((config.ROOT / "harness" / "presentation").glob("*"))))
     assert 'id="effort"' in src
     assert "Reasoning effort (as tested)" in src
     assert "info.html#effort" in src

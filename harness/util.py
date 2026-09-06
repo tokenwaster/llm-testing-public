@@ -221,27 +221,11 @@ def truncate(text: str, limit: int) -> str:
     return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
 
 
-import re as _re
-
-_C_BLOCK = _re.compile(r"/\*.*?\*/", _re.S)
-_C_WHOLE = _re.compile(r"(?m)^[ \t]*//[^\n]*\n")
-_C_INLINE = _re.compile(r"(?<=\S)[ \t]+//[^\n]*")
-_C_BLANK = _re.compile(r"\n{3,}")
-_PRE = _re.compile(r"<pre\b[^>]*>.*?</pre>", _re.S | _re.I)
-
-
 def strip_output_comments(s: str) -> str:
-    out, last = [], 0
-    for m in _PRE.finditer(s):
-        out.append(_strip_css_js(s[last:m.start()]))
-        out.append(m.group(0))
-        last = m.end()
-    out.append(_strip_css_js(s[last:]))
-    return "".join(out)
+    """Compatibility entry point: preserve generated documents exactly.
 
-
-def _strip_css_js(s: str) -> str:
-    s = _C_BLOCK.sub("", s)
-    s = _C_WHOLE.sub("", s)
-    s = _C_INLINE.sub("", s)
-    return _C_BLANK.sub("\n\n", s)
+    Regex comment removal corrupted quoted JavaScript, JSON evidence and srcdoc
+    attributes. Comments cost little; changing executable or evidence bytes costs
+    correctness. Source-specific Python/YAML export processing is separate.
+    """
+    return s

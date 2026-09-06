@@ -3,28 +3,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-PUBLIC = {"config", "util", "registry", "tasks", "adapters", "scoring", "runner",
-          "telemetry", "tools", "lmstudio", "gguf", "report", "fit", "archive",
-          "assess", "rescore", "discover", "interfaces", "viewer"}
-PRIVATE = {"watch", "jobs", "review", "scout", "rename"}
-
-
 def test_public_modules_never_import_private_ones():
-    offenders = []
-    for mod in PUBLIC:
-        f = ROOT / "harness" / f"{mod}.py"
-        if not f.is_file():
-            continue
-        src = f.read_text(encoding="utf-8")
-        imported = set(re.findall(r"from \.(\w+) import", src))
-        imported |= {n.strip() for m in re.findall(r"from \. import ([\w, ]+)", src)
-                     for n in m.split(",")}
-        for p in imported & PRIVATE:
-            offenders.append(f"{mod} imports {p}")
-        if re.search(r"(from studio|import studio)\b", src):
-            offenders.append(f"{mod} imports studio")
-    assert not offenders, "public instrument reaches into the operator layer: " \
-        + "; ".join(offenders)
+    from harness.boundary import PUBLIC_HARNESS, _verify_no_private_imports
+    hits = _verify_no_private_imports(ROOT / "harness")
+    assert not [h for h in hits if h.split(":")[0] in PUBLIC_HARNESS]
 
 
 def test_public_and_operator_builds_default_to_different_ports():
