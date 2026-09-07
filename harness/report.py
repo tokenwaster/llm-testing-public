@@ -4787,10 +4787,10 @@ def generate_all(runs_dir: Path | None = None, out_dir: Path | None = None,
         def _w(path, html):
             if "</body>" in html and 'class="srail"' not in html:
                 html = html.replace("</body>", _social_rail() + "</body>", 1)
-            from .experience import sharing_footer
+            from .experience import sharing_footer, report_version
             from .security import secure_report
             prefix = "../" * len(path.relative_to(out_dir).parts[:-1])
-            version = runs[-1]["manifest"].get("suite_version", config.suite_version()) if runs else config.suite_version()
+            version = report_version(runs)
             asof = max((r["manifest"].get("finished") or r["manifest"].get("started") or "" for r in runs), default="")
             html = sharing_footer(html, version, asof, prefix)
             path.write_text(secure_report(strip_output_comments(html)), encoding="utf-8")

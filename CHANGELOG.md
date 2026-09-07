@@ -26,6 +26,21 @@ that version — there is never an `## Unreleased` stranded between two releases
 
 ## Unreleased
 
+## 0.7.17 — public experience and release safeguards
+
+### Release version labels and startup feedback
+
+Live reports, citations and downloads now show the current release version;
+archived reports retain their recorded dataset version. Recorded run manifests
+are unchanged. The results server announces report checking/rebuilding immediately
+and prints elapsed preparation time. Startup skips report generation while a
+benchmark is active so it cannot interfere with timing-sensitive measurements.
+
+Measured locally: cached starts were about 0.95 seconds; an uncached rebuild took
+21 seconds before the server listened, and one first attempt exceeded 90 seconds.
+An instrumented full render took 22 seconds, including 8 seconds constructing CSP
+policies. These are diagnostic observations, not benchmark results or guarantees.
+
 ### Public decisions, evidence stories and safer sharing
 
 The public site now includes a model finder for coding, documents and interactive

@@ -31,6 +31,13 @@ def _score(entry):
     return s.get('score') if s.get('status') == 'scored' else None
 
 
+def report_version(runs) -> str:
+    from . import report
+    if report._DATASET_KEY == 'live' or not runs:
+        return config.suite_version()
+    return runs[-1]['manifest'].get('suite_version', config.suite_version())
+
+
 def dataset(runs, tdefs):
     from . import report
     td = report.collect_task_data(runs)
@@ -82,7 +89,7 @@ def dataset(runs, tdefs):
                        'vram': round(peak / 1024, 1) if peak else None, 'cells': cells}
     return {'models': data,
             'tasks': {tid: {'name': t.title, 'category': t.category, 'hash': t.content_hash} for tid, t in tdefs.items()},
-            'version': (runs[-1]['manifest'].get('suite_version') if runs else config.suite_version()),
+            'version': report_version(runs),
             'asof': max((r['manifest'].get('finished') or r['manifest'].get('started') or '' for r in runs), default=''),
             'aggregation': 'Mean of every scored run per model/task; unscored attempts excluded.'}
 

@@ -115,3 +115,12 @@ def test_viewer_preserves_a_published_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(viewer.report, 'generate_all', unexpected)
     viewer.serve(9001)
 
+
+def test_live_report_release_version_is_separate_from_recorded_run_version(monkeypatch):
+    monkeypatch.setattr(report, '_model_prefs', lambda: ({}, set()))
+    monkeypatch.setattr(report.config, 'suite_version', lambda: '0.7.17')
+    runs = [{'run_id': 'r', 'manifest': {'suite_version': '0.7.16'}, 'results': []}]
+    monkeypatch.setattr(report, '_DATASET_KEY', 'live')
+    assert experience.dataset(runs, {})['version'] == '0.7.17'
+    monkeypatch.setattr(report, '_DATASET_KEY', '0.7')
+    assert experience.dataset(runs, {})['version'] == '0.7.16'
